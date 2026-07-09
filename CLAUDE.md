@@ -35,6 +35,10 @@ save time — the teaching *is* the deliverable.
 - **Language: Go.** The user is learning Go *alongside* the domain. When introducing a Go idiom
   (goroutines, channels, `context`, mutexes, interfaces, error handling) that a newcomer might not
   know, briefly explain it. Don't assume deep Go fluency.
+  - **Record every new idiom in `docs/GO_NOTES.md`** as it comes up. Record what *surprised* us —
+    traps that compile fine and fail at runtime (⚠️), and C++/Python parallels. Don't restate the
+    stdlib docs. Check it before re-explaining something; if it's already there, link rather than
+    repeat.
 
 ### Quizzing (the user asked for "mixed")
 - **Quick checks after each concept:** 2–4 short questions right after teaching a concept, *before*
@@ -67,8 +71,8 @@ save time — the teaching *is* the deliverable.
 2. If something was flagged shaky, offer to revisit it before new material — re-ask the carried-
    forward questions from `docs/QUIZZES.md` cold.
 3. Teach the next concept → quick-check quiz → build → measure.
-4. Update `docs/PROGRESS.md` **and** `docs/QUIZZES.md` at the end of the session (and after each
-   milestone).
+4. Update `docs/PROGRESS.md`, `docs/QUIZZES.md`, **and `docs/GO_NOTES.md`** at the end of the session
+   (and after each milestone).
 
 ---
 
