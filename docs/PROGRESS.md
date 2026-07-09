@@ -11,8 +11,11 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1** — first real Go: naive single-node cache (hash-map store, thread
-  safety, TTL, then LRU eviction). Teach Go idioms as they appear.
+- **Next action:** **Phase 1, step 3 — TTL expiry.** (Step 2 done: mutex + `race_test.go` green.)
+  Open the session with a quick-check on Session 4's material (data race vs race condition, the 5
+  failure modes, why `Get` locks) — no formal quiz was taken.
+- **Deferred, on purpose:** (a) `sync.RWMutex` — only after we *measure* a read-heavy benchmark and
+  can show `Mutex` is the bottleneck; (b) `SetIfAbsent` — the caller-side check-then-act gap.
 - **Flagged for review:** two spots needed correction during the failure-mode quiz and were
   re-taught (appear solid now, worth a light re-check before Phase 4/5):
   (a) **available ≠ fully-replicated** — reads can be served while the cluster is still one copy
@@ -33,7 +36,7 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 
 ### Phase 1 — Single-node cache
 - ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
-- ◐ Concurrency / races — TAUGHT & demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`); mutex fix written & proven green, then temporarily reverted to the naive version so the "before" is committed first. Mutex + `race_test.go` land in the next commit.
+- ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
 - ☐ TTL expiry
 - ☐ LRU eviction
 
@@ -64,6 +67,52 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 ---
 
 ## Session log
+### Session 4 — 2026-07-09
+- **`cache/race_test.go` written** — 100 goroutines × 100 writes of *disjoint* keys into the naive
+  map. No assertions by design: the pass/fail signal is the Go **runtime**, not `t.Errorf`. Verified
+  both failure paths live — plain `go test` → `fatal error: concurrent map writes` at `cache.go:22`;
+  `go test -race` → `WARNING: DATA RACE`, two goroutines writing the *same address* despite disjoint
+  keys (proof that the shared thing is the map's **buckets/growth flag**, not the value slots).
+- **Test simplified** to Go 1.25's `wg.Go(func(){...})` (bundles `Add(1)` + `go` + `defer Done()`,
+  making the "Add must precede `go`" bug unrepresentable) + `for i := range n`. `go vet` clean; both
+  failure signals still fire. Kept disjoint keys deliberately — they carry the lesson.
+- **Go idioms taught:** goroutines (vs `std::thread` / Python threads, no GIL); `sync.WaitGroup`
+  (zero value usable, no constructor); `defer` (= C++ RAII / `try...finally`); loop-var capture and
+  why Go 1.22 retired the `func(id int){...}(g)` workaround; `strconv.Itoa` (= `std::to_string` /
+  `str()`), why Go forbids `"k" + intVal`, and the `string(65) == "A"` trap.
+- **Data race vs race condition** — data race = mechanical memory property (same address, ≥1 write,
+  no synchronization) → **undefined behavior**, machine-detectable. Race condition = correctness
+  depends on interleaving; defined relative to intent, so **not** machine-detectable. Not the same
+  set: the read-modify-write counter (`Get` → `+1` → `Set`, each individually locked) has **zero**
+  data races and is still wrong — **check-then-act**. Slogan: *the mutex protects the data, not the
+  invariant*; the atomic unit must be the operation the **caller** cares about (→ motivates a future
+  `SetIfAbsent`). Flagged as the single-machine miniature of the whole distributed problem.
+- **The 5 failure modes of unsynchronized shared memory** (escalating severity): (1) **lost update**
+  — `counter++` is load/add/store; demoed live, 100 goroutines × 1000 incs gave 97938 / 95007 / 96209
+  across three runs, never 100000, never the same twice; (2) **corrupted data structure** — map
+  rehash breaks cross-field invariants (our test); (3) **torn values** — slice `(ptr,len,cap)` and
+  interface `(type,data)` are multi-word, half-written → *memory unsafety in a language with no
+  pointer arithmetic*; (4) **stale reads / visibility** — compiler hoists the load out of the loop →
+  infinite loop; atomicity isn't the issue, **publication** is; (5) **reordering** — `data=42;
+  ready=true` may become visible out of order. Punchline: which one you get is unpredictable — that
+  *is* what UB means, and it's why "ran it 1000× and it was fine" is worthless.
+- **Mutex = mutual exclusion + publication barrier** (the half people forget): everything written
+  before `Unlock` is visible to whoever `Lock`s next. Kills all 5 modes at once.
+- **Cross-language check:** the problem and the primitives are universal (`std::mutex`,
+  `threading.Lock`, `synchronized`, `Mutex<T>`, `Interlocked`). What varies: **consequences** (C++/Go
+  = UB; **Java defines racy reads** — no fabricated values, no corruption, but non-`volatile`
+  `long`/`double` may tear), **prevention** (Rust makes data races a *compile error* via ownership /
+  `Send`+`Sync`, and `Mutex<T>` holds the data *inside* the lock — but Rust still permits race
+  conditions and deadlocks), and **tooling**. Python's GIL half-protects: `dict` internals stay sane,
+  but `counter += 1` is several bytecodes → lost updates anyway; free-threaded Python (PEP 703)
+  removes that accidental safety net. JS dodges it with one event loop until `SharedArrayBuffer`.
+  Go's actual contributions: `-race` in the toolchain, the runtime's own map guard, and channels as
+  an alternative discipline — **not** the mutex itself.
+- Reinforced: Go's `sync.Mutex` and the map it guards are *separate fields* — nothing forces the
+  association, forgetting to lock compiles fine. (Contrast Rust's `Mutex<T>`.)
+- No formal quiz this session (Aayush opted to keep moving). Concepts above were taught in a
+  question-driven back-and-forth; **worth a quick-check at the top of Session 5** before TTL.
+
 ### Session 3 — 2026-07-08
 - Confirmed HLD §6.2 failure-mode catalog present (line 206) — user had missed it (it's a
   subsection of §6, not a top-level section).

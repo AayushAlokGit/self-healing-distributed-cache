@@ -66,6 +66,28 @@ save time — the teaching *is* the deliverable.
 
 ---
 
+## Commands
+
+Run both before every commit. They catch different things:
+
+```
+go vet ./...          # compiles-but-wrong: copied mutexes, bad Printf verbs, ...
+go test -race ./...   # runs-but-wrong: data races
+```
+
+`./...` means "this module, all packages, recursively."
+
+**`go vet` is not optional even though `go test` runs vet for you.** `go test` runs only a
+high-confidence subset (`go help test` lists it) — and **`copylocks` is not in that subset**. A
+function taking `Cache` by value instead of `*Cache` copies the mutex, silently breaking mutual
+exclusion, and `go test ./...` passes. Only standalone `go vet` catches it.
+
+`go test -race` compiles in the race detector. It flags the unsynchronized *access pattern* rather
+than waiting for a bad outcome, so it's the only trustworthy concurrency check — a racy program can
+pass a plain `go test` a thousand times and still be undefined behavior.
+
+---
+
 ## The roadmap
 
 Full curriculum with phases, concepts, and demo checkpoints lives in `docs/ROADMAP.md`.
