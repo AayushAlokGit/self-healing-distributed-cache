@@ -26,7 +26,7 @@ func TestConcurrentSetRace(t *testing.T) {
 		// so wg.Wait() below blocks until the closure returns.
 		wg.Go(func() {
 			for i := range writesEach {
-				c.Set("k"+strconv.Itoa(g)+"-"+strconv.Itoa(i), "v")
+				c.Set("k"+strconv.Itoa(g)+"-"+strconv.Itoa(i), "v", 0)
 			}
 		})
 	}
