@@ -230,6 +230,155 @@ and only one scales to the parts of this system where intuition has no training 
 
 ---
 
+## Session 4b — 2026-07-09 · TTL (before writing the code)
+
+Phase 1, step 3. **Result: 2 ✅ · 1 ❌ · 1 ⊘.**
+
+---
+
+### Q1 — Why store the absolute deadline, not the duration?
+**Model answer.** The duration version needs a second field, `setAt`, and then every read costs an
+addition (`setAt + ttl`) before the comparison. Storing `expires` does that addition **once, at write
+time**. Caches are read-heavy, so that's the right place to pay.
+
+**Aayush: ✅** — got both the extra state and the sufficiency of `now > expires`.
+
+---
+
+### Q2 — The naive one-timer-per-key bug on overwrite
+> `Set("k","a",30s)`, then 2s later `Set("k","b",10*time.Minute)`. Walk through t=30s.
+
+**Model answer.**
+```
+t=0s    Set("k","a",30s)     → goroutine A sleeps 30s
+t=2s    Set("k","b",10min)   → goroutine B sleeps 10min
+t=30s   A wakes              → Delete("k")   ← deletes "b"!
+t=602s  B wakes              → Delete("k")   ← no-op
+```
+At t=30s the key no longer holds `"a"`; it holds `"b"`, with 9.5 minutes left. **Goroutine A destroys
+live data.** The bug is not a race between A and B — it's that **A holds a stale belief about what
+it's deleting**. It deletes by *key*, not by *value* or *deadline*. The failure is **silent**: no
+panic, no error, no `-race` warning. Just data gone early.
+
+Note the fix: if A re-checked `entry.expired(now)` under the lock instead of trusting its own timer,
+it would find `"b"`'s deadline in the future and leave it alone. **Compare, don't remember** — which
+is the whole insight behind lazy expiry.
+
+Go fact: `delete(m, k)` on an absent key is a **no-op** — no panic, no error. Unlike C++'s
+`std::map::at()`. So B at t=602s does nothing at all, harmlessly.
+
+**Aayush: ❌** — spotted the two goroutines, but predicted "the second finds the key missing and may
+**fail**." Wrong twice: `delete` of an absent key can't fail, and the real bug is the *first*
+goroutine deleting live data. **Gap: expects concurrency bugs to crash.** They don't — lost updates,
+torn values, premature deletion are all silent. → re-ask cold.
+
+---
+
+### Q3 — Where does "an unread expired key is indistinguishable from a deleted one" break?
+**Model answer.** The claim holds **only through the `Get`/`Set` API**. Widen the observer and it
+collapses, three ways:
+1. **Memory.** Watch the heap and the entry is plainly there. (This is Q4's leak, arriving from the
+   other direction.)
+2. **Introspection.** The moment the cache exposes `Len()`, `Keys()`, a stats endpoint, or the
+   Phase 6 dashboard, corpses show up. `Len()` would report 86 million.
+3. **Capacity interaction (bites us in step 4).** LRU eviction has a size limit. Expired-but-present
+   entries **occupy capacity**, so the cache fills with corpses, hits its limit, and evicts a **live**
+   key while thousands of dead ones sit untouched. Lazy expiry silently sabotages the eviction policy.
+
+The honest statement: **lazy expiry is correct with respect to *value* semantics and wrong with
+respect to *resource* semantics.** Values behave perfectly; memory, size, and capacity do not. That
+seam is exactly where the sweeper goes.
+
+**Aayush: ⊘** — flagged as unsure, correctly; the hardest of the four. Taught instead.
+
+---
+
+### Q4 — A workload that grows unboundedly under lazy expiry only
+**Model answer.** A **session cache**: 1,000 logins/sec, each storing `session:<uuid>` with a 30-min
+TTL, read a few times during the visit and never again. At any instant ~50,000 sessions are live. The
+map grows 1,000 entries/sec **forever** — 86M/day — of which 99.9% are corpses no `Get` will ever
+touch, so no `Get` will ever reclaim them. Logically 50k keys; physically 86M.
+
+**Aayush: ✅** — right mechanism ("expired keys no longer accessed accumulate"). Sharpened with the
+concrete workload and the numbers. Later measured for real: **40.9 MB for 200k keys, surviving a
+forced GC.**
+
+---
+
+## Session 4c — 2026-07-09 · The sweeper (before writing the code)
+
+Phase 1, step 3b. **Result: 1 ✅ · 1 ⚠️ · 1 half.**
+
+---
+
+### Q1 — Why can't the sweeper unlock every 1,000 keys to shorten the pause?
+**Model answer.** Two reasons, one fatal.
+
+*Minor:* **Go randomizes map iteration order on every `range`**, deliberately. There is no cursor, no
+index, no "resume from key 1,000." Abandon the loop and start a new `range` and you begin at a fresh
+random point — some keys visited twice, others never.
+
+*Fatal:* keep the same `range` alive and merely unlock inside the body, and during the gap another
+goroutine calls `Set(k, "fresh", time.Hour)`. The sweeper relocks, looks at `e` — **the copy it read
+before the gap**, still expired — and deletes `k`, destroying a value with an hour left.
+
+That is exactly the naive-timer bug wearing different clothes. **Anything you read before releasing a
+lock is a rumor by the time you reacquire it. Compare, don't remember.**
+
+Note Redis's sampling design sidesteps this entirely: each pass is stateless, holds the lock start to
+finish, and carries nothing across a gap because there is no gap.
+
+**Aayush: ⚠️** — found the iteration-order problem (real, and correctly reasoned). Missed the fatal
+stale-read deletion. **This is the second time this exact miss has appeared** (S4 Q2 check-then-act).
+→ **pattern, not incident.** Re-ask cold.
+
+---
+
+### Q2 — Why sample only keys *with* a TTL?
+**Model answer.** Sampling estimates a population; the population of concern is *expirable* keys, so
+the sample must be drawn from those.
+
+Concretely: 10M permanent config keys + 1,000 TTL'd session keys. Sample 20 uniformly from all
+10,000,001 and you expect **0.002** to have a TTL. Every sample comes back with zero expired keys; the
+adaptive rule reads "nothing to reclaim," sleeps, and the sessions rot forever. The estimator isn't
+merely noisier — it's **biased into uselessness**, diluted by a population that can never expire.
+
+Design consequence: Redis keeps a **separate dict of keys with an expiry** (`db->expires`) so it can
+sample the right population cheaply. The data structure exists to serve the sampling requirement.
+
+**Aayush: ✅** — nailed the statistical core unprompted ("the population in concern for the sweeper is
+the keys with TTL"). Didn't name the concrete failing workload or the separate-index consequence.
+
+---
+
+### Q3 — Why can't the Cache be GC'd while the sweeper runs, and what must the API add?
+**Model answer.** **Every running goroutine's stack is a GC root.** The collector marks from the roots
+— globals and goroutine stacks — and the sweeper's stack holds `c`. So `c` is reachable *by
+definition*, no matter that every other part of the program forgot it. And it's mutual: the goroutine
+never exits (`for {}`), so its stack never goes away, so it stays a root. **Two leaks holding each
+other up.** `runtime.SetFinalizer` can't help — a finalizer runs when an object becomes unreachable,
+which is precisely what can't happen.
+
+**What the API needs:** a way to make the goroutine *return*. Nothing else works.
+```go
+done chan struct{}                       // make() it — nil channels block forever
+func (c *Cache) Close() {
+    c.closeOnce.Do(func() { close(c.done) })   // double close panics → sync.Once
+    c.wg.Wait()                                // asking to stop ≠ knowing it stopped
+}
+```
+and `select` on `<-ticker.C` vs `<-c.done`. **`Ticker`, not `Sleep`** — `Sleep` can't be interrupted,
+so `Close()` would block up to a full interval. **`close()`, not send** — closing broadcasts to every
+receiver forever; a send wakes exactly one.
+
+Cost, stated plainly: **`Cache` is now a resource, not a value.** A caller who forgets `Close()` leaks
+a goroutine and everything the cache holds, and no compiler, vet check, or race detector will say so.
+
+**Aayush: ✅ / ⊘** — first half exactly right (goroutine references the cache, GC won't collect it).
+Second half not attempted; taught. → re-ask the `Close()`/`select`/`Ticker` mechanics cold.
+
+---
+
 ## Carried forward — re-ask cold
 
 | From | Concept | The specific gap |
@@ -237,3 +386,7 @@ and only one scales to the parts of this system where intuition has no training 
 | S4 Q2 | check-then-act | Can name the category; must *produce* the concrete interleaving |
 | S4 Q4 | deadlock vs starvation | Mechanism solid, vocabulary wrong |
 | S4 Q5 | publication / happens-before | Untested; prerequisite for Phase 3 write visibility |
+| S4b Q2 | naive-timer overwrite bug | Expected a crash; the bug is **silent** deletion of live data |
+| S4b Q3 | value vs resource semantics | Not attempted; sets up step 4 (corpses occupy LRU capacity) |
+| S4c Q1 | **compare, don't remember** | **PATTERN, not incident** — same miss as S4 Q2. A value read before an unlock is a rumor after it. |
+| S4c Q3 | `Close()` / `select` / `Ticker` | Knew *why* it leaks, not *what fixes it* |

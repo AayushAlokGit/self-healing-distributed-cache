@@ -11,11 +11,19 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 3 — TTL expiry.** (Step 2 done: mutex + `race_test.go` green;
-  Session 4 quiz taken, 4 ✅ / 2 ⊘.) Open the next session by re-asking the three carried-forward
-  questions cold — see the table at the bottom of `docs/QUIZZES.md`.
+- **Next action:** **Phase 1, step 3c — benchmark the sweep pause, then earn the sampling sweeper.**
+  The naive sweep holds the lock for the whole scan; write a `b.RunParallel` benchmark measuring
+  `Get` tail latency *while a sweep runs*, watch it blow up, then implement Redis-style sampling
+  (20 random TTL'd keys, repeat if >25% expired). Then step 4, LRU eviction.
+  Open the next session by re-asking the **seven** carried-forward questions cold — table at the
+  bottom of `docs/QUIZZES.md`.
 - **Deferred, on purpose:** (a) `sync.RWMutex` — only after we *measure* a read-heavy benchmark and
-  can show `Mutex` is the bottleneck; (b) `SetIfAbsent` — the caller-side check-then-act gap.
+  can show `Mutex` is the bottleneck; note `Get` now *deletes*, so it can't take an `RLock` as
+  written; (b) `SetIfAbsent` — the caller-side check-then-act gap; (c) **Go maps never shrink** —
+  16.5 MB of bucket array survives sweeping 200k entries to `Len()==0`; only replacing the map frees
+  it. Known limit, not fixed. (d) injectable clock — the test suite spends ~4s sleeping.
+- **Flagged (learning):** **"compare, don't remember"** has now been missed **twice** (S4 Q2,
+  S4c Q1) — a value read before releasing a lock is a rumor after it. Re-teach on sight.
 - **Flagged for review:** two spots needed correction during the failure-mode quiz and were
   re-taught (appear solid now, worth a light re-check before Phase 4/5):
   (a) **available ≠ fully-replicated** — reads can be served while the cluster is still one copy
@@ -37,7 +45,7 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 ### Phase 1 — Single-node cache
 - ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
 - ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
-- ☐ TTL expiry
+- ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper** goroutine + `Close()`. Naive full-scan sweep holds the lock for the whole scan → step 3c replaces it with Redis-style sampling.
 - ☐ LRU eviction
 
 ### Phase 2 — Consistent hashing
@@ -110,8 +118,69 @@ Mark ☑ when taught AND the quick-check quiz was passed.
   an alternative discipline — **not** the mutex itself.
 - Reinforced: Go's `sync.Mutex` and the map it guards are *separate fields* — nothing forces the
   association, forgetting to lock compiles fine. (Contrast Rust's `Mutex<T>`.)
-- No formal quiz this session (Aayush opted to keep moving). Concepts above were taught in a
-  question-driven back-and-forth; **worth a quick-check at the top of Session 5** before TTL.
+- **Session 4 quiz taken** after all (6 Q, 4 ✅ / 2 ⊘). Full text + model answers in `docs/QUIZZES.md`.
+
+#### Session 4 (cont.) — Phase 1 step 3: TTL, and step 3b: the sweeper
+- **TTL taught.** TTL = the *bound* on the bounded-staleness bargain; without it staleness is
+  unbounded. Naive design (one timer goroutine per key) rejected for two reasons: a goroutine per
+  key, and — the real one — it is **silently wrong on overwrite**. `Set(k,"a",30s)` then
+  `Set(k,"b",10min)`: the first timer still fires at t=30s and deletes `"b"`, which had 9.5 min left.
+  The timer holds a **stale belief** about what it's deleting. Insight: **expiry is not an event to
+  schedule, it's a comparison to make.** Nobody can observe a key expired unless they look at it.
+- **Built lazy expiry** — `entry{value, expires time.Time}`; deadline stored **absolute** (arithmetic
+  once at write time, not per read); `ttl <= 0` → zero `time.Time` sentinel, tested via `IsZero()`
+  not a magic constant; `Get` compares and deletes on the spot. Note **`Get` is now a writer** →
+  cannot take an `RLock` if we ever move to `RWMutex`. (Tension with the deferred `RWMutex` idea.)
+- **Measured the leak** (`cache/leak_test.go`). Session-cache workload: 200k keys, short TTL, never
+  read back. Result: **40.9 MB retained, 200 000 corpses, 1 live key** — and `heapMB()` forces
+  `runtime.GC()` first, so this survives a full collection. **A GC frees *unreachable* memory; every
+  corpse is reachable from `c.data`, so it is by definition live.** A *logical* leak, not a collector
+  bug — no GC in any language can fix it, because "useless" is a fact about intent, not reachability.
+  (Same intent-vs-mechanism split as race condition vs data race.) Extrapolated: 1k logins/sec ≈
+  8.4 GB/day → OOM within a day while never holding more than a few thousand live keys.
+- **Built the sweeper** — background goroutine, `time.Ticker` + `select` on a `done chan struct{}`,
+  `Close()` idempotent via `sync.Once` and blocking on a `sync.WaitGroup`.
+  - **Why `Close()` is mandatory, not politeness:** a running goroutine's stack is a **GC root**, so
+    the sweeper keeps the whole `Cache` reachable forever. Goroutine and cache hold each other up.
+    Only the goroutine *returning* can free either. `runtime.SetFinalizer` can't help — a finalizer
+    runs when an object becomes unreachable, which is exactly what can't happen.
+  - **Ticker not `time.Sleep`:** `Sleep` cannot be interrupted, so `Close()` would block up to a full
+    interval. `select` can only race *channels*; a `Ticker` is `Sleep` reshaped into a channel.
+  - **`close()` not send:** closing broadcasts (every receiver unblocks, now and forever); a send
+    wakes exactly one. Double-close **panics** → `sync.Once`.
+  - **`wg.Wait()` in `Close()`** separates *asking* to stop from *knowing* it stopped — makes
+    `TestCloseStopsSweeper` deterministic instead of sleep-and-hope. If `sweepLoop` ignored `done`,
+    `Close` blocks forever and the hang **is** the assertion.
+  - **Channels are the exception to "zero value is usable."** `sync.Mutex`/`Once`/`WaitGroup` work
+    unconstructed; a channel's zero value is `nil` and **receiving from nil blocks forever** —
+    a silent hang, no panic. Must `make()`.
+- **Go facts nailed down:** deleting from a map *during* `range` is legal (an entry removed before
+  it's reached is never produced) — unlike C++ iterator invalidation; map iteration order is
+  **randomized per `range`**, so there is no cursor and "resume where I left off" is not
+  implementable; lowercase identifiers are package-private (test seam without public API).
+- **Surprise, measured:** after sweeping 200k entries to `Len()==0`, the heap sat at **16.5 MB**.
+  Confirmed by throwaway experiment: replacing `c.data` with a fresh map dropped it to 0.5 MB.
+  **Go maps never shrink** — `delete()` frees keys and values, the bucket array stays sized for the
+  all-time peak. A cache that spikes to 1M keys once at 3am holds that array until the process dies.
+  Redis rehashes into a smaller table; Go doesn't. **Filed as a known limit, not fixed.**
+- **A test failure that taught something:** the first `leak_test.go` had the background sweeper
+  reclaiming keys *while the 200k-key write loop was still running* (writes take ~1s under `-race`,
+  TTL was 50ms) → `Len()=10529`. Rewritten to disable the background sweeper
+  (`newWithSweepInterval(time.Hour)`) and call `c.sweep()` directly. Timing moved out of the
+  assertion into a place where it can't lie. Also fixed a fake payload: 200k entries all storing the
+  *same* `strings.Repeat("x",100)` share **one** backing array (a Go string is a 16-byte
+  `(ptr,len)` pair), so the values must be made distinct to allocate for real.
+- **Sweeper quick-check quiz** (3 Q) — see `docs/QUIZZES.md`. 1 ✅ · 1 ⚠️ · 1 half.
+  **Pattern flagged:** the ⚠️ was *again* "acted on a value read before releasing the lock" —
+  the same **compare, don't remember** miss as Session 4 Q2. Twice now; logged as a pattern.
+- **Taught but not yet built (step 3c):** Redis's sampling sweeper — sample 20 random keys *with a
+  TTL*, delete the expired ones, repeat immediately if >25% were expired, else sleep. **Constant work
+  per pass** regardless of cache size (no latency spike) and **adaptive** (sweep rate tracks expiry
+  rate, no interval to tune). Trades exact cleanliness for a *bounded fraction* of corpses:
+  bounded waste + constant work + no pauses, vs zero waste + unbounded work + periodic freezes.
+  Requires a separate index of keys-with-TTL, else a cache of 10M permanent + 1k TTL'd keys dilutes
+  the sample into uselessness. Same "approximate answer, bounded error, work independent of data
+  size" bargain that Phase 4's failure detection makes.
 
 ### Session 3 — 2026-07-08
 - Confirmed HLD §6.2 failure-mode catalog present (line 206) — user had missed it (it's a

@@ -10,6 +10,7 @@ const noTTL = 0
 
 func TestSetGet(t *testing.T) {
 	c := New()
+	defer c.Close()
 	c.Set("user:1", "Aayush", noTTL)
 
 	got, ok := c.Get("user:1")
@@ -23,6 +24,7 @@ func TestSetGet(t *testing.T) {
 
 func TestMiss(t *testing.T) {
 	c := New()
+	defer c.Close()
 
 	_, ok := c.Get("nope")
 	if ok {
@@ -34,6 +36,7 @@ func TestMiss(t *testing.T) {
 // value from a missing key.
 func TestEmptyValueIsAHit(t *testing.T) {
 	c := New()
+	defer c.Close()
 	c.Set("greeting", "", noTTL)
 
 	got, ok := c.Get("greeting")
@@ -50,6 +53,7 @@ func TestEmptyValueIsAHit(t *testing.T) {
 // instead of waiting for it.
 func TestTTLExpires(t *testing.T) {
 	c := New()
+	defer c.Close()
 	c.Set("session:abc", "aayush", 500*time.Millisecond)
 
 	if _, ok := c.Get("session:abc"); !ok {
@@ -67,6 +71,7 @@ func TestTTLExpires(t *testing.T) {
 // expires = now and the key would die on its own birth.
 func TestZeroTTLNeverExpires(t *testing.T) {
 	c := New()
+	defer c.Close()
 	c.Set("permanent", "v", noTTL)
 
 	time.Sleep(200 * time.Millisecond)
@@ -86,6 +91,7 @@ func TestZeroTTLNeverExpires(t *testing.T) {
 // key permanent.
 func TestOverwriteResetsDeadline(t *testing.T) {
 	c := New()
+	defer c.Close()
 	c.Set("k", "a", 300*time.Millisecond)
 	c.Set("k", "b", 2*time.Second)
 
@@ -110,6 +116,7 @@ func TestOverwriteResetsDeadline(t *testing.T) {
 // whether or not it was removed — so this reaches into c.data directly.
 func TestExpiredKeyIsDeletedOnRead(t *testing.T) {
 	c := New()
+	defer c.Close()
 	c.Set("tmp", "v", 100*time.Millisecond)
 
 	time.Sleep(300 * time.Millisecond)
