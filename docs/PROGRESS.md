@@ -11,9 +11,9 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 3 — TTL expiry.** (Step 2 done: mutex + `race_test.go` green.)
-  Open the session with a quick-check on Session 4's material (data race vs race condition, the 5
-  failure modes, why `Get` locks) — no formal quiz was taken.
+- **Next action:** **Phase 1, step 3 — TTL expiry.** (Step 2 done: mutex + `race_test.go` green;
+  Session 4 quiz taken, 4 ✅ / 2 ⊘.) Open the next session by re-asking the three carried-forward
+  questions cold — see the table at the bottom of `docs/QUIZZES.md`.
 - **Deferred, on purpose:** (a) `sync.RWMutex` — only after we *measure* a read-heavy benchmark and
   can show `Mutex` is the bottleneck; (b) `SetIfAbsent` — the caller-side check-then-act gap.
 - **Flagged for review:** two spots needed correction during the failure-mode quiz and were
@@ -205,7 +205,23 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 ---
 
 ## Quiz results log
-_(Record each quiz: date, phase, score, and any concept to revisit.)_
+_(Score + what to revisit. **Full question text and model answers live in `docs/QUIZZES.md`.**)_
+
+### 2026-07-09 — Session 4: concurrency, races, mutex (6 Q) → **4 ✅ · 2 ⊘ · 0 ❌**
+- **Disjoint keys still race** — ✅ named the shared map; sharpened to *which part* (bucket array /
+  growth flag / count, not the value slots).
+- **Data race definition** — ✅ all three conditions. **Race condition ≠ data race** — ⚠️ named
+  check-then-act as a category but did not produce concrete code. → re-ask cold.
+- **Why `Get` locks** — ✅ strong; produced "map mid-rehash" unprompted. Sharpened: it's *required*
+  by the definition (≥1 writer suffices), not caution; consequence is corruption, not staleness.
+- **`defer` / lock never released** — ⚠️ mechanism exactly right, called it **starvation** when it is
+  **deadlock**. Vocabulary gap, not understanding. Matters in Phase 4. → re-ask cold.
+- **Atomic map ⇒ no mutex?** — ⊘ taught instead: lost updates + **safe publication** survive
+  per-operation atomicity; mutex = critical section **+ happens-before edge over all memory**.
+  → **re-ask before Phase 3** (becomes "when is a replicated write visible?").
+- **`SetIfAbsent` vs `RWMutex`** — ⊘ taught instead: correctness (reasoned, needs a *caller*) vs
+  performance (needs a `b.RunParallel` benchmark; `RWMutex` may well be *slower* on ns-long
+  critical sections).
 
 ### 2026-07-08 — Failure-mode quick-checks (pre-phase, informal)
 - **Deterministic promotion / no election** — ✅ strong. Correctly explained ownership as a pure

@@ -43,7 +43,11 @@ save time — the teaching *is* the deliverable.
   covering the phase, including "what would break if…" and "how would you extend…" style questions.
 - **Grade honestly.** Point out wrong/incomplete answers and explain the gap. Don't rubber-stamp.
   If the user is shaky on something, re-teach it before moving on.
-- Record quiz outcomes in `docs/PROGRESS.md` so we know what to revisit.
+- **Record every quiz in `docs/QUIZZES.md`** — full question text + the model answer + Aayush's
+  result (✅ / ⚠️ / ❌ / ⊘). For ⚠️ and ❌, name the *specific* gap, not just "revisit."
+  Put the *score* and what to revisit in `docs/PROGRESS.md`; the *questions* live in QUIZZES.md.
+- Re-ask carried-forward questions **cold** at the start of a later session (see the table at the
+  bottom of `docs/QUIZZES.md`), before teaching new material.
 
 ### Build philosophy
 - **Naive → measure → iterate.** Ship a deliberately naive single-node version first, then *earn*
@@ -60,9 +64,11 @@ save time — the teaching *is* the deliverable.
 
 ### Session ritual
 1. Read `docs/PROGRESS.md` to see where we are and what quizzes flagged for review.
-2. If something was flagged shaky, offer to revisit it before new material.
+2. If something was flagged shaky, offer to revisit it before new material — re-ask the carried-
+   forward questions from `docs/QUIZZES.md` cold.
 3. Teach the next concept → quick-check quiz → build → measure.
-4. Update `docs/PROGRESS.md` at the end of the session (and after each milestone).
+4. Update `docs/PROGRESS.md` **and** `docs/QUIZZES.md` at the end of the session (and after each
+   milestone).
 
 ---
 
