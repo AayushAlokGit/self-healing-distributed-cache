@@ -32,10 +32,10 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ☐ Go basics as needed (packages, structs, interfaces, goroutines, channels, context)
 
 ### Phase 1 — Single-node cache
-- ☐ Hash-map store + thread safety (mutex vs channel)
+- ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
+- ◐ Concurrency / races — TAUGHT & demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`); mutex fix written & proven green, then temporarily reverted to the naive version so the "before" is committed first. Mutex + `race_test.go` land in the next commit.
 - ☐ TTL expiry
 - ☐ LRU eviction
-- ☐ Concurrency / races
 
 ### Phase 2 — Consistent hashing
 - ☐ Why `hash % N` breaks on resize
