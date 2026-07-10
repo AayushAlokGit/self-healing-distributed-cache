@@ -1,6 +1,7 @@
 package node
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -48,6 +49,41 @@ func TestHeartbeatDetectsDeath(t *testing.T) {
 	waitUntil(t, 3*time.Second, "n2 detects n1 dead", func() bool {
 		return !nodes["n2"].AlivePeers()["n1"]
 	})
+}
+
+// A crash and a slow node are the same observation — silence. A node that is
+// fully alive but stalls its health replies (a GC-pause stand-in) is declared
+// dead by its peers, the false positive a short timeout buys. And because a node
+// never suspects itself, the views diverge: n0 says "n1 dead", n1 says "n1 alive"
+// — the seed of split-brain. Un-stall it and it flaps back.
+func TestSlowNodeIsFalselyDeclaredDead(t *testing.T) {
+	ids := []string{"n0", "n1", "n2"}
+	nodes := startCluster(t, ids...)
+
+	// n1 is alive and well; it just stops answering /health in time.
+	nodes["n1"].PauseHealth(true)
+
+	waitUntil(t, 3*time.Second, "n0 falsely declares the stalled n1 dead", func() bool {
+		return !nodes["n0"].AlivePeers()["n1"]
+	})
+	t.Logf("false positive: n1 is alive but n0 marked it dead after ~%v of silence", defaultFailureTimeout)
+
+	// The proof it was false: n1 is running fine and still counts itself alive.
+	// So n0 and n1 now disagree about n1 — asymmetric views, the split-brain seed.
+	if !nodes["n1"].AlivePeers()["n1"] {
+		t.Fatalf("n1 should never suspect itself, even while stalled")
+	}
+	if v, code := clientGet(t, nodes["n1"], "anything"); code != http.StatusNotFound {
+		t.Fatalf("stalled n1 should still serve real traffic, got (%q, %d)", v, code)
+	}
+
+	// Stop stalling: the next ping lands, and n0 re-admits n1. A healthy node was
+	// evicted and re-added for nothing — a flap, pure cost of guessing too eagerly.
+	nodes["n1"].PauseHealth(false)
+	waitUntil(t, 3*time.Second, "n0 re-admits the recovered n1", func() bool {
+		return nodes["n0"].AlivePeers()["n1"]
+	})
+	t.Logf("flap: n1 answered again and n0 re-added it — the false positive cost a needless eviction+recovery")
 }
 
 // Once a node is detected dead it leaves the ring, so ownership recomputes and a

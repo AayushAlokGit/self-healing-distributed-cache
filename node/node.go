@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cache"
@@ -65,6 +66,11 @@ type Node struct {
 	done              chan struct{}
 	wg                sync.WaitGroup
 
+	// healthPaused stalls this node's /health responses without stopping the rest
+	// of it: a stand-in for a GC pause so a demo can show a live node being falsely
+	// declared dead. Atomic, not mutex-guarded, so it stays off the hot read path.
+	healthPaused atomic.Bool
+
 	// membership is this node's own view. peers is every node ever known (static
 	// for now, gossiped in future); the ring holds only those currently believed
 	// alive, so routing never targets a node this view thinks is dead. Guarded
@@ -100,6 +106,14 @@ func New(id, addr string, capacity int) *Node {
 	mux.HandleFunc("GET /kv/{key}", n.handleGet)
 	mux.HandleFunc("PUT /kv/{key}", n.handlePut)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		if n.healthPaused.Load() {
+			// Stall past any pinger's timeout so the ping fails, but wake on Close
+			// so Shutdown is never blocked by a sleeping handler.
+			select {
+			case <-n.done:
+			case <-time.After(3 * n.failureTimeout):
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	// Client-facing: any node coordinates.
@@ -240,6 +254,11 @@ func (n *Node) pingHealth(addr string) bool {
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
+
+// PauseHealth stalls (or resumes) this node's /health responses. The node keeps
+// serving everything else — it is a live node that merely looks silent, so peers
+// with a short timeout will falsely declare it dead. For the false-positive demo.
+func (n *Node) PauseHealth(paused bool) { n.healthPaused.Store(paused) }
 
 // AlivePeers is this node's current view of who is up, for tests and the
 // eventual dashboard.
