@@ -11,23 +11,19 @@ import (
 )
 
 const (
+	// Only says how often we check. The sampler sets its own rate.
 	defaultSweepInterval = time.Second
 
-	// A sweep pass looks at sampleSize keys and no more, so the lock is held
-	// for a constant time no matter how big the cache is.
+	// Keys examined per pass. Bounds how long the lock is held once.
 	sampleSize = 20
 
-	// If more than 1-in-expiredThreshold of the sample was expired, there is
-	// probably more garbage, so pass again immediately. Otherwise sleep. This
-	// makes the sweep rate track the expiry rate — there is no interval to tune.
-	expiredThreshold = 4 // i.e. 25%
+	// Pass again immediately if more than 1-in-4 of a sample was expired.
+	expiredThreshold = 4
 
-	// sampleSize bounds how long the lock is held ONCE. Nothing bounds how many
-	// passes a big backlog takes: reclaiming 500k corpses runs 25k passes over
-	// 514ms of continuous lock churn, halving reader throughput for half a
-	// second. The budget caps the sweeper's share of each interval and carries
-	// the rest to the next tick. Redis bounds itself the same way, at 25% CPU.
-	sweepBudgetFraction = 4 // spend at most interval/4 sweeping
+	// Bounds how long the sweeper keeps competing for the lock, which
+	// sampleSize does not: pass count is O(expired keys), so a 500k backlog
+	// runs 25k passes over 514ms. The remainder waits for the next tick.
+	sweepBudgetFraction = 4 // at most interval/4 per tick
 )
 
 // entry stores the absolute deadline, not the TTL duration: the arithmetic
@@ -46,22 +42,18 @@ func (e entry) expired(now time.Time) bool {
 
 // Cache is an in-memory key→value store, safe for concurrent use.
 //
-// A Cache owns a background goroutine, so the caller MUST Close it or both the
-// goroutine and everything the Cache holds leak — a running goroutine's stack
-// is a GC root, so it keeps the Cache reachable forever.
+// The caller MUST Close it. A Cache owns a background goroutine, and a running
+// goroutine's stack is a GC root, so it keeps the whole Cache reachable forever.
 //
-// Must not be copied after first use: copying duplicates the mutex, and the
-// copies would no longer exclude each other. Always pass *Cache. (pointer to one in memory cache instance)
+// Must not be copied after first use: copying duplicates the mutex and the
+// copies stop excluding each other. Always pass *Cache.
 type Cache struct {
 	// mu guards data and expiring. Every read or write of either must hold it.
 	mu   sync.Mutex
 	data map[string]entry
 
-	// expiring indexes just the keys that have a deadline, so the sampler draws
-	// from the population it cares about. Sampling all of data would be diluted
-	// into uselessness by a cache of mostly-permanent keys: 20 keys drawn from
-	// 10M permanent + 1k expiring finds an expired one essentially never, the
-	// sampler concludes there's nothing to do, and the 1k rot forever.
+	// expiring indexes only the keys with a deadline. Sampling all of data
+	// instead would be diluted to uselessness by a mostly-permanent cache.
 	expiring map[string]struct{}
 
 	// Closed, not sent to, so every receiver unblocks — now and forever.
@@ -118,23 +110,13 @@ func (c *Cache) sweepLoop(interval time.Duration) {
 	}
 }
 
-// sampleSweep reclaims expired entries by repeated random sampling, and returns
-// how many it removed.
+// sampleSweep reclaims expired entries by repeated random sampling, returning
+// how many it removed. It passes again while samples come back dirty, so the
+// reclaim rate tracks the expiry rate.
 //
-// Each pass looks at sampleSize keys and releases the lock, so the pause barely
-// grows with cache size: 8µs at 50k keys, 20µs at 500k (the drift is cache
-// misses, not work), against sweepAll's 27ms at 1M. If a pass found more than
-// 1/expiredThreshold of its sample expired there is probably more garbage, so it
-// passes again immediately — the sweep rate tracks the expiry rate, and there is
-// no interval to tune.
-//
-// Two separate bounds doing different jobs. sampleSize bounds the PAUSE. The
-// budget bounds how long the sweeper keeps COMPETING for the lock, because the
-// number of passes is O(expired keys) — set by the workload, not by us.
-//
-// This never fully cleans the cache, and under a large backlog it won't even
-// finish this tick. Both are the same bargain: bounded waste in exchange for
-// bounded interference.
+// Each pass releases the lock, so the pause stays ~7µs at 1M keys against
+// sweepAll's 27ms. It never fully cleans the cache, and under a large backlog
+// it won't finish this tick: bounded waste in exchange for bounded interference.
 func (c *Cache) sampleSweep(budget time.Duration) int {
 	deadline := time.Now().Add(budget)
 	total := 0
@@ -153,22 +135,19 @@ func (c *Cache) sampleSweep(budget time.Duration) int {
 	}
 }
 
-// samplePass locks, examines up to sampleSize keys drawn from the expiring
-// index, deletes the expired ones, and unlocks. It reports how many it looked
-// at and how many it removed.
+// samplePass examines up to sampleSize keys from the expiring index under the
+// lock, deleting the expired ones.
 //
-// Nothing is carried across the unlock — each pass re-reads under the lock. An
-// entry read before releasing a lock is a rumor after it: a concurrent Set may
-// have given it a fresh deadline, and deleting on the stale copy would destroy
-// live data. Statelessness is what lets us drop the lock at all.
+// It carries nothing across the unlock — that statelessness is what lets us drop
+// the lock at all. An entry read before releasing a lock is a rumor after it: a
+// concurrent Set may have given it a fresh deadline we'd then delete.
 func (c *Cache) samplePass() (scanned, expired int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := time.Now()
-	// Go starts map iteration at a random bucket, which is exactly the cheap
-	// random sample we need. It samples buckets, not keys, so it is not
-	// perfectly uniform — good enough to estimate a fraction.
+	// Go starts map iteration at a random bucket, so this is the sample. It
+	// draws buckets, not keys — not uniform, fine for estimating a fraction.
 	for k := range c.expiring {
 		if scanned == sampleSize {
 			break
@@ -190,8 +169,8 @@ func (c *Cache) samplePass() (scanned, expired int) {
 }
 
 // sweepAll deletes every expired entry in one locked pass. Superseded by
-// sampleSweep and kept only as the benchmark baseline: it is O(total keys), not
-// O(expired keys), and holds the lock throughout.
+// sampleSweep, kept as the benchmark baseline: O(total keys), not O(expired),
+// and it holds the lock throughout.
 func (c *Cache) sweepAll() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -222,8 +201,7 @@ func (c *Cache) Set(key, value string, ttl time.Duration) {
 	defer c.mu.Unlock()
 	c.data[key] = entry{value: value, expires: expires}
 
-	// Overwriting a TTL'd key with a permanent one must un-index it, or the
-	// sampler wastes its budget on a key that can never expire.
+	// Overwriting a TTL'd key with a permanent one must un-index it.
 	if ttl > 0 {
 		c.expiring[key] = struct{}{}
 	} else {
@@ -240,10 +218,10 @@ func (c *Cache) Len() int {
 }
 
 // Get returns the value for key. The bool is false if the key is absent or
-// expired — the caller cannot tell those apart, and shouldn't need to.
+// expired; the caller cannot tell those apart, and shouldn't need to.
 //
-// An expired entry found here is deleted on the spot. Note this makes Get a
-// writer, so it cannot take a read lock if we ever move to sync.RWMutex.
+// It deletes an entry it finds expired, which makes Get a writer — it could not
+// take a read lock under sync.RWMutex.
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -1,6 +1,5 @@
-// Numbers recorded below are from a 20-logical-CPU Windows machine, Go 1.26.
-// They are here to make the *shape* and the *ratios* legible; absolute values
-// move with hardware, so nothing asserts against them.
+// Numbers below are from a 20-CPU Windows machine, Go 1.26. Recorded for their
+// shape and ratios; nothing asserts against them.
 //
 //	go test -count=1 -run xxx -bench . ./cache/
 package cache
@@ -11,28 +10,19 @@ import (
 	"time"
 )
 
-// fill inserts n permanent entries. Permanent, so a sweep must scan every one
-// and delete none: it isolates the cost of holding the lock across the scan.
+// fill inserts n PERMANENT entries, so a sweep must scan every one and delete
+// none: it isolates the cost of the scan from the cost of deleting.
 func fill(c *Cache, n int) {
 	for i := range n {
 		c.Set("key:"+strconv.Itoa(i), "value", noTTL)
 	}
 }
 
-// BenchmarkGet is the baseline: an uncontended map lookup behind a mutex.
+// BenchmarkGet-20   16944270   66.99 ns/op   0 allocs/op
 //
-//	BenchmarkGet-20   16944270   66.99 ns/op   0 B/op   0 allocs/op
-//
-// Decomposed (measured separately, with typed sinks so nothing boxes into an
-// interface and allocates):
-//
-//	mutex Lock+Unlock   26.87 ns   <- 40% of a Get, and the lock is UNCONTENDED
-//	map lookup          22.18 ns
-//	time.Now()           8.03 ns   <- the TTL check is nearly free
-//
-// The mutex being the most expensive part is the sync.RWMutex argument, with
-// evidence: an RLock costs *more* than a Lock, and it would have only ~22ns of
-// real work to overlap. Not an obvious win. Measure before switching.
+// Decomposed: mutex Lock+Unlock 26.87ns, map lookup 22.18ns, time.Now() 8.03ns.
+// An uncontended mutex is 40% of a read, with only ~22ns of work to overlap —
+// that's the case against sync.RWMutex, whose RLock costs more than a Lock.
 func BenchmarkGet(b *testing.B) {
 	c := newWithSweepInterval(time.Hour)
 	defer c.Close()
@@ -43,28 +33,18 @@ func BenchmarkGet(b *testing.B) {
 	}
 }
 
-// BenchmarkSweep is the defect, quantified: lock-hold time grows linearly with
-// the TOTAL key count. This is the pause every reader waits out.
+// The defect: lock-hold time is linear in the TOTAL key count.
 //
 //	BenchmarkSweep/1000-20         24,380 ns/op   -> 24.4 ns/key
 //	BenchmarkSweep/10000-20       242,371 ns/op   -> 24.2 ns/key
 //	BenchmarkSweep/100000-20    2,351,620 ns/op   -> 23.5 ns/key
 //	BenchmarkSweep/1000000-20  27,489,911 ns/op   -> 27.5 ns/key
 //
-// Ten times the keys, ten times the time, across three orders of magnitude.
+// fill() writes permanent keys, so every sweep here deleted nothing and still
+// cost 27ms at 1M: the scan pays for looking, not for finding.
 //
-// Note fill() writes PERMANENT keys, so every one of these sweeps deleted
-// nothing and still cost 27ms at 1M. The sweep pays for LOOKING, not for
-// finding: its cost is set by how big the cache is, not how much garbage is in
-// it. A cache of 1M live keys and 3 corpses pays the full 27ms to reclaim 3.
-//
-// ~24 ns/key is already about one map-iteration step (22.18ns, see
-// BenchmarkGet) plus an IsZero+After compare. A full scan cannot be optimized
-// below this. You have to stop scanning -- see sample_test.go BenchmarkSamplePass,
-// where 1M keys cost 7,064 ns instead of 27,489,911 (3,891x).
-//
-// The drift from 23.5 to 27.5 ns/key at 1M is cache misses: the map no longer
-// fits in L2/L3, so each step reaches further into RAM.
+// 24 ns/key is already one map-iteration step plus a compare, so a full scan
+// cannot be optimized below this — see BenchmarkSamplePass, 7,064ns at 1M.
 func BenchmarkSweep(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000, 1_000_000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
@@ -79,20 +59,9 @@ func BenchmarkSweep(b *testing.B) {
 	}
 }
 
-// getsIn counts how many Gets complete in d.
-//
-// It counts rather than times because a Get takes ~67ns and this machine's
-// time.Now() resolves to ~829µs — 12,000x coarser. Timing each read printed
-// p50=0s. An earlier version also collected latencies into a growing slice and
-// reported a phantom 10ms worst case with nothing running: that was its own
-// append() triggering a GC. It measured the measurement.
-//
-//	Fix the count and time the batch (what b.Loop does), or fix the time and
-//	count the operations (this). Never allocate inside the measured loop.
-//
-// The clock is read every iteration, so this implies ~76ns/read against
-// BenchmarkGet's clean 67ns. Both conditions pay that overhead identically, so
-// the ratio survives even though neither absolute number is a clean Get cost.
+// getsIn counts Gets completed in d rather than timing each one: a Get is ~67ns
+// and this machine's time.Now() resolves to ~829µs. Reading the clock per
+// iteration implies ~76ns/read, but both callers pay it, so ratios survive.
 func getsIn(c *Cache, d time.Duration) int {
 	n := 0
 	deadline := time.Now().Add(d)
@@ -103,28 +72,20 @@ func getsIn(c *Cache, d time.Duration) int {
 	return n
 }
 
-// TestSweepStallsReaders is the measurement that earned the sampling rewrite.
+// The measurement that earned the sampling rewrite.
 //
 //	one sweep of 1,000,000 keys holds the lock for 47.9ms
 //	gets in 500ms:  no sweep = 6,584,449   during sweep = 8,769   (751x fewer)
 //
-// 8,769 reads x ~76ns is 0.67ms of work in a 500ms window: the reader was
-// productive 0.13% of the time. Not "slower" — an outage that answers 8,769
-// requests. It gets 8,769 rather than 0 only because Go's mutex enters
-// starvation mode after a waiter blocks 1ms and hands the lock over directly.
+// Those 8,769 reads are 0.67ms of work in a 500ms window — the reader was
+// productive 0.13% of the time. It gets 8,769 rather than 0 only because Go's
+// mutex hands the lock to a waiter that has blocked 1ms (starvation mode).
 //
-// 47.9ms here vs 27.5ms in BenchmarkSweep because this is the FIRST sweep after
-// writing 1M entries: cold caches, cold TLB. The benchmark reports warm steady
-// state. The cold number is what a real sweeper pays.
+// 47.9ms vs the benchmark's 27.5ms: this is the first sweep after writing 1M
+// entries, so caches and TLB are cold. That's what a real sweeper pays.
 //
-// On a 1s interval a 27ms pause freezes the cache 2.5% of the time. One request
-// in forty stalls, on an idle machine, by construction — blowing any p99 budget
-// for a store whose uncontended read is 67 NANOseconds. The naive sweeper
-// converts a memory problem into a tail-latency problem, which for a cache is a
-// bad trade. Tuning the interval slides along that curve; it doesn't leave it.
-//
-// This test now guards a KNOWN DEFECT in sweepAll, which sampleSweep replaced.
-// Its counterpart is TestSampleSweepDoesNotStallReaders (751x -> 2.0x).
+// Now a regression guard on a known defect in sweepAll. Counterpart:
+// TestSampleSweepDoesNotStallReaders.
 func TestSweepStallsReaders(t *testing.T) {
 	const (
 		keys   = 1_000_000
