@@ -11,6 +11,7 @@ package node
 import (
 	"context"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -33,6 +34,15 @@ const (
 	// W=1 favors availability (fast, may lose a write if that one node dies);
 	// larger W trades latency and availability for durability. W>R is impossible.
 	defaultWriteQuorum = 1
+
+	// How often a node pings every peer's /health.
+	defaultHeartbeatInterval = 100 * time.Millisecond
+
+	// Silence longer than this makes a peer suspected dead and dropped from the
+	// ring. The core knob: shorter = faster detection but more false positives
+	// (a GC pause looks like death); longer = fewer false positives but the ring
+	// routes to a corpse for longer. 5 missed beats.
+	defaultFailureTimeout = 500 * time.Millisecond
 )
 
 // Node is a peer in the cluster: a cache (Store Engine), an HTTP server, and its
@@ -49,11 +59,21 @@ type Node struct {
 	replicationFactor int
 	writeQuorum       int
 
-	// membership is this node's own view, injected at setup and (Phase 4)
-	// updated by gossip. Guarded because handlers read it from many goroutines.
-	mu    sync.RWMutex
-	ring  *ring.Ring
-	peers map[string]string // node id -> HTTP address
+	heartbeatInterval time.Duration
+	failureTimeout    time.Duration
+	healthClient      *http.Client // short timeout; a slow ping is a missed beat
+	done              chan struct{}
+	wg                sync.WaitGroup
+
+	// membership is this node's own view. peers is every node ever known (static
+	// for now, gossiped in future); the ring holds only those currently believed
+	// alive, so routing never targets a node this view thinks is dead. Guarded
+	// because handlers and the heartbeat loop touch it from many goroutines.
+	mu       sync.RWMutex
+	ring     *ring.Ring
+	peers    map[string]string    // node id -> HTTP address (all known)
+	lastSeen map[string]time.Time // last successful health ping
+	alive    map[string]bool      // this node's current view
 }
 
 // New creates a node with the given id and capacity. addr may end in ":0" to let
@@ -65,14 +85,23 @@ func New(id, addr string, capacity int) *Node {
 		addr:              addr,
 		client:            &http.Client{Timeout: forwardTimeout},
 		peers:             map[string]string{},
+		lastSeen:          map[string]time.Time{},
+		alive:             map[string]bool{},
 		replicationFactor: defaultReplicationFactor,
 		writeQuorum:       defaultWriteQuorum,
+		heartbeatInterval: defaultHeartbeatInterval,
+		failureTimeout:    defaultFailureTimeout,
+		healthClient:      &http.Client{Timeout: defaultFailureTimeout},
+		done:              make(chan struct{}),
 	}
 
 	mux := http.NewServeMux()
-	// Internal: node-to-node storage.
+	// Internal: node-to-node storage and liveness.
 	mux.HandleFunc("GET /kv/{key}", n.handleGet)
 	mux.HandleFunc("PUT /kv/{key}", n.handlePut)
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	// Client-facing: any node coordinates.
 	mux.HandleFunc("GET /get/{key}", n.handleClientGet)
 	mux.HandleFunc("PUT /set/{key}", n.handleClientSet)
@@ -81,13 +110,25 @@ func New(id, addr string, capacity int) *Node {
 	return n
 }
 
-// SetMembership installs this node's ring and peer map. Static for now; Phase 4's
-// gossip replaces the whole call. Safe to call while the node is serving.
-func (n *Node) SetMembership(r *ring.Ring, peers map[string]string) {
+// SetMembership installs the set of known peers (id -> address, including self).
+// Everyone starts believed alive and on the ring; the heartbeat loop demotes the
+// silent. Safe to call while serving.
+func (n *Node) SetMembership(peers map[string]string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.ring = r
+
+	now := time.Now()
 	n.peers = peers
+	n.lastSeen = make(map[string]time.Time, len(peers))
+	n.alive = make(map[string]bool, len(peers))
+	r := ring.New()
+	for id := range peers {
+		n.lastSeen[id] = now
+		n.alive[id] = true
+		r.Add(id)
+	}
+	n.alive[n.id] = true // a node never suspects itself
+	n.ring = r
 }
 
 // SetReplication overrides the replication factor and write quorum. For tests
@@ -127,7 +168,87 @@ func (n *Node) Start() error {
 	n.addr = ln.Addr().String() // resolve ":0" to the real port
 
 	go n.srv.Serve(ln)
+	n.wg.Go(n.heartbeatLoop)
 	return nil
+}
+
+// heartbeatLoop pings every peer on a tick and updates this node's alive view,
+// until Close. Ticker, not Sleep, so Close is not blocked for a full interval.
+func (n *Node) heartbeatLoop() {
+	ticker := time.NewTicker(n.heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-n.done:
+			return
+		case <-ticker.C:
+			n.heartbeatRound()
+		}
+	}
+}
+
+// heartbeatRound pings all peers outside the lock (network I/O), then takes the
+// lock once to record who answered and reconcile the alive view against the
+// failure timeout. A transition flips the peer's ring membership, so ownership
+// recomputes to route around the dead (and back to the recovered).
+func (n *Node) heartbeatRound() {
+	n.mu.RLock()
+	targets := make(map[string]string, len(n.peers))
+	for id, addr := range n.peers {
+		if id != n.id {
+			targets[id] = addr
+		}
+	}
+	n.mu.RUnlock()
+
+	answered := make(map[string]bool, len(targets))
+	for id, addr := range targets {
+		if n.pingHealth(addr) {
+			answered[id] = true
+		}
+	}
+
+	now := time.Now()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for id := range answered {
+		n.lastSeen[id] = now
+	}
+	for id := range n.peers {
+		if id == n.id {
+			continue
+		}
+		isAlive := now.Sub(n.lastSeen[id]) <= n.failureTimeout
+		switch {
+		case n.alive[id] && !isAlive:
+			n.alive[id] = false
+			n.ring.Remove(id) // stop routing to the corpse
+		case !n.alive[id] && isAlive:
+			n.alive[id] = true
+			n.ring.Add(id) // it came back
+		}
+	}
+}
+
+// pingHealth reports whether addr answered its /health within the health client's
+// timeout. A slow answer is a missed beat, indistinguishable from death.
+func (n *Node) pingHealth(addr string) bool {
+	resp, err := n.healthClient.Get("http://" + addr + "/health")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// AlivePeers is this node's current view of who is up, for tests and the
+// eventual dashboard.
+func (n *Node) AlivePeers() map[string]bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	view := make(map[string]bool, len(n.alive))
+	maps.Copy(view, n.alive)
+	return view
 }
 
 // Addr is the node's bound address, e.g. "127.0.0.1:53187".
@@ -142,6 +263,8 @@ func (n *Node) ID() string { return n.id }
 func (n *Node) Close() error {
 	var err error
 	n.closeOnce.Do(func() {
+		close(n.done) // stop the heartbeat loop first
+		n.wg.Wait()
 		err = n.srv.Shutdown(context.Background())
 		n.cache.Close()
 	})

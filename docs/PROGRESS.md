@@ -78,9 +78,9 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ☐ Consistency vs availability trade-off
 
 ### Phase 4 — Failure detection
-- ☐ Heartbeats & timeouts
-- ☐ False positives (GC pause vs death)
-- ☐ Gossip / SWIM intuition
+- ☑ Heartbeats & timeouts — `node/node.go`. `/health` endpoint; each node's heartbeat goroutine pings every peer every `heartbeatInterval` (100ms), records `lastSeen`, and reconciles an `alive` view against `failureTimeout` (500ms). Alive→dead flips `ring.Remove` (stop routing to the corpse); dead→alive flips `ring.Add`. **The ring now holds only nodes this view believes alive**, so `peers` (all known) and the ring (alive) diverge. Each node's view is its own — no consensus. Measured under `-race`: **death detected in 600ms = timeout + 1 beat**, both peers conclude it independently, and the key reroutes off the dead node.
+- ☐ False positives (GC pause vs death) — **the core impossibility: a crash, a slow node, and a dropped packet are all just silence.** The timeout is the knob: short = fast detection + false positives (a GC pause looks dead → wrong ring recompute → asymmetric views → split-brain seed); long = fewer false positives + route to corpse longer. Demo pending.
+- ☐ Gossip / SWIM intuition — building all-to-all (O(N²), HLD-locked); gossip is the scaling alternative, to teach not build.
 
 ### Phase 5 — Self-heal
 - ☐ Data migration on membership change

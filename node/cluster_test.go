@@ -23,11 +23,7 @@ func startCluster(t *testing.T, ids ...string) map[string]*Node {
 		peers[id] = n.Addr()
 	}
 	for _, n := range nodes {
-		r := ring.New()
-		for _, id := range ids {
-			r.Add(id)
-		}
-		n.SetMembership(r, peers)
+		n.SetMembership(peers)
 	}
 	return nodes
 }
