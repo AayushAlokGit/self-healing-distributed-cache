@@ -13,7 +13,7 @@ import (
 //
 // This test EXISTS to demonstrate the failure. Step 2's mutex makes it pass.
 func TestConcurrentSetRace(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 
 	var wg sync.WaitGroup // waits for all goroutines to finish

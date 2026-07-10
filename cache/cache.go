@@ -1,8 +1,8 @@
 // Package cache is a naive in-memory key→value store.
 //
-// Phase 1, step 3b: mutex-guarded map with per-key TTL. Expired entries are
-// reclaimed lazily on read and by a background sweeper.
-// Deliberately missing: a size limit. That's step 4.
+// Phase 1, step 4: mutex-guarded map with per-key TTL and LRU eviction at a
+// capacity. Expired entries are reclaimed lazily on read, by a background
+// sweeper, and preferentially at eviction time.
 package cache
 
 import (
@@ -11,6 +11,9 @@ import (
 )
 
 const (
+	// A capacity of noLimit lets the map grow until the process dies.
+	noLimit = 0
+
 	// Only says how often we check. The sampler sets its own rate.
 	defaultSweepInterval = time.Second
 
@@ -34,6 +37,13 @@ type entry struct {
 
 	// The zero Time means "never expires" — see Cache.Set.
 	expires time.Time
+
+	// Value of Cache.clock at the last read or write. The eviction victim is
+	// the minimum. Not a timestamp: LRU needs the order of accesses, not their
+	// times, and time.Now() cannot supply the order — it stands still for 541µs
+	// at a stretch on Windows, so ~5,400 consecutive Sets share one instant and
+	// the victim is picked at random. A counter ties only when events coincide.
+	lastUsed uint64
 }
 
 func (e entry) expired(now time.Time) bool {
@@ -52,9 +62,18 @@ type Cache struct {
 	mu   sync.Mutex
 	data map[string]entry
 
+	// Max entries, or noLimit. Counting entries rather than bytes is a lie when
+	// values vary in size — Redis bounds bytes (maxmemory). Set once, never
+	// mutated, so it needs no lock.
+	capacity int
+
 	// expiring indexes only the keys with a deadline. Sampling all of data
 	// instead would be diluted to uselessness by a mostly-permanent cache.
 	expiring map[string]struct{}
+
+	// A logical clock: ticks once per access, so it orders accesses without
+	// measuring time. Guarded by mu. Wraps after 584 years at a billion ops/sec.
+	clock uint64
 
 	// Closed, not sent to, so every receiver unblocks — now and forever.
 	done chan struct{}
@@ -66,16 +85,18 @@ type Cache struct {
 	wg sync.WaitGroup
 }
 
-// New creates an empty Cache and starts its sweeper. Close it when done.
-func New() *Cache {
-	return newWithSweepInterval(defaultSweepInterval)
+// New creates an empty Cache holding at most capacity entries, and starts its
+// sweeper. A capacity <= 0 means unbounded. Close it when done.
+func New(capacity int) *Cache {
+	return newWithSweepInterval(capacity, defaultSweepInterval)
 }
 
 // newWithSweepInterval lets tests sweep on a millisecond timescale.
-func newWithSweepInterval(interval time.Duration) *Cache {
+func newWithSweepInterval(capacity int, interval time.Duration) *Cache {
 	c := &Cache{
 		data:     make(map[string]entry),
 		expiring: make(map[string]struct{}),
+		capacity: capacity,
 
 		// A channel's zero value is nil, and a receive from nil blocks forever.
 		done: make(chan struct{}),
@@ -187,19 +208,63 @@ func (c *Cache) sweepAll() int {
 	return removed
 }
 
+// evictLocked frees exactly one slot, preferring an already-expired entry over
+// a live one. Callers must hold c.mu and must not call it on an empty map.
+//
+// Corpses first because recency and expiry are independent orderings: 999
+// sessions Set 100ms ago with a 50ms TTL are all *more recently used* than a
+// permanent config key read a minute ago. Plain LRU evicts the config key and
+// keeps 1000 corpses — a cache worse than empty.
+//
+// O(total entries), and unlike sweepAll this runs on the write path, on every
+// Set, once the cache is full — which is a cache's normal steady state.
+// See BenchmarkSetAtCapacity; step 5 replaces it with a linked list.
+func (c *Cache) evictLocked(now time.Time) {
+	var victim string
+	var oldest uint64 // clock starts at 1, so 0 means "unset"
+
+	for k, e := range c.data {
+		if e.expired(now) {
+			victim = k // free the capacity that costs nothing to free
+			break
+		}
+		if oldest == 0 || e.lastUsed < oldest {
+			victim, oldest = k, e.lastUsed
+		}
+	}
+
+	delete(c.data, victim)
+	delete(c.expiring, victim)
+}
+
+// tickLocked stamps the next access. Callers must hold c.mu.
+func (c *Cache) tickLocked() uint64 {
+	c.clock++
+	return c.clock
+}
+
 // Set stores (or overwrites) the value for key, expiring it after ttl.
 // A ttl <= 0 means the entry never expires. Overwriting resets the deadline:
 // the new ttl fully replaces the old one.
+//
+// A Set that would exceed capacity evicts one entry first. Overwriting an
+// existing key does not grow the map, so it never evicts.
 func (c *Cache) Set(key, value string, ttl time.Duration) {
-	// Computed before the lock: no reason to hold it across a clock read.
+	// Read once before the lock: no reason to hold it across a clock read.
+	now := time.Now()
 	var expires time.Time
 	if ttl > 0 {
-		expires = time.Now().Add(ttl)
+		expires = now.Add(ttl)
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.data[key] = entry{value: value, expires: expires}
+
+	_, overwrite := c.data[key]
+	if !overwrite && c.capacity > noLimit && len(c.data) >= c.capacity {
+		c.evictLocked(now)
+	}
+	c.data[key] = entry{value: value, expires: expires, lastUsed: c.tickLocked()}
 
 	// Overwriting a TTL'd key with a permanent one must un-index it.
 	if ttl > 0 {
@@ -220,8 +285,9 @@ func (c *Cache) Len() int {
 // Get returns the value for key. The bool is false if the key is absent or
 // expired; the caller cannot tell those apart, and shouldn't need to.
 //
-// It deletes an entry it finds expired, which makes Get a writer — it could not
-// take a read lock under sync.RWMutex.
+// A hit is a use, so it refreshes lastUsed. Between that, deleting expired
+// entries, and dropping them from the index, Get writes three ways — it could
+// not take a read lock under sync.RWMutex.
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -230,10 +296,17 @@ func (c *Cache) Get(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if e.expired(time.Now()) {
+
+	now := time.Now()
+	if e.expired(now) {
 		delete(c.data, key)
 		delete(c.expiring, key)
 		return "", false
 	}
+
+	// e is a copy: map values are not addressable, so mutating e alone changes
+	// nothing, and c.data[key].lastUsed = ... would not compile.
+	e.lastUsed = c.tickLocked()
+	c.data[key] = e
 	return e.value, true
 }

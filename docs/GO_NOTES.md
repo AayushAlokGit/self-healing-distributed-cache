@@ -201,6 +201,25 @@ all-time peak. Measured: sweeping 200k entries to `Len()==0` left **16.5 MB** al
 `c.data` with a fresh map dropped it to 0.5 MB. Only reallocation releases it. Redis rehashes into a
 smaller table; Go doesn't.
 
+The residue scales with the *entry struct*, not the payload: adding one `uint64` to `entry`
+(40 B → 48 B) moved it from **16.5 MB → 25.2 MB**. A test asserting on a *fraction* of the peak heap
+is therefore asserting on `sizeof(entry)`. Assert on the payload you expect back instead.
+→ `leak_test.go`
+
+⚠️ **Map values are not addressable.** `m[k].field = v` is a compile error, and `e := m[k];
+e.field = v` mutates a **copy**. Read, mutate, write back:
+```go
+e := c.data[key]
+e.lastUsed = c.tickLocked()
+c.data[key] = e          // the write-back is not optional
+```
+Unlike C++ `m[k].field = v` or Python `d[k].field = v`, which mutate in place. Why: the map may
+rehash and move entries, so a pointer into a bucket could dangle. (A `map[string]*entry` *is*
+addressable — at the cost of a pointer chase and an allocation per entry.)
+
+**Cost of the write-back: nothing measurable.** `BenchmarkGet` went 66.99ns → 61.31ns when `Get`
+started rewriting the entry on every hit. The slot is already in L1 from the lookup.
+
 ---
 
 ## Strings, numbers, time
@@ -228,6 +247,19 @@ it — so TTLs survive an NTP correction or a VM resume, for free.
 ⚠️ Certain operations **strip** the monotonic reading — `t.Round(0)`, JSON marshaling, database
 drivers. After that you're silently doing wall-clock arithmetic again, and clock jumps come back.
 Matters when we serialize entries across nodes in Phase 3.
+
+⚠️ **`time.Now()` has terrible *resolution*, whatever its precision.** It reports nanoseconds and
+advances in ~541µs jumps on this Windows box: **13,397 consecutive calls returned the identical
+instant.** A `Set` is ~100ns, so ~5,400 back-to-back `Set`s share one timestamp.
+
+Consequence: **you cannot order events by asking a clock.** `lastUsed time.Time` + `Before()` made
+LRU pick its victim *at random* among tied entries (and `range` randomizes the order, so the tie-break
+is random too). The test failed 5 runs in 10 — flakiness, not a clean failure.
+
+Fix: a **logical clock** — a `uint64` on the `Cache`, incremented under the lock on every access.
+Two events tie only if they *are* the same event. Costs an increment instead of a clock read, and it
+is the single-node case of the **Lamport clock** we'll need in Phase 3, where wall clocks on different
+machines disagree and can run backwards. → `Cache.tickLocked`
 
 ---
 

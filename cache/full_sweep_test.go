@@ -18,13 +18,16 @@ func fill(c *Cache, n int) {
 	}
 }
 
-// BenchmarkGet-20   16944270   66.99 ns/op   0 allocs/op
+// BenchmarkGet-20   19200276   61.31 ns/op   0 allocs/op
 //
 // Decomposed: mutex Lock+Unlock 26.87ns, map lookup 22.18ns, time.Now() 8.03ns.
 // An uncontended mutex is 40% of a read, with only ~22ns of work to overlap —
 // that's the case against sync.RWMutex, whose RLock costs more than a Lock.
+//
+// Was 66.99ns before Get wrote lastUsed back on every hit. Rewriting a slot the
+// lookup just pulled into L1 costs nothing measurable.
 func BenchmarkGet(b *testing.B) {
-	c := newWithSweepInterval(time.Hour)
+	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()
 	c.Set("live", "v", noTTL)
 
@@ -48,7 +51,7 @@ func BenchmarkGet(b *testing.B) {
 func BenchmarkSweep(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000, 1_000_000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
-			c := newWithSweepInterval(time.Hour)
+			c := newWithSweepInterval(noLimit, time.Hour)
 			defer c.Close()
 			fill(c, n)
 
@@ -92,7 +95,7 @@ func TestSweepStallsReaders(t *testing.T) {
 		window = 500 * time.Millisecond
 	)
 
-	c := newWithSweepInterval(time.Hour) // no background sweeper; we drive it
+	c := newWithSweepInterval(noLimit, time.Hour) // no background sweeper; we drive it
 	defer c.Close()
 	fill(c, keys)
 	c.Set("live", "v", noTTL)

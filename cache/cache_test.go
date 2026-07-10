@@ -9,7 +9,7 @@ import (
 const noTTL = 0
 
 func TestSetGet(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 	c.Set("user:1", "Aayush", noTTL)
 
@@ -23,7 +23,7 @@ func TestSetGet(t *testing.T) {
 }
 
 func TestMiss(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 
 	_, ok := c.Get("nope")
@@ -35,7 +35,7 @@ func TestMiss(t *testing.T) {
 // A key deliberately storing "" must be a hit, so callers can tell an empty
 // value from a missing key.
 func TestEmptyValueIsAHit(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 	c.Set("greeting", "", noTTL)
 
@@ -52,7 +52,7 @@ func TestEmptyValueIsAHit(t *testing.T) {
 // The sweeper (step 3b) will want an injectable clock so we can advance time
 // instead of waiting for it.
 func TestTTLExpires(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 	c.Set("session:abc", "aayush", 500*time.Millisecond)
 
@@ -70,7 +70,7 @@ func TestTTLExpires(t *testing.T) {
 // Guards the ttl <= 0 sentinel: without it, a zero ttl would compute
 // expires = now and the key would die on its own birth.
 func TestZeroTTLNeverExpires(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 	c.Set("permanent", "v", noTTL)
 
@@ -90,7 +90,7 @@ func TestZeroTTLNeverExpires(t *testing.T) {
 // starts. Checking only the first would pass even if overwrite wrongly made the
 // key permanent.
 func TestOverwriteResetsDeadline(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 	c.Set("k", "a", 300*time.Millisecond)
 	c.Set("k", "b", 2*time.Second)
@@ -115,7 +115,7 @@ func TestOverwriteResetsDeadline(t *testing.T) {
 // Delete-on-read is invisible through Get — an expired key reads as a miss
 // whether or not it was removed — so this reaches into c.data directly.
 func TestExpiredKeyIsDeletedOnRead(t *testing.T) {
-	c := New()
+	c := New(noLimit)
 	defer c.Close()
 	c.Set("tmp", "v", 100*time.Millisecond)
 

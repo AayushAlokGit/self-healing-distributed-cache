@@ -11,21 +11,18 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 4 — build LRU eviction** (concepts taught & quizzed 2026-07-09;
-  no code written yet). Agreed build order:
-  1. Naive LRU: `lastUsed time.Time` per entry, evict by scanning for the minimum. **Expiry-aware
-     from the start** — reclaim a corpse before evicting anything live (a *correctness* fix, not a
-     perf guess; Aayush argued it out himself).
-  2. Measure the O(n) victim scan. It's `sweepAll`'s bug on the **write path**: `sweepAll` froze 2.5%
-     of wall time on a background goroutine; an O(n) eviction scan runs on **every `Set` once the
-     cache is full**, which is a cache's normal steady state.
-  3. Replace with a hand-rolled **hash map + doubly linked list** → O(1) lookup / move-to-front /
-     evict-tail.
+- **Next action:** **Phase 1, step 5 — O(1) eviction.** Steps 1–2 are DONE (2026-07-10): naive
+  expiry-aware LRU shipped, and the O(n) victim scan is measured at **25.6 ms per `Set`** into a full
+  1M-entry cache (`BenchmarkSetAtCapacity`). Remaining:
+  3. Replace the scan with a hand-rolled **hash map + doubly linked list** → O(1) lookup /
+     move-to-front / evict-tail. Keep the corpse-first rule: the list gives O(1) *access* order, not
+     expiry order, so `evictLocked` must still consult the deadline.
   4. Build a **hit-rate benchmark**: hot-key workload, then the same interrupted by a scan. Watch the
      hit rate collapse. *Only then* consider segmented LRU. The scan story is a hypothesis until it
      prints a number.
   Open the next session by re-asking the **seven** carried-forward questions cold — table at the
-  bottom of `docs/QUIZZES.md`.
+  bottom of `docs/QUIZZES.md`. Aayush's `check-then-act` / `compare-don't-remember` question is
+  **still unanswered after three asks** and should go first.
 - **Deferred, on purpose:** (a) `sync.RWMutex` — measured: the *uncontended* mutex is **40% of a 67 ns
   `Get`** (26.9 ns), with only ~22 ns of real work to overlap, and an `RLock` costs more than a
   `Lock`. Not an obvious win; also `Get` *deletes*, so it can't take an `RLock` as written.
@@ -57,7 +54,7 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
 - ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
 - ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper**. Full-scan sweep measured to stall readers **751×** → replaced with Redis-style **sampling** (`samplePass` + `expiring` index): 27ms lock hold → 7µs at 1M keys, reader cost 751× → 2.0×.
-- ◐ LRU eviction — **taught & quizzed, not yet built.** Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Eviction must be **expiry-aware** (corpses occupy capacity). Next: naive O(n) victim scan → measure → hash map + doubly linked list.
+- ◐ LRU eviction — **naive version shipped, O(1) version pending.** Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Built: `capacity` + `evictLocked` scanning for the minimum `lastUsed`, **corpse-first** (recency and expiry are independent orderings). `lastUsed` is a **logical clock**, not a timestamp — `time.Now()` stands still for 541µs and cannot order back-to-back `Set`s. Measured: **25.6 ms per `Set`** into a full 1M cache. Next: hash map + doubly linked list → O(1); then a hit-rate benchmark under a scan.
 
 ### Phase 2 — Consistent hashing
 - ☐ Why `hash % N` breaks on resize
@@ -86,6 +83,74 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 ---
 
 ## Session log
+### Session 5 — 2026-07-10 · Phase 1 step 4: eviction, built
+
+**Cold re-ask of the nine carried-forward questions: 2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘.** Full text in
+`docs/QUIZZES.md`. Three things worth carrying:
+- **`check-then-act` is now a three-time miss.** Given a `GetOrRefresh` where *every* map access is
+  locked, Aayush answered "there is no lock for `c.Set()`." The instinct is *"unsynchronized access →
+  bug"*; the needed instinct is *"decision made under a lock, acted on after the unlock → bug."*
+  Re-asked a second time in-session, deferred, **still unanswered.**
+- **Starvation was defined backwards** ("blocked briefly, not indefinitely" = ordinary waiting).
+  Taught the real definition (postponed indefinitely *while the system as a whole progresses*) and
+  **starvation mode** — Go's mutex hands the lock directly to a waiter blocked >1ms. `TestSweepStalls-
+  Readers`' 8,769 gets exist only because of that mechanism.
+- **Happens-before taught from scratch** (was ⊘): compiler reordering, store buffers, memory barriers,
+  and the trap that Go's `sync/atomic` is sequentially consistent while C++'s `relaxed` is not.
+  **Atomicity and visibility are separate properties.** Prerequisite for Phase 3.
+
+**Built: capacity + expiry-aware LRU** (`cache/cache.go`, `cache/eviction_test.go`).
+- `Cache.capacity`; `noLimit = 0` means unbounded. Bounds **entries, not bytes** — a lie when values
+  vary in size (Redis bounds bytes via `maxmemory`). Noted, not fixed.
+- Eviction lives in **`Set` only**, and only when inserting a **new** key into a full cache.
+  Overwriting doesn't grow the map. (`TestOverwriteDoesNotEvict` guards the bug where a capacity-2
+  cache evicts `a` while `Set`ting `a`.)
+- `Get` **hit** refreshes recency → `Get` writes three ways now. Third nail in `RWMutex`'s coffin.
+- `evictLocked` scans for the **first corpse**, else the minimum `lastUsed`. Corpse-first is a
+  *correctness* fix: `TestEvictsCorpseBeforeLiveKey` is quiz S4d Q4 as a test.
+
+**The naive design failed, and the measurement said why.**
+`lastUsed time.Time` made `TestEvictsLeastRecentlyUsed` fail **5 runs in 10** — flaky, not broken.
+Probed it: **`time.Now()` returned the identical instant for 13,397 consecutive calls; the clock did
+not tick for 541µs.** A `Set` is ~100ns, so **~5,400 back-to-back `Set`s share one timestamp**. With
+ties everywhere, `e.lastUsed.Before(oldest)` never fires and the victim is whichever key `range`
+happens to yield first — **chosen at random.** The code was right; the *type* was wrong.
+> **You cannot order events by asking a clock.** LRU needs the order of accesses, not their times.
+
+Fixed with a **logical clock**: `Cache.clock uint64`, `tickLocked()` increments it under the lock,
+`entry.lastUsed` stores the value. Two events tie only if they *are* the same event. Ten consecutive
+runs green. This is the single-node case of the **Lamport clock** we'll need in Phase 3, where wall
+clocks on different machines disagree by milliseconds and can run backwards under NTP. Arrived at it
+because a Windows timer wasn't precise enough — which is not a coincidence, it's the same problem.
+
+**Measured (13th Gen i7-13700H, Go 1.26):**
+```
+BenchmarkSetAtCapacity/1000-20         22,843 ns/op   -> 22.8 ns/key
+BenchmarkSetAtCapacity/10000-20       223,358 ns/op   -> 22.3 ns/key
+BenchmarkSetAtCapacity/100000-20    2,010,846 ns/op   -> 20.1 ns/key
+BenchmarkSetAtCapacity/1000000-20  25,608,480 ns/op   -> 25.6 ns/key
+```
+**25.6 ms per `Set`** into a full 1M cache — Aayush predicted "~25ms" from theory last session. It is
+`BenchmarkSweep`'s 27.5 ns/key: literally the same scan. The difference is *where* it runs. `sweepAll`
+paid it once a second on a background goroutine; this pays it on the caller's goroutine on **every
+`Set`**, and a cache that isn't full has the wrong capacity. Earns step 5.
+
+**Unpredicted:** `BenchmarkGet` went **66.99ns → 61.31ns, 0 allocs** despite `Get` now performing an
+extra map *write*. Rewriting a slot the lookup just pulled into L1 costs nothing measurable. I'd have
+guessed a few ns of cost; the measurement won.
+
+**Broke an old test, honestly.** `entry` grew 40 B → 48 B, and `TestSweepReclaimsUnreadKeys` asserted
+`afterSweep <= afterWrite/2` — a magic threshold, crossed by 0.4 MB (25.2 vs 24.8). The sweep still
+reclaims everything. The real finding: **the never-shrinking bucket residue scales with `sizeof(entry)`,
+not with the payload** — 16.5 MB → 25.2 MB from one added `uint64`, across the bucket arrays of *both*
+`data` and `expiring`. A test asserting on a fraction of peak heap is asserting on `sizeof(entry)`.
+Rewrote it to assert on the ~24 MB of payload the sweep actually owes us.
+
+**Also:** compressed `docs/QUIZZES.md` 543 → 215 lines (every question, model answer, and named gap
+kept; the restatements cut).
+
+---
+
 ### Session 4 — 2026-07-09
 - **`cache/race_test.go` written** — 100 goroutines × 100 writes of *disjoint* keys into the naive
   map. No assertions by design: the pass/fail signal is the Go **runtime**, not `t.Errorf`. Verified
@@ -436,6 +501,16 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 
 ## Quiz results log
 _(Score + what to revisit. **Full question text and model answers live in `docs/QUIZZES.md`.**)_
+
+### 2026-07-10 — Session 5: cold re-ask of the 9 carried-forward questions → **2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘**
+- ✅ naive-timer overwrite bug · ✅ `Close()`/`select`/`Ticker`
+- ❌ **check-then-act** — third miss. Looked for a missing lock in a fully-locked function.
+- ⚠️ **starvation** defined backwards · ⚠️ **resource semantics** ("heap allocation makes it a
+  resource" — no; a `[]byte` is heap-allocated and is a value) · ⚠️ **compare-don't-remember** —
+  slogan recited, interleaving not produced · ⚠️ **expiry-aware eviction** — right victim, imported
+  the wrong principle · ⚠️ **scan resistance** — 3 of 4 families, never *named* admission control
+- ⊘ **happens-before** — not attempted; taught in full.
+- **Revisit first:** check-then-act (still unanswered), then admission control, then happens-before.
 
 ### 2026-07-09 — Session 4: concurrency, races, mutex (6 Q) → **4 ✅ · 2 ⊘ · 0 ❌**
 - **Disjoint keys still race** — ✅ named the shared map; sharpened to *which part* (bucket array /

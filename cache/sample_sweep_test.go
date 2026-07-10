@@ -24,7 +24,7 @@ func TestSampleSweepDoesNotStallReaders(t *testing.T) {
 		window = 500 * time.Millisecond
 	)
 
-	c := newWithSweepInterval(time.Hour)
+	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()
 	fill(c, keys)
 	c.Set("live", "v", noTTL)
@@ -68,7 +68,7 @@ func TestSampleSweepDoesNotStallReaders(t *testing.T) {
 func TestSampleSweepReclaimsCorpses(t *testing.T) {
 	const keys = 50_000
 
-	c := newWithSweepInterval(time.Hour)
+	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()
 	fillExpiring(c, keys, 10*time.Millisecond)
 
@@ -101,7 +101,7 @@ func TestSampleSweepIgnoresPermanentKeys(t *testing.T) {
 		expiring  = 100
 	)
 
-	c := newWithSweepInterval(time.Hour)
+	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()
 	fill(c, permanent)
 	fillExpiring(c, expiring, 10*time.Millisecond)
@@ -128,7 +128,7 @@ func TestSampleSweepIgnoresPermanentKeys(t *testing.T) {
 // data and expiring must agree. Three sites mutate data, so three must mutate
 // the index — including Set overwriting a TTL'd key with a permanent one.
 func TestExpiringIndexStaysConsistent(t *testing.T) {
-	c := newWithSweepInterval(time.Hour)
+	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()
 
 	c.Set("k", "v", time.Hour)
@@ -164,7 +164,7 @@ func TestExpiringIndexStaysConsistent(t *testing.T) {
 func BenchmarkSamplePass(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000, 1_000_000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
-			c := newWithSweepInterval(time.Hour)
+			c := newWithSweepInterval(noLimit, time.Hour)
 			defer c.Close()
 			fillExpiring(c, n, time.Hour) // indexed, none expired
 

@@ -29,7 +29,7 @@ func TestSweepReclaimsUnreadKeys(t *testing.T) {
 		ttl  = 50 * time.Millisecond
 	)
 
-	c := newWithSweepInterval(time.Hour) // effectively disables the background sweeper
+	c := newWithSweepInterval(noLimit, time.Hour) // effectively disables the background sweeper
 	defer c.Close()
 
 	before := heapMB()
@@ -50,15 +50,26 @@ func TestSweepReclaimsUnreadKeys(t *testing.T) {
 	c.sweepAll()
 	afterSweep := heapMB()
 
+	reclaimed := leaked - afterSweep
+
 	t.Logf("heap: %.1f MB empty → %.1f MB written → %.1f MB all-expired → %.1f MB swept",
 		before, afterWrite, leaked, afterSweep)
 	t.Logf("Len(): %d written → %d all-expired → %d swept", keys, keys, c.Len())
+	t.Logf("sweep returned %.1f MB; %.1f MB of bucket array survives Len()==0", reclaimed, afterSweep)
 
 	if got := c.Len(); got != 0 {
 		t.Fatalf("sweep should have reclaimed every expired entry, Len()=%d", got)
 	}
-	if afterSweep > afterWrite/2 {
-		t.Fatalf("heap barely moved: %.1f → %.1f MB; corpses still reachable?", afterWrite, afterSweep)
+
+	// The sweep owes us the payload: 200k values of ~106 B plus 200k keys of
+	// ~13 B, so ~24 MB. It cannot owe us more. Go maps never shrink — delete
+	// frees the key and value bytes, but the bucket arrays of BOTH data and
+	// expiring stay sized for the all-time peak. Asserting on a fraction of
+	// afterWrite instead would track that residue, which grows whenever entry
+	// does: adding lastUsed (40 B → 48 B) moved it from 16.5 MB to 25.2 MB.
+	const minReclaimedMB = 20
+	if reclaimed < minReclaimedMB {
+		t.Fatalf("sweep returned only %.1f MB of the ~24 MB payload; corpses still reachable?", reclaimed)
 	}
 }
 
@@ -66,7 +77,7 @@ func TestSweepReclaimsUnreadKeys(t *testing.T) {
 func TestCloseStopsSweeper(t *testing.T) {
 	before := runtime.NumGoroutine()
 
-	c := newWithSweepInterval(time.Millisecond)
+	c := newWithSweepInterval(noLimit, time.Millisecond)
 	c.Set("k", "v", noTTL)
 	c.Close()
 
@@ -78,13 +89,13 @@ func TestCloseStopsSweeper(t *testing.T) {
 // Cache.closeOnce ensures that the second c.Close() does not close a closed
 // channel and cause a runtime panic.
 func TestCloseIsIdempotent(t *testing.T) {
-	c := newWithSweepInterval(time.Millisecond)
+	c := newWithSweepInterval(noLimit, time.Millisecond)
 	c.Close()
 	c.Close()
 }
 
 func TestSweeperSparesLiveAndPermanentKeys(t *testing.T) {
-	c := newWithSweepInterval(5 * time.Millisecond)
+	c := newWithSweepInterval(noLimit, 5*time.Millisecond)
 	defer c.Close()
 
 	c.Set("doomed", "v", 10*time.Millisecond)
