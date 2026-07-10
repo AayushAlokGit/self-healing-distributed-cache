@@ -10,7 +10,15 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"sort"
+	"strconv"
 )
+
+// Virtual points per physical node. One point per node cuts the ring into lumpy
+// arcs (measured: 20x span over 10 nodes); scattering ~150 points per node makes
+// each node's total load the sum of many small arcs, which concentrates around
+// the average. It also spreads a dead node's load across all survivors instead
+// of dumping it on one clockwise neighbour. 100-200 is the usual range.
+const defaultReplicas = 150
 
 // hashKey maps a string onto the 32-bit ring.
 //
@@ -32,20 +40,33 @@ type point struct {
 	node string
 }
 
-// Ring holds node points sorted by hash. Not safe for concurrent use yet;
-// membership changes will need a lock once a live cluster mutates it.
+// Ring holds node points sorted by hash. Each physical node contributes
+// replicas points. Not safe for concurrent use yet; membership changes will
+// need a lock once a live cluster mutates it.
 type Ring struct {
-	points []point
+	replicas int
+	points   []point
 }
 
 func New() *Ring {
-	return &Ring{}
+	return NewWithReplicas(defaultReplicas)
 }
 
-// Add places node on the ring. Re-sorts every call: fine for a handful of nodes
-// added rarely, and membership changes are not the hot path.
+// NewWithReplicas lets tests dial the virtual-point count, including down to 1
+// to see the naive ring's imbalance.
+func NewWithReplicas(replicas int) *Ring {
+	return &Ring{replicas: replicas}
+}
+
+// Add places node on the ring as replicas scattered points. The "#i" suffix
+// gives each a distinct hash; SHA-256's avalanche scatters them so one node's
+// points interleave with every other's. Re-sorts every call: fine for a handful
+// of nodes added rarely, and membership changes are not the hot path.
 func (r *Ring) Add(node string) {
-	r.points = append(r.points, point{hash: hashKey(node), node: node})
+	for i := range r.replicas {
+		h := hashKey(node + "#" + strconv.Itoa(i))
+		r.points = append(r.points, point{hash: h, node: node})
+	}
 	sort.Slice(r.points, func(i, j int) bool {
 		return r.points[i].hash < r.points[j].hash
 	})

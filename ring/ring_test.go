@@ -69,17 +69,18 @@ func spread(counts map[string]int, nodes, keys int) (float64, float64) {
 // longer cluster, but ten single points still cut the circle into uneven arcs,
 // so load is lumpy even with no failures. Recorded run, 10 nodes, 100k keys:
 //
-//	busiest node held 3.2x its fair share, quietest 0.16x  -> 20x span
+//	per-node [378 5609 6757 7652 8848 10841 11310 11647 12499 24459]
+//	busiest 2.4x fair share, quietest 0.04x  -> 65x span
 //
-// Ideal is 10,000 keys each. No hash fixes this; step 2 (virtual nodes) does,
-// by giving each node many points so the arc sizes average out.
+// Ideal is 10,000 keys each. No hash fixes this; virtual nodes do, by giving
+// each node many points so the arc sizes average out.
 func TestNaiveRingIsLumpy(t *testing.T) {
 	const (
 		nodes = 10
 		keys  = 100_000
 	)
 
-	r := New()
+	r := NewWithReplicas(1) // the naive ring: one point per node
 	for i := range nodes {
 		r.Add("node" + strconv.Itoa(i))
 	}
@@ -95,7 +96,102 @@ func TestNaiveRingIsLumpy(t *testing.T) {
 	hi, lo := spread(counts, nodes, keys)
 	t.Logf("%d keys over %d nodes, ideal %d each", keys, nodes, keys/nodes)
 	t.Logf("per-node counts: %v", sorted)
-	t.Logf("busiest %.1fx fair share, quietest %.1fx  (%.1fx span)", hi, lo, hi/lo)
+	t.Logf("busiest %.2fx fair share, quietest %.2fx  (%.1fx span)", hi, lo, hi/lo)
+}
+
+// The payoff: each physical node owns many small arcs, so its total load is the
+// sum of many random pieces and concentrates around the average. The span
+// collapses as replicas rise. Recorded run, 10 nodes, 100k keys:
+//
+//	  1 replica    busiest 2.45x  quietest 0.04x   64.7x span
+//	 10 replicas   busiest 1.75x  quietest 0.46x    3.8x span
+//	 50 replicas   busiest 1.24x  quietest 0.83x    1.5x span
+//	150 replicas   busiest 1.23x  quietest 0.85x    1.4x span
+//
+// The excess over fair share shrinks ~1/sqrt(replicas) (the standard error of a
+// mean) in the steep part, then plateaus: 50 -> 150 barely moves (1.24 -> 1.23),
+// because at 1500 points the residual is the finite-keyspace sampling, not arc
+// variance. So ~50 points already gets nearly all the benefit for 10 nodes;
+// more just costs storage. 150 leaves headroom for larger clusters.
+func TestVirtualNodesFlattenLoad(t *testing.T) {
+	const (
+		nodes = 10
+		keys  = 100_000
+	)
+
+	var last float64
+	for _, replicas := range []int{1, 10, 50, 150} {
+		r := NewWithReplicas(replicas)
+		for i := range nodes {
+			r.Add("node" + strconv.Itoa(i))
+		}
+
+		hi, lo := spread(distribution(r, keys), nodes, keys)
+		t.Logf("%3d replicas   busiest %.2fx  quietest %.2fx   %.1fx span", replicas, hi, lo, hi/lo)
+		last = hi
+	}
+
+	// 150 replicas should hold the busiest node near its fair share.
+	if last > 1.25 {
+		t.Fatalf("virtual nodes failed to balance: busiest still %.2fx fair share", last)
+	}
+}
+
+// The second reason for virtual nodes (Q8): a naive node's whole arc dumps onto
+// its one clockwise neighbour, risking a cascade. With many scattered points,
+// the dead node's keys spread across every survivor. Recorded run:
+//
+//	naive:  node3's keys landed on 1 survivor,  which took 100% of them
+//	vnodes: node3's keys landed on 9 survivors, busiest took 19%
+func TestFailureSpreadsLoadAcrossSurvivors(t *testing.T) {
+	const (
+		nodes = 10
+		keys  = 100_000
+	)
+
+	measure := func(replicas int) (survivors int, busiestShare float64) {
+		r := NewWithReplicas(replicas)
+		for i := range nodes {
+			r.Add("node" + strconv.Itoa(i))
+		}
+		before := make([]string, keys)
+		for i := range keys {
+			before[i] = r.Get("key:" + strconv.Itoa(i))
+		}
+
+		r.Remove("node3")
+
+		absorbed := map[string]int{}
+		moved := 0
+		for i := range keys {
+			if before[i] == "node3" {
+				absorbed[r.Get("key:"+strconv.Itoa(i))]++
+				moved++
+			}
+		}
+		busiest := 0
+		for _, c := range absorbed {
+			if c > busiest {
+				busiest = c
+			}
+		}
+		return len(absorbed), float64(busiest) / float64(moved)
+	}
+
+	n1, share1 := measure(1)
+	nV, shareV := measure(defaultReplicas)
+	t.Logf("naive:  node3's keys landed on %d survivor(s), busiest took %.0f%%", n1, share1*100)
+	t.Logf("vnodes: node3's keys landed on %d survivor(s), busiest took %.0f%%", nV, shareV*100)
+
+	if n1 != 1 {
+		t.Fatalf("naive ring should dump a dead node's whole arc on one neighbour, hit %d", n1)
+	}
+	if nV < nodes-1 {
+		t.Fatalf("vnodes should spread across all %d survivors, hit only %d", nodes-1, nV)
+	}
+	if shareV > 0.25 {
+		t.Fatalf("one survivor absorbed %.0f%% of the dead node's load", shareV*100)
+	}
 }
 
 // The property that justifies the whole construction: removing one node moves
