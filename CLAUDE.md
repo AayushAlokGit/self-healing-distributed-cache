@@ -96,6 +96,42 @@ exclusion, and `go test ./...` passes. Only standalone `go vet` catches it.
 than waiting for a bad outcome, so it's the only trustworthy concurrency check — a racy program can
 pass a plain `go test` a thousand times and still be undefined behavior.
 
+Run `gofmt -l ./cache/` too. It prints nothing when every file is canonically formatted; `gofmt -w`
+fixes them. It catches no bugs — but since Go has one true format, an unformatted file means nobody
+ran the tooling, and a clean one means every diff in review is a *semantic* diff.
+
+### Tests
+
+```
+go test ./cache/                          # just this package
+go test -race -count=1 ./...              # the pre-commit check
+go test -count=1 -run TestEvictsLRU ./cache/         # one test, by regex
+go test -count=1 -run 'TestEvicts|TestCapacity' -v ./cache/   # several, with t.Logf output
+go test -count=10 -run TestEvictsLeastRecentlyUsed ./cache/   # ten times: flush out flakes
+```
+
+`-count=1` **disables the test cache.** Without it Go replays a cached PASS and never runs the code,
+which silently hides a test that only fails sometimes. `-v` is what surfaces `t.Logf`; without it,
+logs from passing tests are swallowed. `-run` takes a **regex**, not a name.
+
+Repeat with `-count=10` whenever a test's result could depend on timing or map iteration order. A
+flaky test found by hand is a bug found; a flaky test found in CI is a bug shipped.
+
+### Benchmarks
+
+```
+go test -count=1 -run xxx -bench . -benchmem ./cache/       # all benchmarks, no tests
+go test -count=1 -run xxx -bench BenchmarkGet$ ./cache/     # one, anchored
+```
+
+`-run xxx` matches no test, so only benchmarks run — otherwise the whole suite runs first. `-bench`
+also takes a **regex**: `-bench BenchmarkGet` would match `BenchmarkGetOrRefresh` too, hence the `$`.
+`-benchmem` adds `B/op` and `allocs/op`, and an unexpected allocation is usually the benchmark
+measuring itself.
+
+⚠️ **Never benchmark under `-race`.** The detector adds 5–20× overhead to every memory access; the
+numbers are meaningless.
+
 ---
 
 ## The roadmap

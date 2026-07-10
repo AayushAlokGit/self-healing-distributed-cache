@@ -18,14 +18,15 @@ func fill(c *Cache, n int) {
 	}
 }
 
-// BenchmarkGet-20   19200276   61.31 ns/op   0 allocs/op
+// BenchmarkGet-20   23829523   52.52 ns/op   0 allocs/op
 //
 // Decomposed: mutex Lock+Unlock 26.87ns, map lookup 22.18ns, time.Now() 8.03ns.
-// An uncontended mutex is 40% of a read, with only ~22ns of work to overlap —
+// An uncontended mutex is over half a read, with ~22ns of work to overlap —
 // that's the case against sync.RWMutex, whose RLock costs more than a Lock.
 //
-// Was 66.99ns before Get wrote lastUsed back on every hit. Rewriting a slot the
-// lookup just pulled into L1 costs nothing measurable.
+// 66.99 -> 61.31 -> 52.52 ns across the last two rewrites. The recency list was
+// expected to cost a pointer chase; instead it paid for one, because a *node is
+// addressable and a map value is not, so Get stopped writing the entry back.
 func BenchmarkGet(b *testing.B) {
 	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()

@@ -152,15 +152,18 @@ func TestExpiringIndexStaysConsistent(t *testing.T) {
 
 // Sampling vs the full scan (BenchmarkSweep), same sizes:
 //
-//	1k        952.9 ns  vs      24,380 ns      26x
-//	10k     1,049   ns  vs     242,371 ns     231x
-//	100k    1,756   ns  vs   2,351,620 ns   1,339x
-//	1M      7,064   ns  vs  27,489,911 ns   3,891x
+//	1k        553.7 ns  vs      24,380 ns      44x
+//	10k       533.4 ns  vs     242,371 ns     454x
+//	100k      750.0 ns  vs   2,351,620 ns   3,136x
+//	1M      2,105   ns  vs  27,489,911 ns  13,059x
 //
-// The pause is NOT constant, as claimed: 7.4x growth over 1000x the data. It
-// touches exactly sampleSize keys at every size; what changes is what a touch
+// The pause is NOT constant, as once claimed: 3.8x growth over 1000x the data.
+// It touches exactly sampleSize keys at every size; what changes is what a touch
 // costs, as every random bucket probe becomes a cache and TLB miss. The full
 // scan grew 1,128x over the same range. Flat-ish vs linear, not constant.
+//
+// Was 952.9 / 1,049 / 1,756 / 7,064 ns before expiring became a map to *node:
+// the pass no longer looks each sampled key up in data a second time.
 func BenchmarkSamplePass(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000, 1_000_000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {

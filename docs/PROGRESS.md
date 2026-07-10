@@ -11,15 +11,13 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 5 — O(1) eviction.** Steps 1–2 are DONE (2026-07-10): naive
-  expiry-aware LRU shipped, and the O(n) victim scan is measured at **25.6 ms per `Set`** into a full
-  1M-entry cache (`BenchmarkSetAtCapacity`). Remaining:
-  3. Replace the scan with a hand-rolled **hash map + doubly linked list** → O(1) lookup /
-     move-to-front / evict-tail. Keep the corpse-first rule: the list gives O(1) *access* order, not
-     expiry order, so `evictLocked` must still consult the deadline.
-  4. Build a **hit-rate benchmark**: hot-key workload, then the same interrupted by a scan. Watch the
-     hit rate collapse. *Only then* consider segmented LRU. The scan story is a hypothesis until it
-     prints a number.
+- **Next action:** **Phase 1, step 6 — the hit-rate benchmark.** Steps 1–3 are DONE (2026-07-10):
+  expiry-aware LRU, then the hash map + doubly linked list. `Set` into a full 1M cache went
+  **25.6 ms → 579 ns (44,199×)**. Remaining:
+  4. Build a **hit-rate benchmark**: a hot-key workload, then the same workload interrupted by a
+     sequential scan. Watch the hit rate collapse. *Only then* consider segmented LRU. The scan story
+     is a hypothesis until it prints a number — and hit rate, not latency, is the metric that
+     measures an eviction *policy*.
   Open the next session by re-asking the **seven** carried-forward questions cold — table at the
   bottom of `docs/QUIZZES.md`. Aayush's `check-then-act` / `compare-don't-remember` question is
   **still unanswered after three asks** and should go first.
@@ -54,7 +52,8 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
 - ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
 - ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper**. Full-scan sweep measured to stall readers **751×** → replaced with Redis-style **sampling** (`samplePass` + `expiring` index): 27ms lock hold → 7µs at 1M keys, reader cost 751× → 2.0×.
-- ◐ LRU eviction — **naive version shipped, O(1) version pending.** Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Built: `capacity` + `evictLocked` scanning for the minimum `lastUsed`, **corpse-first** (recency and expiry are independent orderings). `lastUsed` is a **logical clock**, not a timestamp — `time.Now()` stands still for 541µs and cannot order back-to-back `Set`s. Measured: **25.6 ms per `Set`** into a full 1M cache. Next: hash map + doubly linked list → O(1); then a hit-rate benchmark under a scan.
+- ☑ LRU eviction — **O(1)**. Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Built naive first: `capacity` + a scan for the minimum `lastUsed`, **corpse-first** (recency and expiry are independent orderings). `lastUsed` had to be a **logical clock**, not a timestamp — `time.Now()` stands still for 541µs and cannot order back-to-back `Set`s. Measured **25.6 ms per `Set`** into a full 1M cache, then replaced the scan with a hand-rolled **hash map + doubly linked list** (`map[string]*node`, sentinel head/tail): **579 ns, 44,199×**, and `lastUsed`/`clock` deleted — position *is* recency. Corpses survive the rewrite via a bounded probe of the `expiring` index, whose hit rate provably tracks corpse density.
+- ◐ Scan resistance — **taught & quizzed, not built.** Four families: more evidence (segmented LRU / 2Q / InnoDB), frequency (LFU+decay, ARC, LIRS), **admission** (TinyLFU + Count-Min Sketch — the deep reframe: *LRU has no admission policy*), hinting (PG ring buffer, `MADV_SEQUENTIAL`). Blocked on the hit-rate benchmark.
 
 ### Phase 2 — Consistent hashing
 - ☐ Why `hash % N` breaks on resize
@@ -148,6 +147,61 @@ Rewrote it to assert on the ~24 MB of payload the sweep actually owes us.
 
 **Also:** compressed `docs/QUIZZES.md` 543 → 215 lines (every question, model answer, and named gap
 kept; the restatements cut).
+
+---
+
+### Session 5 (cont.) — Phase 1 step 5: O(1) eviction
+
+**Quick-check before coding: 3 ✅ · 1 ⚠️** (full text in `docs/QUIZZES.md`, Session 5b).
+
+**Built: hash map + doubly linked list.** `map[string]entry` → `map[string]*node`; sentinel `head`
+and `tail`; `unlink`/`pushFront`/`removeLocked`. The map has no order, the list has no lookup;
+together both operations are O(1). `lastUsed` and `Cache.clock` **deleted** — position in the list
+*is* recency, and you don't keep scaffolding after the building stands.
+
+```
+                scan for min lastUsed   unlink the tail
+    1k               22,843 ns/op          410.1 ns/op       56x
+   10k              223,358 ns/op          489.3 ns/op      456x
+  100k            2,010,846 ns/op          452.4 ns/op    4,445x
+    1M           25,608,480 ns/op          579.4 ns/op   44,199x
+```
+
+**Two things got faster that nobody asked for.**
+- `BenchmarkGet` **61.31 → 52.52 ns**. I predicted it would get *slower* (a pointer deref is a cache
+  miss the value-map didn't have). Instead the pointer **paid for itself**: a `*node` is addressable,
+  so `Get` stopped doing `c.data[key] = e` — one hash and one store deleted from the read path.
+- `BenchmarkSamplePass` at 1M: **7,064 → 2,105 ns (3.4×)**. `expiring` became `map[string]*node`, so
+  the sweeper stopped looking each sampled key up in `data` a second time.
+
+**The design tension, and how it resolved.** The list orders by **recency**; `evictLocked` prefers
+**corpses**; those are independent orderings, so the tail says nothing about whether a corpse exists.
+Making eviction O(1) *reintroduces* the S4d Q4 bug. Three options: (a) bounded probe of `expiring`,
+(b) an exact min-heap on `expires`, (c) do nothing and let the sweeper cope.
+
+Chose **(a)**, and the reason generalizes: **the probe's hit rate equals the corpse density, and the
+cost of a miss is inversely proportional to it.** At 99% corpses it never misses — which is exactly
+the catastrophic case. At 0.1% corpses it almost always misses, and wastes one slot in a thousand.
+*Accurate where accuracy matters, sloppy where sloppiness is free* — the same self-tuning property
+that makes Redis's sampler work. (b) would buy exactness in the regime where exactness is worthless.
+Put on the record in `TestEvictionProbeTracksCorpseDensity`, measured against `1-(1-d)^20`:
+
+```
+density 0.001   probe hit   2%   (theory   2%)
+density 0.010   probe hit  16%   (theory  18%)
+density 0.100   probe hit  88%   (theory  88%)
+density 0.990   probe hit 100%   (theory 100%)
+```
+
+**That test failed twice before it measured anything.** First: the corpses were given a 1ns TTL to
+avoid sleeping, but the clock doesn't tick for 541µs, so ~30% of trials had **no corpses at all**.
+Second, and worse: the corpses were inserted *first*, making the single corpse the LRU tail — the
+fallback evicted it whether or not the probe found it, so **the test could not have failed.** Fixed
+by backdating `expires` directly (no clock) and inserting the live keys first. Rule earned: *a test
+that cannot fail is not evidence.*
+
+**Also:** `CLAUDE.md` now documents the test/benchmark commands — `-count=1` (defeats the test cache),
+`-v` (surfaces `t.Logf`), `-run xxx -bench` (benchmarks only), `-benchmem`, never `-race` a benchmark.
 
 ---
 

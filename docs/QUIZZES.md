@@ -65,6 +65,45 @@ not wrap the map; it creates an ordering edge over all memory.**
 
 ---
 
+## Session 5b — 2026-07-10 · O(1) eviction (before the code)
+
+Phase 1, step 5. **3 ✅ · 1 ⚠️.**
+
+**Q1 — Make the list singly linked to save 8 bytes. Which operation becomes O(n)?**
+`remove(n)` **given a pointer to `n`** — not removal in general. Unlinking needs `n.prev` rewritten,
+and a singly linked node doesn't know who points at it, so you walk from the head. `prev` exists for
+exactly one reason: to make `Get`'s move-to-front O(1). (Evicting the *tail* alone would be fine.)
+**✅** — precise, named the predecessor as the cost.
+
+**Q2 — Why `map[string]*node` and not `map[string]node`?**
+Map values are **not addressable** (`c.data[k].next = x` doesn't compile), and worse, **a rehash moves
+values to new addresses**. A linked list is a web of pointers *between* nodes; if nodes lived in map
+buckets, growing the map would dangle every one. **Values that other values point at need stable
+identity, and map values have none.** Bonus: a `*node` is addressable, so `Get` stopped writing the
+entry back — `BenchmarkGet` **61.31 → 52.52 ns**.
+**✅** — got copy-semantics and stable addresses; sharpened with the rehash and the addressability link.
+
+**Q3 — Construct a workload where option (c) (evict tail, let the sweeper cope) serves 0% hit rate
+forever, despite the sweeper running every second.**
+Touch the hot key, then bury it under enough *new* `Set`s of short-TTL keys that it reaches the tail
+and dies before it's read again. Two corrections: they must be **inserts**, since only an insert into
+a full cache evicts and only a `Set`/`Get`-hit refreshes recency (reading a corpse *deletes* it).
+And the real answer is a **timing** argument: **eviction happens at `Set` rate, corpse reclamation at
+the sweeper's tick rate, and those are decoupled by six orders of magnitude.** A thousand `Set`s land
+in ~100µs; the sweeper wakes once a second. Within one tick the cache can evict live keys a thousand
+times over while reclaimable corpses sit there. Making the sweeper faster doesn't fix it — you'd have
+to run it *between every pair of `Set`s*, at which point it isn't a sweeper, it's `evictLocked`.
+**⚠️** — right shape, missed that it is fundamentally about decoupled rates.
+
+**Q4 — Why does peeking a min-heap on `expires` prove no corpse exists?**
+The root is the global minimum, so `root.expires > now` proves `expires > now` for **all n entries** —
+an O(1) statement about the entire population. A sample can never do that: **absence of evidence is
+not evidence of absence.** What (a) trades away is not space but **time and complexity** — O(1) with
+no per-node heap index, vs O(log n) plus a `heapIndex` maintained through every sift.
+**✅** — heap invariant correct; the trade was misnamed as "space."
+
+---
+
 ## Session 4d — 2026-07-09 · Eviction / LRU (before the code)
 
 Phase 1, step 4. **3 ✅ · 1 ⊘.**

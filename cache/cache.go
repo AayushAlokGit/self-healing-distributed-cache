@@ -1,7 +1,7 @@
 // Package cache is a naive in-memory key→value store.
 //
-// Phase 1, step 4: mutex-guarded map with per-key TTL and LRU eviction at a
-// capacity. Expired entries are reclaimed lazily on read, by a background
+// Phase 1, step 5: mutex-guarded map with per-key TTL and O(1) LRU eviction at
+// a capacity. Expired entries are reclaimed lazily on read, by a background
 // sweeper, and preferentially at eviction time.
 package cache
 
@@ -26,25 +26,32 @@ const (
 	// sampleSize does not: pass count is O(expired keys), so a 500k backlog
 	// runs 25k passes over 514ms. The remainder waits for the next tick.
 	sweepBudgetFraction = 4 // at most interval/4 per tick
+
+	// Keys drawn from the expiring index before eviction falls back to the LRU
+	// tail. A sample cannot prove no corpse exists, but its hit rate tracks the
+	// corpse density, and so does the cost of missing — see evictLocked.
+	evictProbeSize = 20
 )
 
-// entry stores the absolute deadline, not the TTL duration: the arithmetic
+// node stores the absolute deadline, not the TTL duration: the arithmetic
 // happens once at Set time so Get only has to compare. Reads outnumber writes,
 // so that's the cheaper place to pay.
-type entry struct {
+type node struct {
+	// Carried so that removing a node, given only a pointer, can also delete it
+	// from data and expiring.
+	key string
+
 	value string
 
 	// The zero Time means "never expires" — see Cache.Set.
 	expires time.Time
 
-	// Cache.clock at the last read or write; the eviction victim is the minimum.
-	// Not a timestamp: time.Now() stands still for 541µs at a stretch here, so
-	// ~5,400 consecutive Sets would tie and the victim would be picked at random.
-	lastUsed uint64
+	// Never nil: the sentinels terminate the recency list.
+	prev, next *node
 }
 
-func (e entry) expired(now time.Time) bool {
-	return !e.expires.IsZero() && now.After(e.expires)
+func (n *node) expired(now time.Time) bool {
+	return !n.expires.IsZero() && now.After(n.expires)
 }
 
 // Cache is an in-memory key→value store, safe for concurrent use.
@@ -55,21 +62,26 @@ func (e entry) expired(now time.Time) bool {
 // Must not be copied after first use: copying duplicates the mutex and the
 // copies stop excluding each other. Always pass *Cache.
 type Cache struct {
-	// mu guards data and expiring. Every read or write of either must hold it.
-	mu   sync.Mutex
-	data map[string]entry
+	// mu guards every field below. Every read or write of any must hold it.
+	mu sync.Mutex
+
+	// The map has no order; the list has no lookup. Together, both O(1).
+	// Nodes are pointers because a map rehash moves its values, and the list
+	// is a web of pointers between nodes that must not dangle.
+	data map[string]*node
+
+	// expiring indexes only the keys with a deadline. Sampling all of data
+	// instead would be diluted to uselessness by a mostly-permanent cache.
+	expiring map[string]*node
+
+	// head.next is the most recently used node, tail.prev the least. Sentinels:
+	// they hold no data and never move, which is what lets unlink and pushFront
+	// run without a nil check.
+	head, tail *node
 
 	// Max entries, or noLimit. Bounding entries rather than bytes is a lie when
 	// values vary in size — Redis bounds bytes. Set once, so it needs no lock.
 	capacity int
-
-	// expiring indexes only the keys with a deadline. Sampling all of data
-	// instead would be diluted to uselessness by a mostly-permanent cache.
-	expiring map[string]struct{}
-
-	// Ticks once per access, ordering accesses without measuring time.
-	// Guarded by mu. Wraps after 584 years at a billion ops/sec.
-	clock uint64
 
 	// Closed, not sent to, so every receiver unblocks — now and forever.
 	done chan struct{}
@@ -90,13 +102,18 @@ func New(capacity int) *Cache {
 // newWithSweepInterval lets tests sweep on a millisecond timescale.
 func newWithSweepInterval(capacity int, interval time.Duration) *Cache {
 	c := &Cache{
-		data:     make(map[string]entry),
-		expiring: make(map[string]struct{}),
+		data:     make(map[string]*node),
+		expiring: make(map[string]*node),
+		head:     &node{},
+		tail:     &node{},
 		capacity: capacity,
 
 		// A channel's zero value is nil, and a receive from nil blocks forever.
 		done: make(chan struct{}),
 	}
+	c.head.next = c.tail
+	c.tail.prev = c.head
+
 	c.wg.Go(func() { c.sweepLoop(interval) })
 	return c
 }
@@ -107,6 +124,28 @@ func newWithSweepInterval(capacity int, interval time.Duration) *Cache {
 func (c *Cache) Close() {
 	c.closeOnce.Do(func() { close(c.done) })
 	c.wg.Wait()
+}
+
+// unlink splices n out of the recency list. O(1) only because the list is
+// doubly linked: n.prev is what has to be rewritten, and finding a singly
+// linked node's predecessor means walking from the head.
+func (c *Cache) unlink(n *node) {
+	n.prev.next = n.next
+	n.next.prev = n.prev
+}
+
+// pushFront makes n the most recently used node.
+func (c *Cache) pushFront(n *node) {
+	n.prev, n.next = c.head, c.head.next
+	c.head.next.prev = n
+	c.head.next = n
+}
+
+// removeLocked deletes n from all three structures. Callers must hold c.mu.
+func (c *Cache) removeLocked(n *node) {
+	c.unlink(n)
+	delete(c.data, n.key)
+	delete(c.expiring, n.key)
 }
 
 // sweepLoop waits on the tick and the stop signal simultaneously, which is why
@@ -165,20 +204,14 @@ func (c *Cache) samplePass() (scanned, expired int) {
 	now := time.Now()
 	// Go starts map iteration at a random bucket, so this is the sample. It
 	// draws buckets, not keys — not uniform, fine for estimating a fraction.
-	for k := range c.expiring {
+	for _, n := range c.expiring {
 		if scanned == sampleSize {
 			break
 		}
 		scanned++
 
-		e, ok := c.data[k]
-		if !ok {
-			delete(c.expiring, k) // Get already reclaimed it; drop the stale index entry
-			continue
-		}
-		if e.expired(now) {
-			delete(c.data, k)
-			delete(c.expiring, k)
+		if n.expired(now) {
+			c.removeLocked(n)
 			expired++
 		}
 	}
@@ -194,10 +227,9 @@ func (c *Cache) sweepAll() int {
 
 	now := time.Now()
 	removed := 0
-	for k, e := range c.data {
-		if e.expired(now) {
-			delete(c.data, k)
-			delete(c.expiring, k)
+	for _, n := range c.data {
+		if n.expired(now) {
+			c.removeLocked(n)
 			removed++
 		}
 	}
@@ -205,36 +237,33 @@ func (c *Cache) sweepAll() int {
 }
 
 // evictLocked frees exactly one slot. Callers must hold c.mu and must not call
-// it on an empty map.
+// it on an empty cache.
 //
 // Corpses first, because recency and expiry are independent orderings: 999
 // sessions Set 100ms ago with a 50ms TTL are all more recently used than a
-// permanent config key read a minute ago. Plain LRU evicts the config key.
+// permanent config key read a minute ago, so the LRU tail is the config key.
 //
-// O(total entries), and unlike sweepAll it runs on the write path, on every
-// Set, once the cache is full. See BenchmarkSetAtCapacity.
+// The list is ordered by recency, so it cannot say whether a corpse exists; only
+// a scan of every entry could, and a scan is what this rewrite deleted. Probing
+// the expiring index cannot prove a corpse absent, but the trade is
+// self-correcting: the probe's hit rate equals the corpse density, and a miss
+// wastes one slot out of however many entries diluted the sample. Accurate where
+// accuracy matters, sloppy where sloppiness is free.
+// See TestEvictionProbeTracksCorpseDensity.
 func (c *Cache) evictLocked(now time.Time) {
-	var victim string
-	var oldest uint64 // clock starts at 1, so 0 means "unset"
-
-	for k, e := range c.data {
-		if e.expired(now) {
-			victim = k
+	probed := 0
+	for _, n := range c.expiring {
+		if probed == evictProbeSize {
 			break
 		}
-		if oldest == 0 || e.lastUsed < oldest {
-			victim, oldest = k, e.lastUsed
+		probed++
+
+		if n.expired(now) {
+			c.removeLocked(n)
+			return
 		}
 	}
-
-	delete(c.data, victim)
-	delete(c.expiring, victim)
-}
-
-// tickLocked stamps the next access. Callers must hold c.mu.
-func (c *Cache) tickLocked() uint64 {
-	c.clock++
-	return c.clock
+	c.removeLocked(c.tail.prev)
 }
 
 // Set stores (or overwrites) the value for key, expiring it after ttl.
@@ -242,7 +271,7 @@ func (c *Cache) tickLocked() uint64 {
 // the new ttl fully replaces the old one.
 //
 // Inserting a new key into a full cache evicts one entry first. Overwriting
-// does not grow the map, so it never evicts.
+// does not grow the cache, so it never evicts.
 func (c *Cache) Set(key, value string, ttl time.Duration) {
 	// Read before the lock: no reason to hold it across a clock read.
 	now := time.Now()
@@ -254,21 +283,28 @@ func (c *Cache) Set(key, value string, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	_, overwrite := c.data[key]
-	if !overwrite && c.capacity > noLimit && len(c.data) >= c.capacity {
-		c.evictLocked(now)
+	n, overwrite := c.data[key]
+	if overwrite {
+		n.value, n.expires = value, expires
+		c.unlink(n)
+	} else {
+		if c.capacity > noLimit && len(c.data) >= c.capacity {
+			c.evictLocked(now)
+		}
+		n = &node{key: key, value: value, expires: expires}
+		c.data[key] = n
 	}
-	c.data[key] = entry{value: value, expires: expires, lastUsed: c.tickLocked()}
+	c.pushFront(n)
 
 	// Overwriting a TTL'd key with a permanent one must un-index it.
 	if ttl > 0 {
-		c.expiring[key] = struct{}{}
+		c.expiring[key] = n
 	} else {
 		delete(c.expiring, key)
 	}
 }
 
-// Len returns how many entries the map physically holds, including expired
+// Len returns how many entries the cache physically holds, including expired
 // ones neither Get nor the sweeper has reclaimed yet.
 func (c *Cache) Len() int {
 	c.mu.Lock()
@@ -279,28 +315,24 @@ func (c *Cache) Len() int {
 // Get returns the value for key. The bool is false if the key is absent or
 // expired; the caller cannot tell those apart, and shouldn't need to.
 //
-// A hit is a use, so it refreshes lastUsed. Between that, deleting expired
-// entries, and dropping them from the index, Get writes three ways — it could
-// not take a read lock under sync.RWMutex.
+// A hit is a use, so it moves the node to the front. Between that and deleting
+// expired entries, Get is a writer twice over — it could not take a read lock
+// under sync.RWMutex.
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	e, ok := c.data[key]
+	n, ok := c.data[key]
 	if !ok {
 		return "", false
 	}
-
-	now := time.Now()
-	if e.expired(now) {
-		delete(c.data, key)
-		delete(c.expiring, key)
+	if n.expired(time.Now()) {
+		c.removeLocked(n)
 		return "", false
 	}
 
-	// e is a copy: map values are not addressable, so mutating e alone changes
-	// nothing, and c.data[key].lastUsed = ... would not compile.
-	e.lastUsed = c.tickLocked()
-	c.data[key] = e
-	return e.value, true
+	// No write-back: n is a pointer, so unlike a map value it is addressable.
+	c.unlink(n)
+	c.pushFront(n)
+	return n.value, true
 }

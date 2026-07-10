@@ -207,18 +207,25 @@ is therefore asserting on `sizeof(entry)`. Assert on the payload you expect back
 → `leak_test.go`
 
 ⚠️ **Map values are not addressable.** `m[k].field = v` is a compile error, and `e := m[k];
-e.field = v` mutates a **copy**. Read, mutate, write back:
+e.field = v` mutates a **copy**. Read, mutate, write back — or store pointers:
 ```go
-e := c.data[key]
-e.lastUsed = c.tickLocked()
+e := c.data[key]         // map[string]entry: e is a copy
+e.lastUsed = ...
 c.data[key] = e          // the write-back is not optional
-```
-Unlike C++ `m[k].field = v` or Python `d[k].field = v`, which mutate in place. Why: the map may
-rehash and move entries, so a pointer into a bucket could dangle. (A `map[string]*entry` *is*
-addressable — at the cost of a pointer chase and an allocation per entry.)
 
-**Cost of the write-back: nothing measurable.** `BenchmarkGet` went 66.99ns → 61.31ns when `Get`
-started rewriting the entry on every hit. The slot is already in L1 from the lookup.
+c.data[key].value = v    // map[string]*node: fine, the pointer is the value
+```
+Unlike C++ `m[k].field = v` or Python `d[k].field = v`, which mutate in place. Why: **a rehash moves
+values to new addresses**, so a pointer into a bucket would dangle.
+
+That rule decides the LRU design. A doubly linked list is a web of pointers *between* nodes; if the
+nodes lived in map buckets, growing the map would invalidate every one. So nodes must be
+independently heap-allocated: `map[string]*node`, not `map[string]node`. **Values that other values
+point at need stable identity, and map values have none.**
+
+**And the pointer was free.** `BenchmarkGet`: 66.99 → 61.31 → **52.52 ns** across the two rewrites.
+The expected cost was a pointer chase; instead it *paid* for one, because a `*node` is addressable
+and `Get` stopped hashing the key a second time to store the entry back.
 
 ---
 
@@ -260,6 +267,30 @@ Fix: a **logical clock** — a `uint64` on the `Cache`, incremented under the lo
 Two events tie only if they *are* the same event. Costs an increment instead of a clock read, and it
 is the single-node case of the **Lamport clock** we'll need in Phase 3, where wall clocks on different
 machines disagree and can run backwards. → `Cache.tickLocked`
+
+---
+
+## Pointers and data structures
+
+**No pointer arithmetic, no `->`.** `n.next.prev = n.prev` auto-dereferences at every step; Go has
+one selector operator for both values and pointers. Nil dereference **panics** — it doesn't corrupt.
+
+**Sentinel nodes.** Allocate two dummy nodes that hold no data and never move:
+```go
+c.head.next = c.tail
+c.tail.prev = c.head
+```
+Now every real node has a non-nil `prev` and `next`, so `unlink` and `pushFront` have **zero branches**.
+Without them each function needs "am I the first? the last? the only one?" — the classic linked-list
+bug farm. Same trick as a C++ `std::list`'s end sentinel. → `Cache.unlink`
+
+**`container/list` exists and we don't use it.** It's `any`-typed (pre-generics), so every element
+boxes into an interface — an allocation and a type assertion per access. Hand-rolling three
+four-line methods is both faster and clearer, and the algorithm is the point of this project.
+
+**Slices are not lists.** Move-to-front on a slice shifts every element before the target: O(n).
+Arrays store order **positionally** (an element's order *is* its address), lists store it in
+**pointers**, so reordering a list is a local edit. That is the whole reason LRU uses a list.
 
 ---
 
