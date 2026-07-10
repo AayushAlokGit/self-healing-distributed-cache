@@ -255,6 +255,13 @@ it — so TTLs survive an NTP correction or a VM resume, for free.
 drivers. After that you're silently doing wall-clock arithmetic again, and clock jumps come back.
 Matters when we serialize entries across nodes in Phase 3.
 
+**`math/rand/v2`.** `rand.New(rand.NewPCG(seed, seed))` for a deterministic generator — a test that
+uses the global `rand` is a test whose failures you can't reproduce. `r.IntN(n)` for a uniform draw,
+`rand.NewZipf(r, s, v, imax)` for a power law.
+
+⚠️ **`rand.NewZipf` returns `nil` when `s <= 1`**, and panics only later, when you *draw* from it.
+The constructor reports the error by handing you something that looks fine. → `hitrate_test.go`
+
 ⚠️ **`time.Now()` has terrible *resolution*, whatever its precision.** It reports nanoseconds and
 advances in ~541µs jumps on this Windows box: **13,397 consecutive calls returned the identical
 instant.** A `Set` is ~100ns, so ~5,400 back-to-back `Set`s share one timestamp.

@@ -11,16 +11,21 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 6 — the hit-rate benchmark.** Steps 1–3 are DONE (2026-07-10):
-  expiry-aware LRU, then the hash map + doubly linked list. `Set` into a full 1M cache went
-  **25.6 ms → 579 ns (44,199×)**. Remaining:
-  4. Build a **hit-rate benchmark**: a hot-key workload, then the same workload interrupted by a
-     sequential scan. Watch the hit rate collapse. *Only then* consider segmented LRU. The scan story
-     is a hypothesis until it prints a number — and hit rate, not latency, is the metric that
-     measures an eviction *policy*.
+- **Next action:** **Phase 1 is COMPLETE.** Steps 1–4 done 2026-07-10: expiry-aware LRU → hash map +
+  doubly linked list (`Set` at 1M: **25.6 ms → 579 ns, 44,199×**) → hit-rate benchmark. **Segmented
+  LRU is DEFERRED, and for a measured reason, not a guess** — see the finding below. Next up:
+  **Phase 2, consistent hashing.** Start with why `hash % N` breaks on resize.
   Open the next session by re-asking the **seven** carried-forward questions cold — table at the
   bottom of `docs/QUIZZES.md`. Aayush's `check-then-act` / `compare-don't-remember` question is
   **still unanswered after three asks** and should go first.
+- **The finding that closed Phase 1:** we asserted for four sessions that *"a sequential scan
+  collapses LRU's hit rate."* Measured, that is **false for realistic traffic and dramatically true
+  for a flat working set.** A Zipf workload loses only 12.6 points to a batch job issuing as many
+  requests as every user combined (78.2% → 65.6%), because a power law's working set is tiny: the hot
+  keys never drift near the tail, and the scan's keys sink there and **evict each other**. A flat
+  working set of 900 in a 1000-entry cache goes **100% → 47.5%** under the same job. And a *cyclic*
+  loop over `capacity+100` keys scores **exactly 0%** where `capacity-100` scores 100% — LRU does not
+  degrade, it falls off a cliff.
 - **Deferred, on purpose:** (a) `sync.RWMutex` — measured: the *uncontended* mutex is **40% of a 67 ns
   `Get`** (26.9 ns), with only ~22 ns of real work to overlap, and an `RLock` costs more than a
   `Lock`. Not an obvious win; also `Get` *deletes*, so it can't take an `RLock` as written.
@@ -53,7 +58,8 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
 - ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper**. Full-scan sweep measured to stall readers **751×** → replaced with Redis-style **sampling** (`samplePass` + `expiring` index): 27ms lock hold → 7µs at 1M keys, reader cost 751× → 2.0×.
 - ☑ LRU eviction — **O(1)**. Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Built naive first: `capacity` + a scan for the minimum `lastUsed`, **corpse-first** (recency and expiry are independent orderings). `lastUsed` had to be a **logical clock**, not a timestamp — `time.Now()` stands still for 541µs and cannot order back-to-back `Set`s. Measured **25.6 ms per `Set`** into a full 1M cache, then replaced the scan with a hand-rolled **hash map + doubly linked list** (`map[string]*node`, sentinel head/tail): **579 ns, 44,199×**, and `lastUsed`/`clock` deleted — position *is* recency. Corpses survive the rewrite via a bounded probe of the `expiring` index, whose hit rate provably tracks corpse density.
-- ◐ Scan resistance — **taught & quizzed, not built.** Four families: more evidence (segmented LRU / 2Q / InnoDB), frequency (LFU+decay, ARC, LIRS), **admission** (TinyLFU + Count-Min Sketch — the deep reframe: *LRU has no admission policy*), hinting (PG ring buffer, `MADV_SEQUENTIAL`). Blocked on the hit-rate benchmark.
+- ☑ Hit rate — the metric for a *policy*, as opposed to latency. Cache-aside harness + Zipf / uniform / cyclic workloads (`cache/hitrate_test.go`). **The scan-collapse hypothesis was measured and half-refuted.** Zipf traffic: 78.2% → 65.6% under a 1:1 batch job. Flat working set of 900 in a 1000 cache: **100% → 47.5%**. Cyclic loop over 1100 keys, capacity 1000: **exactly 0%** (900 keys: 100%). LRU doesn't degrade; it falls off a cliff.
+- ◐ Scan resistance — **taught, quizzed, measured, DEFERRED.** Four families: more evidence (segmented LRU / 2Q / InnoDB), frequency (LFU+decay, ARC, LIRS), **admission** (TinyLFU + Count-Min Sketch — the deep reframe: *LRU has no admission policy*), hinting (PG ring buffer, `MADV_SEQUENTIAL`). Not built: for skewed traffic the gain is ~12 points at a 1:1 scan ratio, which does not pay for the complexity. Revisit if a workload with a flat working set appears.
 
 ### Phase 2 — Consistent hashing
 - ☐ Why `hash % N` breaks on resize
@@ -202,6 +208,64 @@ that cannot fail is not evidence.*
 
 **Also:** `CLAUDE.md` now documents the test/benchmark commands — `-count=1` (defeats the test cache),
 `-v` (surfaces `t.Logf`), `-run xxx -bench` (benchmarks only), `-benchmem`, never `-race` a benchmark.
+
+---
+
+### Session 5 (cont.) — Phase 1 step 6: hit rate, and a hypothesis half-refuted
+
+**Hit rate, not latency, is the metric for an eviction policy.** A cache that instantly evicts exactly
+the wrong key has excellent latency. Everything measured before this was latency; `Set` at 1M is
+579ns and flat, and that number says *nothing* about whether we evict the right things.
+
+Built a cache-aside harness (`cache/hitrate_test.go`): `Get` → on miss, `Set`. That miss-path `Set`
+**is** the experiment — the cache never chooses to admit the scan's keys, the application hands them
+over as ordinary writes. Three workloads: **Zipf** (power law, real traffic), **uniform** (flat
+working set), **cyclic loop** (a report, a table scan).
+
+**Prediction, written down first, then wrong.** I predicted the post-scan hit rate would fall to
+20–40% and recover slowly. Measured: **76.5%**, a 1.7-point dip. Two mistakes, both instructive:
+1. I used a 20,000-request window, having *just* warned that aggregating hides a transient. **A
+   window is a smaller aggregate.** At 200-request resolution the crater is real (78.2% → 45.5%) and
+   ~2,000 requests wide.
+2. **A scan's damage is bounded by capacity** — you cannot lose more than you were holding. Recovery
+   costs at most one cache-worth of misses, and the scan cost the app 10,000 DB queries anyway.
+   The marginal harm to everyone else is small. I had never done that arithmetic.
+
+**And I wrote fabricated numbers into the comments before running the code.** Caught it, deleted them.
+A number in a comment that was never measured is a rumor with a monospace font.
+
+**The real finding: the collapse depends entirely on the shape of the working set.**
+
+```
+zipf s=1.1 over 10k keys, cap 1000     flat working set 900, cap 1000
+  no batch job              78.2%        no batch job             100.0%
+  1 scan per 10 user        75.5%        1 scan per 10 user        89.3%
+  1 scan per  4 user        72.8%        1 scan per  4 user        76.0%
+  1 scan per  1 user        65.8%        1 scan per  1 user        47.5%
+```
+
+A batch job issuing **as many requests as every user combined** costs Zipf traffic 12.6 points. That
+is real, and it is not a collapse. **A power law's working set is tiny**: the top hundred keys carry
+most of the load, are re-requested every few operations, and never drift near the tail. The scan's
+keys, touched once, sink to the tail immediately and **evict each other.** The scan chews a slice off
+the cache and leaves the hot core alone. LRU is far more scan-resistant than this project asserted
+for four sessions — *on skewed traffic*.
+
+Where it breaks is a **flat** working set: every entry worth as much as every other, so every stolen
+slot is a lost hit. 100% → 47.5%.
+
+**And the cliff:**
+```
+cyclic loop over  900 keys (capacity 1000)   100.0%
+cyclic loop over 1100 keys (capacity 1000)     0.0%
+```
+A 22% wider working set turns a perfect cache into a useless one. Every key is evicted exactly one
+request before it is wanted again. **LRU does not degrade; it falls off a cliff.** Bélády would score
+~91% here, and so would *MRU* — evict the most recent. Nothing about the cache size is the problem.
+
+**Decision: segmented LRU is DEFERRED**, with a number rather than a shrug. ~12 points on a 1:1 scan
+against skewed traffic does not pay for the complexity. Revisit if a flat-working-set workload shows
+up. That is the naive→measure→iterate loop actually being allowed to say *no*.
 
 ---
 
