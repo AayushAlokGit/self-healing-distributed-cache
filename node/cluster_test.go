@@ -32,6 +32,21 @@ func startCluster(t *testing.T, ids ...string) map[string]*Node {
 	return nodes
 }
 
+func setReplication(nodes map[string]*Node, rf, wq int) {
+	for _, n := range nodes {
+		n.SetReplication(rf, wq)
+	}
+}
+
+// ownersOf computes a key's R owners the way the cluster does, primary first.
+func ownersOf(ids []string, key string, rf int) []string {
+	r := ring.New()
+	for _, id := range ids {
+		r.Add(id)
+	}
+	return r.GetClockwiseN(key, rf)
+}
+
 func clientSet(t *testing.T, n *Node, key, value string) int {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPut, "http://"+n.Addr()+"/set/"+key, strings.NewReader(value))
@@ -70,6 +85,7 @@ func ownerOf(ids []string, key string) string {
 func TestAnyNodeRoutesToOwner(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)
+	setReplication(nodes, 1, 1) // one owner per key, so reads truly forward
 	const keys = 300
 
 	for i := range keys {
@@ -92,6 +108,7 @@ func TestAnyNodeRoutesToOwner(t *testing.T) {
 func TestKillingOwnerLosesDataAtR1(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)
+	setReplication(nodes, 1, 1)
 
 	const key, value = "user:42", "alice"
 	clientSet(t, nodes["n0"], key, value)
@@ -117,4 +134,46 @@ func TestKillingOwnerLosesDataAtR1(t *testing.T) {
 	}
 	t.Logf("R=1: killed owner %s of %q -> survivor returns %d, data is gone. This is what replication fixes.",
 		owner, key, code)
+}
+
+// The money moment. At R=3 a key lives on three nodes, so reads keep serving as
+// owners die — the coordinator falls back down the replica list — and the key is
+// lost only when the last of the three is gone. R copies tolerate R-1 deaths.
+func TestReadFallbackSurvivesNodeDeaths(t *testing.T) {
+	const rf = 3
+	ids := []string{"n0", "n1", "n2", "n3", "n4"}
+	nodes := startCluster(t, ids...)
+	setReplication(nodes, rf, 1)
+
+	const key, value = "user:42", "alice"
+	clientSet(t, nodes["n0"], key, value)
+
+	owners := ownersOf(ids, key, rf)
+	ownerSet := map[string]bool{}
+	for _, o := range owners {
+		ownerSet[o] = true
+	}
+
+	// Read through a node that owns nothing, so the coordinator survives every
+	// kill and every read is a real fallback across the network.
+	var coord *Node
+	for id, n := range nodes {
+		if !ownerSet[id] {
+			coord = n
+			break
+		}
+	}
+
+	for killed := range owners {
+		if v, code := clientGet(t, coord, key); code != http.StatusOK || v != value {
+			t.Fatalf("with %d of %d owners dead, read failed: (%q, %d)", killed, len(owners), v, code)
+		}
+		nodes[owners[killed]].Close()
+	}
+
+	if _, code := clientGet(t, coord, key); code == http.StatusOK {
+		t.Fatalf("all %d owners dead, but the key still came back", len(owners))
+	}
+	t.Logf("R=%d: reads survived %d owner deaths; key lost only when all %d owners were gone",
+		rf, len(owners)-1, len(owners))
 }

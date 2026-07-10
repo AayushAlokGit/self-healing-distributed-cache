@@ -22,8 +22,18 @@ import (
 )
 
 // forwardTimeout bounds a node-to-node call. A dead owner must fail fast so the
-// coordinating node can answer (or, once replicated, fall back) rather than hang.
+// coordinating node can answer (or fall back to a replica) rather than hang.
 const forwardTimeout = 2 * time.Second
+
+const (
+	// Copies per key: the primary plus the next R-1 distinct nodes clockwise.
+	defaultReplicationFactor = 3
+
+	// Acks required before a write returns to the client. A knob, not consensus:
+	// W=1 favors availability (fast, may lose a write if that one node dies);
+	// larger W trades latency and availability for durability. W>R is impossible.
+	defaultWriteQuorum = 1
+)
 
 // Node is a peer in the cluster: a cache (Store Engine), an HTTP server, and its
 // own view of the ring and peer addresses. Any node accepts any client key and
@@ -36,6 +46,9 @@ type Node struct {
 	client    *http.Client
 	closeOnce sync.Once
 
+	replicationFactor int
+	writeQuorum       int
+
 	// membership is this node's own view, injected at setup and (Phase 4)
 	// updated by gossip. Guarded because handlers read it from many goroutines.
 	mu    sync.RWMutex
@@ -47,11 +60,13 @@ type Node struct {
 // the OS pick a free port, which Addr reports back after Start. Call Close.
 func New(id, addr string, capacity int) *Node {
 	n := &Node{
-		id:     id,
-		cache:  cache.New(capacity),
-		addr:   addr,
-		client: &http.Client{Timeout: forwardTimeout},
-		peers:  map[string]string{},
+		id:                id,
+		cache:             cache.New(capacity),
+		addr:              addr,
+		client:            &http.Client{Timeout: forwardTimeout},
+		peers:             map[string]string{},
+		replicationFactor: defaultReplicationFactor,
+		writeQuorum:       defaultWriteQuorum,
 	}
 
 	mux := http.NewServeMux()
@@ -75,16 +90,31 @@ func (n *Node) SetMembership(r *ring.Ring, peers map[string]string) {
 	n.peers = peers
 }
 
-// ownerFor returns the id and address of the node that owns key, per this node's
-// current view. addr is "" if the owner is unknown (missing from the peer map).
-func (n *Node) ownerFor(key string) (id, addr string) {
+// SetReplication overrides the replication factor and write quorum. For tests
+// that want R and W different from the defaults.
+func (n *Node) SetReplication(replicationFactor, writeQuorum int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.replicationFactor = replicationFactor
+	n.writeQuorum = writeQuorum
+}
+
+type owner struct{ id, addr string }
+
+// ownersFor returns the key's R owners in ring order (primary first), per this
+// node's current view. Nil if the ring is unset.
+func (n *Node) ownersFor(key string) []owner {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	if n.ring == nil {
-		return "", ""
+		return nil
 	}
-	id = n.ring.Get(key)
-	return id, n.peers[id]
+	ids := n.ring.GetClockwiseN(key, n.replicationFactor)
+	owners := make([]owner, len(ids))
+	for i, id := range ids {
+		owners[i] = owner{id: id, addr: n.peers[id]}
+	}
+	return owners
 }
 
 // Start binds the port and serves in the background. Split from New so the port
@@ -141,39 +171,50 @@ func (n *Node) handlePut(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleClientGet coordinates a read: find the owner and fetch from it, reading
-// this node's own cache directly when it is the owner. R=1 for now, so a dead
-// owner means the key is unreachable — the failure that earns replication.
+// handleClientGet coordinates a read: try the key's owners in ring order and
+// return the first reachable hit. An unreachable owner is skipped — that is the
+// fallback that keeps reads serving after a node dies. Only when every owner is
+// unreachable do we 502; a reachable miss is an honest 404.
 func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	id, addr := n.ownerFor(key)
-	if id == "" {
+	owners := n.ownersFor(key)
+	if len(owners) == 0 {
 		http.Error(w, "no owner for key", http.StatusServiceUnavailable)
 		return
 	}
 
-	if id == n.id {
-		if v, ok := n.cache.Get(key); ok {
+	reachedNone := true
+	for _, o := range owners {
+		var (
+			v   string
+			ok  bool
+			err error
+		)
+		if o.id == n.id {
+			v, ok = n.cache.Get(key) // local read never "fails to reach"
+		} else {
+			v, ok, err = n.fetchFrom(o.addr, key)
+		}
+		if err != nil {
+			continue // owner unreachable: fall back to the next
+		}
+		reachedNone = false
+		if ok {
 			io.WriteString(w, v)
 			return
 		}
-		http.Error(w, "not found", http.StatusNotFound)
-		return
 	}
 
-	v, ok, err := n.fetchFrom(addr, key)
-	if err != nil {
-		http.Error(w, "owner unreachable: "+err.Error(), http.StatusBadGateway)
+	if reachedNone {
+		http.Error(w, "all owners unreachable", http.StatusBadGateway)
 		return
 	}
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	io.WriteString(w, v)
+	http.Error(w, "not found", http.StatusNotFound)
 }
 
-// handleClientSet coordinates a write to the key's owner.
+// handleClientSet writes to all R owners and acks once writeQuorum of them
+// succeed. Writing to every owner is what puts the copies in place for the read
+// fallback; the quorum only decides when to answer the client.
 func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -182,20 +223,26 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	}
 	key, value := r.PathValue("key"), string(body)
 
-	id, addr := n.ownerFor(key)
-	if id == "" {
+	owners := n.ownersFor(key)
+	if len(owners) == 0 {
 		http.Error(w, "no owner for key", http.StatusServiceUnavailable)
 		return
 	}
 
-	if id == n.id {
-		n.cache.Set(key, value, 0)
-		w.WriteHeader(http.StatusNoContent)
-		return
+	acks := 0
+	for _, o := range owners {
+		if o.id == n.id {
+			n.cache.Set(key, value, 0)
+			acks++
+			continue
+		}
+		if err := n.storeOn(o.addr, key, value); err == nil {
+			acks++
+		}
 	}
 
-	if err := n.storeOn(addr, key, value); err != nil {
-		http.Error(w, "owner unreachable: "+err.Error(), http.StatusBadGateway)
+	if acks < n.writeQuorum {
+		http.Error(w, "write quorum not met", http.StatusBadGateway)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
