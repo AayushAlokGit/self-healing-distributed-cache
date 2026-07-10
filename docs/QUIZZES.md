@@ -379,6 +379,100 @@ Second half not attempted; taught. → re-ask the `Close()`/`select`/`Ticker` me
 
 ---
 
+## Session 4d — 2026-07-09 · Eviction / LRU (before writing the code)
+
+Phase 1, step 4. **Result: 3 ✅ · 1 ⊘.** Aayush also raised two challenges that changed the design —
+recorded at the bottom.
+
+---
+
+### Q1 — What does LRU substitute for Bélády's future knowledge?
+**Model answer.** **Temporal locality**: a key used recently is likely to be used again soon. It uses
+the recent past as a proxy for the near future.
+
+Good proxy: web sessions, hot DB rows, popular products — access is bursty and clustered in time.
+Bad proxy: a **sequential scan**, where each key is touched exactly once and never again.
+
+**Aayush: ✅** — named temporal locality, gave both workloads, and produced the scan counterexample
+*unprompted, before it was taught*.
+
+---
+
+### Q2 — Capacity 3, `{a,b,c}` (a least recent). `Get(b)`, `Set(d)`, `Get(a)`?
+**Model answer.** `Get(b)` is a hit and makes `b` most recent → order `a, c, b`. `Set(d)` needs a
+slot and evicts `a`. `Get(a)` is therefore a **miss**.
+
+That last line is the point: the policy *chose* to make that request fail. **Eviction is not cleanup;
+it is a decision about which future request you are willing to lose.**
+
+**Aayush: ✅** — correct victim and reasoning. Didn't state the `Get(a)` miss; sharpened.
+
+---
+
+### Q3 — `lastUsed time.Time` per entry + scan for the minimum: what's the cost?
+**Model answer.** **O(n) per eviction** — map keys aren't ordered by `lastUsed`, so finding the
+minimum means scanning everything, under the lock.
+
+And it's **worse than `sweepAll`**, which is the part worth internalizing. `sweepAll`'s 27ms O(n) scan
+ran once per second on a *background* goroutine → 2.5% of wall time frozen. An O(n) eviction scan runs
+**on the write path, on every `Set`, once the cache is full** — and a full cache is a cache's *normal
+steady state*. Not a periodic pause: **every write pays a full scan, forever.** ~25ms per `Set` at 1M
+entries.
+
+Fix: hash map + doubly linked list → O(1) lookup, O(1) move-to-front, O(1) evict-tail.
+
+**Aayush: ✅** — got O(n), and connected it to write-path tail latency unprompted. Sharpened with the
+frequency comparison against `sweepAll`.
+
+---
+
+### Q4 — Capacity 1000: 999 expired corpses + 1 live key. A `Set` arrives. What's evicted?
+**Model answer.** Under naive LRU, **the live key.** Naive LRU knows nothing about expiry — it sorts
+by `lastUsed` and takes the minimum. The 999 corpses were all `Set` recently (a `Set` *is* an access);
+the live key was touched longer ago. So LRU evicts the only useful entry and keeps 1000 corpses.
+
+The cache is now **worse than empty**: 1000 slots of memory serving nothing.
+
+What *should* happen: **reclaim a corpse before evicting anything live.** Free the capacity that costs
+nothing to free, and only then make a real choice about which live key to sacrifice.
+
+**Aayush: ⊘** — not attempted, but asked exactly the right question ("does naive LRU evict only from
+unexpired keys?"). It doesn't — and the instinct that expiry belongs in the eviction path was right.
+
+---
+
+### Aayush's two challenges (both changed something)
+
+**(a) "Won't LRU evict the expired keys anyway? Aren't corpses least-recently-used most of the time?"**
+
+Sometimes — but **recency and expiry are independent orderings.** LRU sorts by *last touch*; expiry
+sorts by *deadline*. Nothing forces them to agree, and they anti-correlate on our own leak workload:
+999 sessions `Set` with a 50ms TTL in the last second (never read) plus one permanent `config` key
+touched a minute ago. Every corpse is *more recently used* than the live key. LRU evicts `config`.
+
+Converse: a key `Set` 1ms ago with a 1ms TTL is the **most recently used entry in the cache and
+already a corpse.** **Recency of *use* ≠ freshness of *value*.**
+
+And "usually right" is not a bound — especially when the check costs **one timestamp comparison**.
+→ Eviction will be expiry-aware from the first commit.
+
+**(b) "Why is eviction happening in `Get`? Eviction is a `Set`."**
+
+Correct, and my trace was wrong. **Our `Get` never inserts.** This is a **cache-aside (look-aside)**
+store like Redis/memcached: the *application* does `Get` → miss → `db.Query` → `Set`. Eviction can
+only happen in `Set`. (A **read-through** cache — Caffeine, Guava `LoadingCache` — takes a loader and
+populates itself; there `Get` really can evict.)
+
+The consequence is sharper, not weaker: the cache receives ten ordinary `Set` calls with no flag
+saying "batch job." **Pollution originates in the caller's fill pattern**, so scan resistance has to
+live in the eviction policy — the only place with enough information to distinguish a hot key from a
+scan artifact.
+
+Division of labour: `Get` **hit** updates recency (→ `Get` is a writer, *third* time) · `Get` **miss**
+does nothing · `Set` updates recency **and** evicts.
+
+---
+
 ## Carried forward — re-ask cold
 
 | From | Concept | The specific gap |
@@ -390,3 +484,5 @@ Second half not attempted; taught. → re-ask the `Close()`/`select`/`Ticker` me
 | S4b Q3 | value vs resource semantics | Not attempted; sets up step 4 (corpses occupy LRU capacity) |
 | S4c Q1 | **compare, don't remember** | **PATTERN, not incident** — same miss as S4 Q2. A value read before an unlock is a rumor after it. |
 | S4c Q3 | `Close()` / `select` / `Ticker` | Knew *why* it leaks, not *what fixes it* |
+| S4d Q4 | expiry-aware eviction | Not attempted; asked the right question. Recency ≠ deadline |
+| S4d | scan resistance | Taught, untested: the four families, and why **admission** is the deep fix |

@@ -11,10 +11,19 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 4 — LRU eviction.** (Step 3c done: sampling sweeper, 751× → 2.0×.)
-  Recall from the TTL quiz: expired-but-unswept entries **occupy capacity**, so a size-limited cache
-  can evict a *live* key while corpses sit untouched — lazy expiry silently sabotages the eviction
-  policy. That's the link between step 3 and step 4.
+- **Next action:** **Phase 1, step 4 — build LRU eviction** (concepts taught & quizzed 2026-07-09;
+  no code written yet). Agreed build order:
+  1. Naive LRU: `lastUsed time.Time` per entry, evict by scanning for the minimum. **Expiry-aware
+     from the start** — reclaim a corpse before evicting anything live (a *correctness* fix, not a
+     perf guess; Aayush argued it out himself).
+  2. Measure the O(n) victim scan. It's `sweepAll`'s bug on the **write path**: `sweepAll` froze 2.5%
+     of wall time on a background goroutine; an O(n) eviction scan runs on **every `Set` once the
+     cache is full**, which is a cache's normal steady state.
+  3. Replace with a hand-rolled **hash map + doubly linked list** → O(1) lookup / move-to-front /
+     evict-tail.
+  4. Build a **hit-rate benchmark**: hot-key workload, then the same interrupted by a scan. Watch the
+     hit rate collapse. *Only then* consider segmented LRU. The scan story is a hypothesis until it
+     prints a number.
   Open the next session by re-asking the **seven** carried-forward questions cold — table at the
   bottom of `docs/QUIZZES.md`.
 - **Deferred, on purpose:** (a) `sync.RWMutex` — measured: the *uncontended* mutex is **40% of a 67 ns
@@ -48,7 +57,7 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
 - ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
 - ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper**. Full-scan sweep measured to stall readers **751×** → replaced with Redis-style **sampling** (`samplePass` + `expiring` index): 27ms lock hold → 7µs at 1M keys, reader cost 751× → 2.0×.
-- ☐ LRU eviction
+- ◐ LRU eviction — **taught & quizzed, not yet built.** Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Eviction must be **expiry-aware** (corpses occupy capacity). Next: naive O(n) victim scan → measure → hash map + doubly linked list.
 
 ### Phase 2 — Consistent hashing
 - ☐ Why `hash % N` breaks on resize
@@ -246,6 +255,93 @@ Mark ☑ when taught AND the quick-check quiz was passed.
   applied to time instead of space: **bounded waste in exchange for bounded interference.** (Redis
   caps itself at 25% CPU the same way.) *The original comment was a plausible-sounding rationalization
   that was never checked — exactly the habit this project is meant to train out.*
+
+#### Session 4 (cont.) — who calls `Close()`? (design, no code)
+- **Ownership rule: whoever constructs it, closes it.** Ownership is created by `New()` and does not
+  float. A function that *receives* a `*Cache` must never close it. So the chain is
+  `main` → `node.Close()` → `cache.Close()`; each layer closes exactly what it made, and the
+  obligation propagates upward — a node that owns a resource is *forced* to grow a `Close()`.
+- **Honest caveat: for a one-cache, one-process server, `Close()` is nearly pointless** — process exit
+  reclaims everything. Leaking a goroutine only costs you if caches are created and destroyed
+  *repeatedly* within one process lifetime.
+- **…which is exactly this project.** The money moment is `/admin/kill`. Every kill destroys a node
+  and its cache; every recovery makes new ones. Forty demo clicks = forty leaked sweeper goroutines,
+  and each goroutine stack is a **GC root**, so none of that memory is collectable. The process
+  demonstrating self-healing would slowly die of the thing it demonstrates. **`Close()` is
+  load-bearing *because of* the failure-injection design.**
+- **Shutdown ordering:** `signal.NotifyContext` → `<-ctx.Done()` → `srv.Shutdown(ctx)` (stop
+  accepting, drain in-flight handlers) → **then** `cluster.Close()`. **Stop the users, then stop the
+  thing they use.** Reversing it tears down a cache a handler is mid-`Get` on. (Ours survives that —
+  `Close` only stops sweeping — but relying on it is fragile.)
+- Decided: `Close()` returns **nothing**, not `error`. It can't fail, and inventing an always-nil
+  error to satisfy `io.Closer` is a lie about the API. And **not** `New(ctx)`: `context` is for
+  request scope and in-flight cancellation, `Close()` is for resource lifetime. Tying cache lifetime
+  to a shared context would make it impossible to kill *one* node — precisely what the demo needs.
+- Nothing calls `Close()` outside tests yet (no `main`). Not a bug. `node.Close()` / `Cluster.Close()`
+  are the first things Phase 2 must grow.
+
+#### Session 4 (cont.) — Phase 1 step 4: eviction (taught & quizzed; NO CODE YET)
+- **Why a size limit is a second, independent bound.** TTL bounds **staleness**, not **size**:
+  1k sessions/sec × 30-min TTL = **1.8M live entries** in steady state, none of them stale. And
+  `ttl <= 0` keys never expire — a cache of permanent keys with no limit is a **memory leak by
+  design**.
+- **Bélády's optimal algorithm** — evict the entry needed *farthest in the future*. Provably optimal,
+  **unimplementable** (needs the future). Reframe: **every real policy is an approximation of Bélády
+  using only the past.** You are not choosing a data structure, you are choosing **a theory about how
+  your users behave.** Random (no theory) · FIFO ("old things stop being useful") · **LRU** (temporal
+  locality) · LFU (popularity is stable).
+- **LRU's failure mode — the sequential scan.** Capacity 3, hot `{a,b,c}` at ~100% hit rate. A batch
+  job reads `x1..x10` once each: each miss makes the app `Set` the key, each `Set` evicts the LRU.
+  End state `{x8,x9,x10}` — keys **nobody will ever read again**; `a,b,c` gone; hit rate **0%**. The
+  scan got *zero* benefit (every read missed regardless) and destroyed the hot set: **strictly
+  negative work.** With a scan longer than the cache, it even flushes itself. Root cause: **LRU treats
+  a single access as sufficient evidence a key deserves to be cached**, and for a scan that evidence
+  is a lie.
+- **Aayush caught a real error in my trace.** I wrote `Get(x1) → insert, evict a`, but **our `Get`
+  never inserts** — it's a **cache-aside (look-aside)** store, like Redis/memcached: the *application*
+  does `Get` → miss → `db.Query` → `Set`. **Eviction can only happen in `Set`.** (A **read-through**
+  cache — Caffeine, Guava `LoadingCache` — takes a loader and populates itself; there `Get` can evict.)
+  The consequence is sharper, not weaker: the cache sees ten ordinary `Set`s with no flag saying
+  "batch job." **Pollution originates in the caller's fill pattern**, so scan resistance must live in
+  the eviction policy — the only place with enough information to tell a hot key from a scan artifact.
+  Division of labour: `Get` **hit** updates recency (→ `Get` is a writer, **third** time, which kills
+  `RWMutex` properly rather than provisionally) · `Get` **miss** does nothing · `Set` updates recency
+  **and** evicts.
+- **Aayush's challenge: "won't LRU evict the expired keys anyway — aren't corpses least-recently
+  used?"** Sometimes, but **recency and expiry are independent orderings**: LRU sorts by *last touch*,
+  expiry sorts by *deadline*. Killer case (our own leak workload): 999 sessions `Set` with a 50 ms TTL
+  in the last second and never read, plus one permanent `config` key touched a minute ago. A `Set` is
+  an access, so **every corpse is more recently used than the live key** → LRU evicts `config` and
+  keeps 999 corpses. The cache is then *worse than empty*: 1000 slots serving nothing. Converse: a key
+  `Set` 1 ms ago with a 1 ms TTL is the **MRU entry and already a corpse**. Recency of *use* ≠ freshness
+  of *value*. And "usually right" is not a bound when the check costs **one timestamp compare**.
+  → **Reclaim a corpse before evicting anything live.** The `expiring` index + `samplePass` already
+  give us the machinery. This is the step-3↔step-4 seam, found by Aayush arguing with me.
+- **Scan resistance — four families**, three of which weaken the meaning of a single access:
+  | Family | Question it adds | Real systems |
+  |---|---|---|
+  | More evidence | "have you been used *twice*?" | InnoDB young/old sublists, 2Q, Linux active/inactive |
+  | Frequency | "how *often*?" | LFU **+ decay** (Redis log counter, halving), ARC (adaptive recency/frequency boundary), LIRS (reuse distance, RocksDB) |
+  | **Admission** | "are you better than whoever you'd evict?" | **TinyLFU / W-TinyLFU** (Caffeine) |
+  | Hinting | "will the caller just tell us?" | PostgreSQL seq-scan ring buffer, `MADV_SEQUENTIAL` |
+  - **Admission is the deep reframe: LRU has no admission policy.** Every arriving key is admitted
+    unconditionally; the only question ever asked is *who leaves*. TinyLFU asks *should this key come
+    in* — victim `a` has freq ~1000, `x1` has freq 1, so **reject `x1`** and leave the cache untouched.
+    The whole scan costs nothing.
+  - Tracking a count per key would cost more than the cache, so TinyLFU uses a **Count-Min Sketch**
+    (few bits/key, error only ever an over-estimate) + a **doorkeeper** Bloom filter for one-hit
+    wonders + periodic counter halving for decay. **Approximate answer, bounded error, memory
+    independent of data size** — the *same bargain* as the sampling sweeper, and the one Phase 4's
+    failure detection will make. It keeps recurring because it's how you get O(1) out of problems that
+    look O(n).
+  - Naive LFU is broken on its own: counts never decay, so last Tuesday's viral key is immortal and a
+    genuinely rising key can never accumulate enough count to displace it. **LFU can't adapt.**
+- **The metric changes here.** "Does it work" is the wrong question — LRU always evicts *something*.
+  The metric is **hit rate** = hits/(hits+misses). Eviction policy is the main lever on it, and **you
+  cannot compare two policies without measuring it.** Hence step 4's benchmark before any scan fix.
+- **Deliberately NOT fixing scan resistance yet.** Segmented LRU is ~30 lines, but we have no hit-rate
+  benchmark and no scan workload. Adding W-TinyLFU now = adding a solution to a problem we haven't
+  measured, on the strength of a story. **The scan story is a hypothesis until it prints a number.**
 
 ### Session 3 — 2026-07-08
 - Confirmed HLD §6.2 failure-mode catalog present (line 206) — user had missed it (it's a
