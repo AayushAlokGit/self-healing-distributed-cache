@@ -100,3 +100,33 @@ func (r *Ring) Get(key string) string {
 	}
 	return r.points[i].node
 }
+
+// GetN returns up to n distinct physical nodes for key: the primary (== Get)
+// plus the next n-1 distinct nodes clockwise. Fewer than n only when the ring
+// holds fewer than n nodes — you cannot keep more copies than there are machines.
+//
+// Distinct *physical* nodes is the whole point: the next few points clockwise
+// are often virtual nodes of the same machine, and replicas that share a machine
+// die together. So we skip points whose node we already have.
+func (r *Ring) GetClockwiseN(key string, n int) []string {
+	if n <= 0 || len(r.points) == 0 {
+		return nil
+	}
+
+	h := hashKey(key)
+	start := sort.Search(len(r.points), func(i int) bool {
+		return r.points[i].hash >= h
+	})
+
+	owners := make([]string, 0, n)
+	seen := make(map[string]bool, n)
+	// At most one full lap: bounded even when n exceeds the node count.
+	for step := 0; step < len(r.points) && len(owners) < n; step++ {
+		node := r.points[(start+step)%len(r.points)].node
+		if !seen[node] {
+			seen[node] = true
+			owners = append(owners, node)
+		}
+	}
+	return owners
+}

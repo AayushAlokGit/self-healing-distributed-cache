@@ -40,6 +40,72 @@ func TestSingleNodeOwnsEverything(t *testing.T) {
 	}
 }
 
+func TestGetNPrimaryMatchesGet(t *testing.T) {
+	r := New()
+	for i := range 5 {
+		r.Add("node" + strconv.Itoa(i))
+	}
+	for i := range 1000 {
+		key := "key:" + strconv.Itoa(i)
+		owners := r.GetN(key, 3)
+		if len(owners) == 0 || owners[0] != r.Get(key) {
+			t.Fatalf("GetN[0]=%v disagrees with Get=%q for %q", owners, r.Get(key), key)
+		}
+	}
+}
+
+// The reason GetN exists: R copies on R distinct machines, or a single death
+// takes every copy. The next points clockwise are often the same machine's
+// virtual nodes, so a naive "next R points" would return duplicates.
+func TestGetNReturnsDistinctPhysicalNodes(t *testing.T) {
+	const nodes = 8
+	r := New()
+	for i := range nodes {
+		r.Add("node" + strconv.Itoa(i))
+	}
+	for i := range 5000 {
+		owners := r.GetN("key:"+strconv.Itoa(i), 3)
+		if len(owners) != 3 {
+			t.Fatalf("wanted 3 owners, got %v", owners)
+		}
+		seen := map[string]bool{}
+		for _, o := range owners {
+			if seen[o] {
+				t.Fatalf("key %d got the same node twice: %v", i, owners)
+			}
+			seen[o] = true
+		}
+	}
+}
+
+// You cannot keep more copies than there are machines. Asking for more distinct
+// nodes than exist returns every node, once each — not a short list, not a loop.
+func TestGetNCappedByNodeCount(t *testing.T) {
+	r := New()
+	r.Add("a")
+	r.Add("b")
+
+	owners := r.GetN("key", 5)
+	if len(owners) != 2 {
+		t.Fatalf("2-node ring should yield 2 owners for N=5, got %v", owners)
+	}
+	if owners[0] == owners[1] {
+		t.Fatalf("both owners are the same node: %v", owners)
+	}
+}
+
+func TestGetNEdgeCases(t *testing.T) {
+	empty := New()
+	if got := empty.GetN("k", 3); got != nil {
+		t.Fatalf("empty ring should return nil, got %v", got)
+	}
+	r := New()
+	r.Add("a")
+	if got := r.GetN("k", 0); got != nil {
+		t.Fatalf("n=0 should return nil, got %v", got)
+	}
+}
+
 func distribution(r *Ring, keys int) map[string]int {
 	counts := make(map[string]int)
 	for i := range keys {
