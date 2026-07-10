@@ -352,8 +352,16 @@ Still flat-*ish* against a full scan's true `O(n)` (1,128× growth over the same
 holds. But the algorithm said *constant* and the hardware said *nearly*. **Measure.**
 
 ### Formatting
-`gofmt -l ./cache/` lists files that aren't canonically formatted, printing nothing when clean.
-Non-negotiable in Go — there is one true format and no style debate.
+`gofmt -l ./cache/` **l**ists files that aren't canonically formatted, printing nothing when clean —
+a check, not a fix. `gofmt -w f.go` **w**rites the fix in place. (`go fmt ./...` wraps `-l -w`.)
+
+**Zero configuration**, unlike `clang-format`'s hundreds of knobs. Tabs, sorted imports, aligned
+struct fields, blank lines between declarations. Adding `lastUsed` to `entry` re-aligned the other
+two fields because `gofmt` aligns a block around its longest name.
+
+It catches **nothing** — layout only; correctness is `go vet` and `-race`. The payoff for giving up
+the knobs: since the output is canonical, **every diff in a Go review is a semantic diff.** No line
+ever changes for style.
 
 ### `runtime` introspection
 ```go

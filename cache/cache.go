@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	// A capacity of noLimit lets the map grow until the process dies.
 	noLimit = 0
 
 	// Only says how often we check. The sampler sets its own rate.
@@ -38,11 +37,9 @@ type entry struct {
 	// The zero Time means "never expires" — see Cache.Set.
 	expires time.Time
 
-	// Value of Cache.clock at the last read or write. The eviction victim is
-	// the minimum. Not a timestamp: LRU needs the order of accesses, not their
-	// times, and time.Now() cannot supply the order — it stands still for 541µs
-	// at a stretch on Windows, so ~5,400 consecutive Sets share one instant and
-	// the victim is picked at random. A counter ties only when events coincide.
+	// Cache.clock at the last read or write; the eviction victim is the minimum.
+	// Not a timestamp: time.Now() stands still for 541µs at a stretch here, so
+	// ~5,400 consecutive Sets would tie and the victim would be picked at random.
 	lastUsed uint64
 }
 
@@ -62,17 +59,16 @@ type Cache struct {
 	mu   sync.Mutex
 	data map[string]entry
 
-	// Max entries, or noLimit. Counting entries rather than bytes is a lie when
-	// values vary in size — Redis bounds bytes (maxmemory). Set once, never
-	// mutated, so it needs no lock.
+	// Max entries, or noLimit. Bounding entries rather than bytes is a lie when
+	// values vary in size — Redis bounds bytes. Set once, so it needs no lock.
 	capacity int
 
 	// expiring indexes only the keys with a deadline. Sampling all of data
 	// instead would be diluted to uselessness by a mostly-permanent cache.
 	expiring map[string]struct{}
 
-	// A logical clock: ticks once per access, so it orders accesses without
-	// measuring time. Guarded by mu. Wraps after 584 years at a billion ops/sec.
+	// Ticks once per access, ordering accesses without measuring time.
+	// Guarded by mu. Wraps after 584 years at a billion ops/sec.
 	clock uint64
 
 	// Closed, not sent to, so every receiver unblocks — now and forever.
@@ -208,24 +204,22 @@ func (c *Cache) sweepAll() int {
 	return removed
 }
 
-// evictLocked frees exactly one slot, preferring an already-expired entry over
-// a live one. Callers must hold c.mu and must not call it on an empty map.
+// evictLocked frees exactly one slot. Callers must hold c.mu and must not call
+// it on an empty map.
 //
-// Corpses first because recency and expiry are independent orderings: 999
-// sessions Set 100ms ago with a 50ms TTL are all *more recently used* than a
-// permanent config key read a minute ago. Plain LRU evicts the config key and
-// keeps 1000 corpses — a cache worse than empty.
+// Corpses first, because recency and expiry are independent orderings: 999
+// sessions Set 100ms ago with a 50ms TTL are all more recently used than a
+// permanent config key read a minute ago. Plain LRU evicts the config key.
 //
-// O(total entries), and unlike sweepAll this runs on the write path, on every
-// Set, once the cache is full — which is a cache's normal steady state.
-// See BenchmarkSetAtCapacity; step 5 replaces it with a linked list.
+// O(total entries), and unlike sweepAll it runs on the write path, on every
+// Set, once the cache is full. See BenchmarkSetAtCapacity.
 func (c *Cache) evictLocked(now time.Time) {
 	var victim string
 	var oldest uint64 // clock starts at 1, so 0 means "unset"
 
 	for k, e := range c.data {
 		if e.expired(now) {
-			victim = k // free the capacity that costs nothing to free
+			victim = k
 			break
 		}
 		if oldest == 0 || e.lastUsed < oldest {
@@ -247,10 +241,10 @@ func (c *Cache) tickLocked() uint64 {
 // A ttl <= 0 means the entry never expires. Overwriting resets the deadline:
 // the new ttl fully replaces the old one.
 //
-// A Set that would exceed capacity evicts one entry first. Overwriting an
-// existing key does not grow the map, so it never evicts.
+// Inserting a new key into a full cache evicts one entry first. Overwriting
+// does not grow the map, so it never evicts.
 func (c *Cache) Set(key, value string, ttl time.Duration) {
-	// Read once before the lock: no reason to hold it across a clock read.
+	// Read before the lock: no reason to hold it across a clock read.
 	now := time.Now()
 	var expires time.Time
 	if ttl > 0 {

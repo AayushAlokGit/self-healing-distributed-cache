@@ -49,9 +49,8 @@ func TestNoLimitNeverEvicts(t *testing.T) {
 	}
 }
 
-// Overwriting does not grow the map, so a full cache must survive it intact.
-// The bug this guards: evicting on every Set, which at capacity 2 would let
-// c.Set("a", ...) evict "a" itself.
+// Guards the bug where Set evicts unconditionally: at capacity 2,
+// c.Set("a", ...) would evict "a" itself.
 func TestOverwriteDoesNotEvict(t *testing.T) {
 	c := newWithSweepInterval(2, time.Hour)
 	defer c.Close()
@@ -78,7 +77,7 @@ func TestEvictsLeastRecentlyUsed(t *testing.T) {
 	c.Set("b", "v", noTTL)
 	c.Set("c", "v", noTTL)
 
-	c.Get("a") // a is now the most recently used; b is the least
+	c.Get("a") // a becomes the most recently used; b is now the least
 
 	c.Set("d", "v", noTTL)
 
@@ -88,8 +87,7 @@ func TestEvictsLeastRecentlyUsed(t *testing.T) {
 	has(t, c, "d")
 }
 
-// Quiz S4d Q4, as a test. Recency and expiry are independent orderings: every
-// corpse here was Set *after* the live key was last touched, so plain LRU
+// Every corpse here was Set after the live key was last touched, so plain LRU
 // evicts the one entry worth keeping and holds on to 999 dead ones.
 func TestEvictsCorpseBeforeLiveKey(t *testing.T) {
 	const capacity = 1000
@@ -97,7 +95,7 @@ func TestEvictsCorpseBeforeLiveKey(t *testing.T) {
 	c := newWithSweepInterval(capacity, time.Hour)
 	defer c.Close()
 
-	c.Set("config", "v", noTTL) // the live key, touched first == least recent
+	c.Set("config", "v", noTTL)
 	fillExpiring(c, capacity-1, time.Millisecond)
 
 	time.Sleep(10 * time.Millisecond) // the 999 sessions are now corpses
@@ -108,8 +106,6 @@ func TestEvictsCorpseBeforeLiveKey(t *testing.T) {
 	has(t, c, "newcomer")
 }
 
-// With no corpse available, the minimum lastUsed must lose — even when the
-// cache is otherwise full of live TTL'd keys.
 func TestEvictsLiveKeyWhenNoCorpseExists(t *testing.T) {
 	c := newWithSweepInterval(3, time.Hour)
 	defer c.Close()
@@ -132,10 +128,10 @@ func TestEvictsLiveKeyWhenNoCorpseExists(t *testing.T) {
 //	BenchmarkSetAtCapacity/100000-20    2,010,846 ns/op   -> 20.1 ns/key
 //	BenchmarkSetAtCapacity/1000000-20  25,608,480 ns/op   -> 25.6 ns/key
 //
-// 23 ns/key is BenchmarkSweep's 27.5 ns/key: it is the same scan. The
-// difference is where it runs. sweepAll paid it once a second on a background
-// goroutine; this pays it on the caller's goroutine on every Set, and a cache
-// that is not full has the wrong capacity. 25.6ms per write at 1M entries.
+// 23 ns/key is BenchmarkSweep's 27.5 ns/key: it is the same scan. What changed
+// is where it runs. sweepAll paid it once a second on a background goroutine;
+// this pays it on the caller's goroutine on every Set, and a cache that is not
+// full has the wrong capacity.
 //
 // Fixed in step 5 by a doubly linked list: O(1) evict, no scan.
 func BenchmarkSetAtCapacity(b *testing.B) {
@@ -143,7 +139,7 @@ func BenchmarkSetAtCapacity(b *testing.B) {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			c := newWithSweepInterval(n, time.Hour)
 			defer c.Close()
-			fill(c, n) // exactly full, all permanent: every Set must scan and evict
+			fill(c, n) // exactly full and all permanent: every Set scans and evicts
 
 			i := 0
 			for b.Loop() {
