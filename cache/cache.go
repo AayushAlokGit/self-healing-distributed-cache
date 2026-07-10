@@ -10,9 +10,25 @@ import (
 	"time"
 )
 
-// Picked by gut, not measurement: too often burns CPU scanning live keys, too
-// rarely carries corpses. Step 3c replaces the trade-off rather than tuning it.
-const defaultSweepInterval = time.Second
+const (
+	defaultSweepInterval = time.Second
+
+	// A sweep pass looks at sampleSize keys and no more, so the lock is held
+	// for a constant time no matter how big the cache is.
+	sampleSize = 20
+
+	// If more than 1-in-expiredThreshold of the sample was expired, there is
+	// probably more garbage, so pass again immediately. Otherwise sleep. This
+	// makes the sweep rate track the expiry rate — there is no interval to tune.
+	expiredThreshold = 4 // i.e. 25%
+
+	// sampleSize bounds how long the lock is held ONCE. Nothing bounds how many
+	// passes a big backlog takes: reclaiming 500k corpses runs 25k passes over
+	// 514ms of continuous lock churn, halving reader throughput for half a
+	// second. The budget caps the sweeper's share of each interval and carries
+	// the rest to the next tick. Redis bounds itself the same way, at 25% CPU.
+	sweepBudgetFraction = 4 // spend at most interval/4 sweeping
+)
 
 // entry stores the absolute deadline, not the TTL duration: the arithmetic
 // happens once at Set time so Get only has to compare. Reads outnumber writes,
@@ -37,9 +53,16 @@ func (e entry) expired(now time.Time) bool {
 // Must not be copied after first use: copying duplicates the mutex, and the
 // copies would no longer exclude each other. Always pass *Cache. (pointer to one in memory cache instance)
 type Cache struct {
-	// mu guards data. Every read or write of data must hold it.
+	// mu guards data and expiring. Every read or write of either must hold it.
 	mu   sync.Mutex
 	data map[string]entry
+
+	// expiring indexes just the keys that have a deadline, so the sampler draws
+	// from the population it cares about. Sampling all of data would be diluted
+	// into uselessness by a cache of mostly-permanent keys: 20 keys drawn from
+	// 10M permanent + 1k expiring finds an expired one essentially never, the
+	// sampler concludes there's nothing to do, and the 1k rot forever.
+	expiring map[string]struct{}
 
 	// Closed, not sent to, so every receiver unblocks — now and forever.
 	done chan struct{}
@@ -59,7 +82,8 @@ func New() *Cache {
 // newWithSweepInterval lets tests sweep on a millisecond timescale.
 func newWithSweepInterval(interval time.Duration) *Cache {
 	c := &Cache{
-		data: make(map[string]entry),
+		data:     make(map[string]entry),
+		expiring: make(map[string]struct{}),
 
 		// A channel's zero value is nil, and a receive from nil blocks forever.
 		done: make(chan struct{}),
@@ -83,26 +107,92 @@ func (c *Cache) sweepLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	budget := interval / sweepBudgetFraction
 	for {
 		select {
 		case <-ticker.C:
-			c.sweep()
+			c.sampleSweep(budget)
 		case <-c.done:
 			return
 		}
 	}
 }
 
-// sweep deletes every expired entry and reports how many it removed.
+// sampleSweep reclaims expired entries by repeated random sampling, and returns
+// how many it removed.
 //
-// Deleting during a range is safe: an entry removed before it's reached is
-// simply never produced. What is NOT safe is releasing the lock mid-scan to
-// shorten the pause — an entry read before the gap is a rumor after it, and a
-// concurrent Set could have given it a fresh deadline we'd then delete.
+// Each pass looks at sampleSize keys and releases the lock, so the pause barely
+// grows with cache size: 8µs at 50k keys, 20µs at 500k (the drift is cache
+// misses, not work), against sweepAll's 27ms at 1M. If a pass found more than
+// 1/expiredThreshold of its sample expired there is probably more garbage, so it
+// passes again immediately — the sweep rate tracks the expiry rate, and there is
+// no interval to tune.
 //
-// So the lock is held for the whole scan, and that is this design's flaw: the
-// pause grows with the number of keys. Step 3c fixes it.
-func (c *Cache) sweep() int {
+// Two separate bounds doing different jobs. sampleSize bounds the PAUSE. The
+// budget bounds how long the sweeper keeps COMPETING for the lock, because the
+// number of passes is O(expired keys) — set by the workload, not by us.
+//
+// This never fully cleans the cache, and under a large backlog it won't even
+// finish this tick. Both are the same bargain: bounded waste in exchange for
+// bounded interference.
+func (c *Cache) sampleSweep(budget time.Duration) int {
+	deadline := time.Now().Add(budget)
+	total := 0
+
+	for {
+		scanned, expired := c.samplePass()
+		total += expired
+
+		// Nothing left with a TTL, or the sample came back mostly clean.
+		if scanned == 0 || expired*expiredThreshold <= scanned {
+			return total
+		}
+		if time.Now().After(deadline) {
+			return total // out of budget; the rest waits for the next tick
+		}
+	}
+}
+
+// samplePass locks, examines up to sampleSize keys drawn from the expiring
+// index, deletes the expired ones, and unlocks. It reports how many it looked
+// at and how many it removed.
+//
+// Nothing is carried across the unlock — each pass re-reads under the lock. An
+// entry read before releasing a lock is a rumor after it: a concurrent Set may
+// have given it a fresh deadline, and deleting on the stale copy would destroy
+// live data. Statelessness is what lets us drop the lock at all.
+func (c *Cache) samplePass() (scanned, expired int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	// Go starts map iteration at a random bucket, which is exactly the cheap
+	// random sample we need. It samples buckets, not keys, so it is not
+	// perfectly uniform — good enough to estimate a fraction.
+	for k := range c.expiring {
+		if scanned == sampleSize {
+			break
+		}
+		scanned++
+
+		e, ok := c.data[k]
+		if !ok {
+			delete(c.expiring, k) // Get already reclaimed it; drop the stale index entry
+			continue
+		}
+		if e.expired(now) {
+			delete(c.data, k)
+			delete(c.expiring, k)
+			expired++
+		}
+	}
+	return scanned, expired
+}
+
+// sweepAll deletes every expired entry in one locked pass. Superseded by
+// sampleSweep and kept only as the benchmark baseline: it is O(total keys), not
+// O(expired keys), and holds the lock throughout.
+func (c *Cache) sweepAll() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -111,6 +201,7 @@ func (c *Cache) sweep() int {
 	for k, e := range c.data {
 		if e.expired(now) {
 			delete(c.data, k)
+			delete(c.expiring, k)
 			removed++
 		}
 	}
@@ -130,6 +221,14 @@ func (c *Cache) Set(key, value string, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.data[key] = entry{value: value, expires: expires}
+
+	// Overwriting a TTL'd key with a permanent one must un-index it, or the
+	// sampler wastes its budget on a key that can never expire.
+	if ttl > 0 {
+		c.expiring[key] = struct{}{}
+	} else {
+		delete(c.expiring, key)
+	}
 }
 
 // Len returns how many entries the map physically holds, including expired
@@ -155,6 +254,7 @@ func (c *Cache) Get(key string) (string, bool) {
 	}
 	if e.expired(time.Now()) {
 		delete(c.data, key)
+		delete(c.expiring, key)
 		return "", false
 	}
 	return e.value, true

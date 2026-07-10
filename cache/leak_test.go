@@ -47,7 +47,7 @@ func TestSweepReclaimsUnreadKeys(t *testing.T) {
 	}
 	leaked := heapMB()
 
-	c.sweep()
+	c.sweepAll()
 	afterSweep := heapMB()
 
 	t.Logf("heap: %.1f MB empty → %.1f MB written → %.1f MB all-expired → %.1f MB swept",

@@ -11,17 +11,19 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1, step 3c — benchmark the sweep pause, then earn the sampling sweeper.**
-  The naive sweep holds the lock for the whole scan; write a `b.RunParallel` benchmark measuring
-  `Get` tail latency *while a sweep runs*, watch it blow up, then implement Redis-style sampling
-  (20 random TTL'd keys, repeat if >25% expired). Then step 4, LRU eviction.
+- **Next action:** **Phase 1, step 4 — LRU eviction.** (Step 3c done: sampling sweeper, 751× → 2.0×.)
+  Recall from the TTL quiz: expired-but-unswept entries **occupy capacity**, so a size-limited cache
+  can evict a *live* key while corpses sit untouched — lazy expiry silently sabotages the eviction
+  policy. That's the link between step 3 and step 4.
   Open the next session by re-asking the **seven** carried-forward questions cold — table at the
   bottom of `docs/QUIZZES.md`.
-- **Deferred, on purpose:** (a) `sync.RWMutex` — only after we *measure* a read-heavy benchmark and
-  can show `Mutex` is the bottleneck; note `Get` now *deletes*, so it can't take an `RLock` as
-  written; (b) `SetIfAbsent` — the caller-side check-then-act gap; (c) **Go maps never shrink** —
-  16.5 MB of bucket array survives sweeping 200k entries to `Len()==0`; only replacing the map frees
-  it. Known limit, not fixed. (d) injectable clock — the test suite spends ~4s sleeping.
+- **Deferred, on purpose:** (a) `sync.RWMutex` — measured: the *uncontended* mutex is **40% of a 67 ns
+  `Get`** (26.9 ns), with only ~22 ns of real work to overlap, and an `RLock` costs more than a
+  `Lock`. Not an obvious win; also `Get` *deletes*, so it can't take an `RLock` as written.
+  (b) `SetIfAbsent` — the caller-side check-then-act gap; (c) **Go maps never shrink** — 16.5 MB of
+  bucket array survives sweeping 200k entries to `Len()==0`; only replacing the map frees it. Known
+  limit, not fixed. (d) injectable clock — the test suite spends ~4 s sleeping.
+  (e) `sampleSize`/`expiredThreshold` (20 / 25%) are Redis's constants, unmeasured by us.
 - **Flagged (learning):** **"compare, don't remember"** has now been missed **twice** (S4 Q2,
   S4c Q1) — a value read before releasing a lock is a rumor after it. Re-teach on sight.
 - **Flagged for review:** two spots needed correction during the failure-mode quiz and were
@@ -45,7 +47,7 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 ### Phase 1 — Single-node cache
 - ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
 - ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
-- ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper** goroutine + `Close()`. Naive full-scan sweep holds the lock for the whole scan → step 3c replaces it with Redis-style sampling.
+- ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper**. Full-scan sweep measured to stall readers **751×** → replaced with Redis-style **sampling** (`samplePass` + `expiring` index): 27ms lock hold → 7µs at 1M keys, reader cost 751× → 2.0×.
 - ☐ LRU eviction
 
 ### Phase 2 — Consistent hashing
@@ -173,14 +175,77 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - **Sweeper quick-check quiz** (3 Q) — see `docs/QUIZZES.md`. 1 ✅ · 1 ⚠️ · 1 half.
   **Pattern flagged:** the ⚠️ was *again* "acted on a value read before releasing the lock" —
   the same **compare, don't remember** miss as Session 4 Q2. Twice now; logged as a pattern.
-- **Taught but not yet built (step 3c):** Redis's sampling sweeper — sample 20 random keys *with a
-  TTL*, delete the expired ones, repeat immediately if >25% were expired, else sleep. **Constant work
-  per pass** regardless of cache size (no latency spike) and **adaptive** (sweep rate tracks expiry
-  rate, no interval to tune). Trades exact cleanliness for a *bounded fraction* of corpses:
-  bounded waste + constant work + no pauses, vs zero waste + unbounded work + periodic freezes.
-  Requires a separate index of keys-with-TTL, else a cache of 10M permanent + 1k TTL'd keys dilutes
-  the sample into uselessness. Same "approximate answer, bounded error, work independent of data
-  size" bargain that Phase 4's failure detection makes.
+#### Session 4 (cont.) — Phase 1 step 3c: measure the pause, then the sampling sweeper
+- **Benchmarked the defect** (`cache/bench_test.go`). `Get` = **67 ns/op, 0 allocs**, decomposed:
+  mutex Lock+Unlock **26.9 ns**, map lookup **22.2 ns**, `time.Now()` **8.0 ns**. So an *uncontended*
+  mutex is **40% of a read** — that's the `RWMutex` question answered with evidence: an `RLock` costs
+  *more* than a `Lock` and would have only ~22 ns of work to overlap. Not an obvious win.
+- **`sweepAll` is O(total keys), not O(expired keys):** 24.4 / 24.2 / 23.5 / 27.5 ns per key at
+  1k / 10k / 100k / 1M. Ten times the keys, ten times the time. And `fill()` writes **permanent**
+  keys, so every one of those sweeps **deleted nothing** and still cost 27 ms at 1M. **The scan pays
+  for looking, not for finding.** At ~24 ns/key it's already one map-iteration step + a compare —
+  **a full scan cannot be optimized below this; you have to stop scanning.**
+- **The damage:** one sweep of 1M keys holds the lock **47.9 ms cold** / 27.5 ms warm. Reader
+  throughput **6,584,449 → 8,769** gets per 500 ms window (**751×**). Those 8,769 reads × 76 ns is
+  0.67 ms of work in 500 ms — **the reader was productive 0.13% of the time.** Not "slower": an
+  outage that answers 8,769 requests. It gets 8,769 rather than 0 only because **Go's mutex enters
+  starvation mode** after a waiter blocks 1 ms and hands the lock over directly. On a 1 s interval the
+  cache is **frozen 2.5% of wall time**, blowing any p99 budget by construction, on an idle machine.
+  **The naive sweeper converts a memory problem into a tail-latency problem** — for a cache, a bad
+  trade. Tuning the interval slides along that curve; it doesn't leave it.
+- **Measuring is hard — three failed attempts, all recorded in `GO_NOTES.md`:**
+  (a) per-op latency printed `p50=0s` — a `Get` is **67 ns**, this machine's `time.Now()` resolves to
+  **829 µs**, 12,000× coarser; (b) a phantom 10 ms "max latency" **with nothing running** — that was
+  `append` growing a 4M-element slice and triggering a GC, i.e. *measuring the measurement*;
+  (c) the `Get` decomposition first reported `RawMapLookup` at **78 ns — slower than the 67 ns `Get`
+  containing it**, because `var sink any` **boxes** the value and allocates. Typed sinks + `-benchmem`
+  + `0 allocs/op` fixed it. Rules: *fix the count and time the batch, or fix the time and count the
+  operations*; *never allocate inside the measured loop*; *a component can't cost more than the whole*.
+- **Built the sampling sweeper.** `samplePass` locks, walks ≤20 keys of the `expiring` index, deletes
+  the expired ones, unlocks. `sampleSweep` repeats immediately while >25% of a sample came back
+  expired. `sweepAll` kept **only** as the benchmark baseline.
+  - **`expiring map[string]struct{}`** — the separate TTL index Aayush's quiz answer implied.
+    Verified by `TestSampleSweepIgnoresPermanentKeys` (100k permanent + 100 expiring).
+    Three sites mutate `data`, so three must mutate `expiring`: `Set` (index if `ttl>0`, **un-index
+    otherwise** — overwrite-to-permanent), `Get` (lazy expiry), `samplePass`. New bug class: two maps
+    that must agree → `TestExpiringIndexStaysConsistent`.
+  - **Why dropping the lock is safe here and was fatal before:** `samplePass` is **stateless** — locks,
+    re-reads fresh, acts, unlocks, carries out only two ints. Nothing to be stale about.
+    *Compare, don't remember*, satisfied structurally rather than by discipline.
+  - **Go's randomized map iteration** — the property that made "resume where I left off" impossible
+    in the sweeper quiz — is exactly what makes `for k := range m { …; break }` a cheap random sample.
+    Same language decision punishing one design and rewarding the next. (Samples *buckets*, not keys,
+    so not perfectly uniform. Fine for estimating a fraction.)
+- **Results:** lock hold at 1M keys **27,489,911 ns → 7,064 ns (3,891×)**. Reader cost **751× → 2.0×**
+  — and the residual 2.0× **isn't a stall**: that test runs the sampler flat out, so two goroutines
+  split one mutex and half each is *correct*. The real `sweepLoop` costs ~7 µs/s = **0.0007%** of wall
+  time vs the full scan's 2.5%.
+- **My "constant pause" claim was WRONG, and the measurement said so:** `samplePass` = 953 ns at 1k
+  keys → **7,064 ns at 1M**, a 7.4× growth over 1000× the data. It touches exactly 20 keys at every
+  size; what changes is what a touch *costs* — at 1k the map is in L1, at 1M every random bucket probe
+  is a cache and TLB miss. **48 ns/key → 353 ns/key. Not algorithmic — physics.** Still flat-*ish* vs
+  the full scan's true O(n) (1,128× over the same range), so the design holds. Lesson recorded:
+  **the algorithm said constant, the hardware said nearly. Memory locality is invisible from the
+  algorithm.**
+- **Adaptive rate, not a tuned interval:** 50k corpses cleared in **2 `sampleSweep` calls** — a sample
+  that comes back 100% expired fails the threshold and passes again *immediately*, no sleep, no tick.
+  "Sample 20 keys" ≠ "reclaim 20 keys per interval"; it means *reclaim as fast as there is garbage, in
+  bites that never block a reader for long*. The rate is **emergent**. `defaultSweepInterval` — the
+  constant flagged as "picked by gut" — **no longer sets the sweep rate**, only how often we check.
+  We deleted the guess rather than tuning it. A healthy cache's first sample comes back clean and
+  `sampleSweep` returns after ~1 µs.
+- **Aayush caught a bad comment.** I'd justified the sweep budget as "without it a cache that is 90%
+  corpses would pass forever and pin a core." **False** — corpses are finite, the loop always
+  terminates. Probed it: reclaiming 500k corpses unbounded takes **25,000 passes over 513.9 ms** of
+  continuous lock churn; on a 1 s tick that's **51% of wall time in contention**, which is the
+  throughput damage the rewrite existed to prevent, re-entering at 20 µs granularity instead of one
+  27 ms lump. So the two bounds do **different jobs**: `sampleSize` bounds the **pause** (individual
+  request latency); the **budget** bounds how long the sweeper keeps **competing** for the lock,
+  because pass count is O(expired keys) — set by the workload, not by us. Budgeted: reclaims 347,900
+  of 500,000 in 251 ms and **carries 152,100 to the next tick**. Same bargain as the sampler itself,
+  applied to time instead of space: **bounded waste in exchange for bounded interference.** (Redis
+  caps itself at 25% CPU the same way.) *The original comment was a plausible-sounding rationalization
+  that was never checked — exactly the habit this project is meant to train out.*
 
 ### Session 3 — 2026-07-08
 - Confirmed HLD §6.2 failure-mode catalog present (line 206) — user had missed it (it's a

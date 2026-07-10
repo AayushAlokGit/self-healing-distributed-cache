@@ -291,6 +291,38 @@ Two ways out:
 triggers a GC and you'll measure **your own measurement** (we saw a phantom 10 ms "max latency" with
 nothing running). Preallocate, or don't collect.
 
+⚠️ **Assigning a concrete value to an `any` boxes it — that allocates.** A benchmark that parks its
+result in `var sink any` measures the allocator:
+
+```go
+var sink any
+sink = time.Now()          // 55 ns/op  ← 8 ns of clock + 47 ns of allocator
+```
+```go
+var sinkTime time.Time
+sinkTime = time.Now()      // 8 ns/op, 0 allocs/op
+```
+Use **typed** sinks. The tell: a component benchmarked *slower than the whole* it belongs to
+(`RawMapLookup` at 78 ns inside a 67 ns `Get`). Always pass **`-benchmem`** and demand
+`0 allocs/op` before believing a microbenchmark.
+
+The sink is still required — without storing the result somewhere, the compiler can prove the call
+has no effect and delete it.
+
+**Never `-race` a benchmark.** 5–20× overhead; every number becomes meaningless.
+
+### Algorithms don't predict memory
+`samplePass` touches exactly 20 keys at every cache size, so it "should" be constant time. Measured:
+953 ns at 1k keys, 7,064 ns at 1M — **7.4× growth over 1000× the data.** Same work, different
+cost: at 1k the map is in L1; at 1M every random bucket probe is a cache and TLB miss.
+
+Still flat-*ish* against a full scan's true `O(n)` (1,128× growth over the same range), so the design
+holds. But the algorithm said *constant* and the hardware said *nearly*. **Measure.**
+
+### Formatting
+`gofmt -l ./cache/` lists files that aren't canonically formatted, printing nothing when clean.
+Non-negotiable in Go — there is one true format and no style debate.
+
 ### `runtime` introspection
 ```go
 runtime.GC()                 // force a full, synchronous collection
