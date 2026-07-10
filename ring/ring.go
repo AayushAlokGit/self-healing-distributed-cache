@@ -101,9 +101,9 @@ func (r *Ring) Get(key string) string {
 	return r.points[i].node
 }
 
-// GetN returns up to n distinct physical nodes for key: the primary (== Get)
-// plus the next n-1 distinct nodes clockwise. Fewer than n only when the ring
-// holds fewer than n nodes — you cannot keep more copies than there are machines.
+// GetClockwiseN returns up to n distinct physical nodes for key: the primary
+// (== Get) plus the next n-1 distinct nodes clockwise. Fewer than n only when the
+// ring holds fewer than n nodes — you cannot keep more copies than there are machines.
 //
 // Distinct *physical* nodes is the whole point: the next few points clockwise
 // are often virtual nodes of the same machine, and replicas that share a machine

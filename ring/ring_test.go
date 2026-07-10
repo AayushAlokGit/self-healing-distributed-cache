@@ -40,31 +40,31 @@ func TestSingleNodeOwnsEverything(t *testing.T) {
 	}
 }
 
-func TestGetNPrimaryMatchesGet(t *testing.T) {
+func TestGetClockwiseNPrimaryMatchesGet(t *testing.T) {
 	r := New()
 	for i := range 5 {
 		r.Add("node" + strconv.Itoa(i))
 	}
 	for i := range 1000 {
 		key := "key:" + strconv.Itoa(i)
-		owners := r.GetN(key, 3)
+		owners := r.GetClockwiseN(key, 3)
 		if len(owners) == 0 || owners[0] != r.Get(key) {
-			t.Fatalf("GetN[0]=%v disagrees with Get=%q for %q", owners, r.Get(key), key)
+			t.Fatalf("GetClockwiseN[0]=%v disagrees with Get=%q for %q", owners, r.Get(key), key)
 		}
 	}
 }
 
-// The reason GetN exists: R copies on R distinct machines, or a single death
+// The reason GetClockwiseN exists: R copies on R distinct machines, or a single death
 // takes every copy. The next points clockwise are often the same machine's
 // virtual nodes, so a naive "next R points" would return duplicates.
-func TestGetNReturnsDistinctPhysicalNodes(t *testing.T) {
+func TestGetClockwiseNReturnsDistinctPhysicalNodes(t *testing.T) {
 	const nodes = 8
 	r := New()
 	for i := range nodes {
 		r.Add("node" + strconv.Itoa(i))
 	}
 	for i := range 5000 {
-		owners := r.GetN("key:"+strconv.Itoa(i), 3)
+		owners := r.GetClockwiseN("key:"+strconv.Itoa(i), 3)
 		if len(owners) != 3 {
 			t.Fatalf("wanted 3 owners, got %v", owners)
 		}
@@ -80,12 +80,12 @@ func TestGetNReturnsDistinctPhysicalNodes(t *testing.T) {
 
 // You cannot keep more copies than there are machines. Asking for more distinct
 // nodes than exist returns every node, once each — not a short list, not a loop.
-func TestGetNCappedByNodeCount(t *testing.T) {
+func TestGetClockwiseNCappedByNodeCount(t *testing.T) {
 	r := New()
 	r.Add("a")
 	r.Add("b")
 
-	owners := r.GetN("key", 5)
+	owners := r.GetClockwiseN("key", 5)
 	if len(owners) != 2 {
 		t.Fatalf("2-node ring should yield 2 owners for N=5, got %v", owners)
 	}
@@ -94,14 +94,14 @@ func TestGetNCappedByNodeCount(t *testing.T) {
 	}
 }
 
-func TestGetNEdgeCases(t *testing.T) {
+func TestGetClockwiseNEdgeCases(t *testing.T) {
 	empty := New()
-	if got := empty.GetN("k", 3); got != nil {
+	if got := empty.GetClockwiseN("k", 3); got != nil {
 		t.Fatalf("empty ring should return nil, got %v", got)
 	}
 	r := New()
 	r.Add("a")
-	if got := r.GetN("k", 0); got != nil {
+	if got := r.GetClockwiseN("k", 0); got != nil {
 		t.Fatalf("n=0 should return nil, got %v", got)
 	}
 }
