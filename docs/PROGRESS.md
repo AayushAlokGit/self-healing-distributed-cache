@@ -4,19 +4,24 @@ Living log of where we are, what's been taught, and quiz results. Update at the 
 session and after each milestone. Newest entries at the top of the log.
 
 ## Current status
-- **Phase:** **Phase 0 COMPLETE (concepts) — Go 1.26.5 installed. Starting Phase 1 (naive
-  single-node cache).** HLD APPROVED, all 6 §10 decisions LOCKED (2026-07-08).
+- **Phase:** **Phases 0–4 COMPLETE. Starting Phase 5 (self-heal).** Go 1.26.5 installed; HLD
+  APPROVED, all 6 §10 decisions LOCKED (2026-07-08). Phase 4 (failure detection) closed 2026-07-10:
+  heartbeats + timeout detection, false-positive demo, gossip/SWIM intuition — see the Phase 4
+  checklist and the Session 6 milestone quiz (2 ✅ · 2 ⚠️ · 2 ⊘).
 - **Locked decisions:** (1) nodes = goroutines in one process, real HTTP over localhost ports;
   (2) primary-only write ack to start, W-ack knob added in Phase 3; (3) all-to-all heartbeats;
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 1 is COMPLETE.** Steps 1–4 done 2026-07-10: expiry-aware LRU → hash map +
-  doubly linked list (`Set` at 1M: **25.6 ms → 579 ns, 44,199×**) → hit-rate benchmark. **Segmented
-  LRU is DEFERRED, and for a measured reason, not a guess** — see the finding below. Next up:
-  **Phase 2, consistent hashing.** Start with why `hash % N` breaks on resize.
-  The Phase 1 carry-forward list is **retired at Aayush's request (2026-07-10)** — do not re-ask; see
-  the note at the bottom of `docs/QUIZZES.md`. Start a fresh list from Phase 2 quizzes.
+- **Next action:** **Phases 1–4 are COMPLETE** (single-node cache → consistent hashing → R=3
+  replication + fallback [the money moment] → failure detection). Next up: **Phase 5, self-heal** —
+  make a *detected* death (Phase 4) *trigger* re-replication so an under-replicated key range is
+  restored to R copies while still serving reads. This is the "kill a node, watch it **re-replicate**"
+  half of the demo. Open questions to teach first: who runs the heal (HLD §6: no dedicated healer —
+  each range's current primary coordinates its own, deterministically from the ring), how a node
+  knows *which* keys to copy without a global keyset, and how to avoid a re-replication storm on a
+  false positive. **Carry into Session 7 cold:** Q4 (self-suspicion & split-brain) and Q6 (false-
+  positive mitigations) from the Phase 4 quiz — both left blank.
 - **The finding that closed Phase 1:** we asserted for four sessions that *"a sequential scan
   collapses LRU's hit rate."* Measured, that is **false for realistic traffic and dramatically true
   for a flat working set.** A Zipf workload loses only 12.6 points to a batch job issuing as many
@@ -80,7 +85,9 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 ### Phase 4 — Failure detection
 - ☑ Heartbeats & timeouts — `node/node.go`. `/health` endpoint; each node's heartbeat goroutine pings every peer every `heartbeatInterval` (100ms), records `lastSeen`, and reconciles an `alive` view against `failureTimeout` (500ms). Alive→dead flips `ring.Remove` (stop routing to the corpse); dead→alive flips `ring.Add`. **The ring now holds only nodes this view believes alive**, so `peers` (all known) and the ring (alive) diverge. Each node's view is its own — no consensus. Measured under `-race`: **death detected in 600ms = timeout + 1 beat**, both peers conclude it independently, and the key reroutes off the dead node.
 - ☑ False positives (GC pause vs death) — **the core impossibility: a crash, a slow node, and a dropped packet are all just silence.** The timeout is the knob: short = fast detection + false positives (a GC pause looks dead → wrong ring recompute → asymmetric views → split-brain seed); long = fewer false positives + route to corpse longer. **Demonstrated** (`node/node.go` `PauseHealth` + `TestSlowNodeIsFalselyDeclaredDead`): a node that stalls only `/health` (a GC-pause stand-in) while serving all other traffic is declared dead by n0 after ~500ms, yet still counts *itself* alive — asymmetric views, the split-brain seed. Un-stalling it makes n0 re-admit it: a needless eviction+recovery **flap**, the pure cost of guessing too eagerly. The same 500ms timeout that `TestHeartbeatDetectsDeath` shows catching a real death fast is shown here misfiring on a slow node — you cannot have both, because both are silence.
-- ☐ Gossip / SWIM intuition — building all-to-all (O(N²), HLD-locked); gossip is the scaling alternative, to teach not build.
+- ☑ Gossip / SWIM intuition — **taught, not built** (all-to-all is O(N²): N=5 → 20 msgs, N=1000 → 1M msgs/interval; HLD-locks us to it because we never hit the wall). Gossip: a node learns of a death **second-hand** — pings a few random peers, the fact spreads transitively (rumor, O(N), converges O(log N)) instead of directly pinging everyone. SWIM adds the two parts that fix *our* false positive: **indirect probing** (ask k peers to probe the suspect before convicting → routes around a single bad link) and **suspicion + incarnation numbers** (a "suspected" state the accused can *refute* → the voice n1 never had in our demo). Deferred on the same naive→measure→iterate logic as segmented LRU: name what it buys, don't build it until a measured scale need appears.
+
+**Phase 4 COMPLETE.** Heartbeats + timeout detection (death caught in ~490–600ms = timeout + up to one beat) → false-positive demonstrated (`PauseHealth`: a healthy-but-stalled node convicted, then flaps back — the timeout's cost made concrete) → gossip/SWIM intuition. The ring now holds only nodes a view believes alive; each view is independent (no consensus). Next: **Phase 5, self-heal** — a detected death should *trigger* re-replication to restore R, the other half of the money moment.
 
 ### Phase 5 — Self-heal
 - ☐ Data migration on membership change
@@ -624,6 +631,14 @@ up. That is the naive→measure→iterate loop actually being allowed to say *no
 
 ## Quiz results log
 _(Score + what to revisit. **Full question text and model answers live in `docs/QUIZZES.md`.**)_
+
+### 2026-07-10 — Session 6: Phase 4 milestone quiz (failure detection) → **2 ✅ · 2 ⚠️ · 2 ⊘**
+- ✅ three causes of silence (crash/GC/network) · ✅ independent views → coordinator→SPOF→**consensus**→CP chain
+- ⚠️ **the timeout knob** — 50ms false-positives ✅; 5s conclusion right but *mechanism* wrong (a crashed node fails pings *fast*; the delay is the `lastSeen` **declaration** threshold, not a hanging connection).
+- ⚠️ **scaling** — named "gossip/SWIM" but not the mechanism (a node learns of a death **second-hand** / transitively, not by direct ping).
+- ⊘ **self-suspicion & split-brain** — left blank *despite the live demo minutes earlier*. Re-ask cold.
+- ⊘ **extend it / reduce false positives** — left blank. Model answers (indirect probing, suspicion+incarnation, N-misses, phi-accrual) + the universal tradeoff (every mitigation slows *real* detection) in QUIZZES.md.
+- **Revisit:** the pattern is **label-not-mechanism** (Q2 why, Q5 how, Q4/Q6 blank) — the hard concepts (Q1, Q3) were clean, so it's precision, not comprehension. Push for the mechanism on re-ask. Carry Q4 and Q6 forward cold into Session 7.
 
 ### 2026-07-10 — Session 5: cold re-ask of the 9 carried-forward questions → **2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘**
 - ✅ naive-timer overwrite bug · ✅ `Close()`/`select`/`Ticker`

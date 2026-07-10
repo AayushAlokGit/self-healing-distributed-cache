@@ -10,6 +10,27 @@ Question text + model answers, so quizzes can be re-asked cold weeks later. Scor
 
 ---
 
+## Session 6 — 2026-07-10 · Phase 4 milestone quiz (failure detection)
+
+**2 ✅ · 2 ⚠️ · 2 ⊘.** Taken cold at phase end. Q4 was left blank despite being walked through live
+minutes earlier.
+
+| Q | Concept | | The gap |
+|---|---|---|---|
+| 1 | three causes of silence | ✅ | Crash, GC pause, network delay on the reply path. All three. They're indistinguishable because all produce the *identical* observation — no reply in time; there is no "I'm slow" message. |
+| 2 | the timeout knob, both ways | ⚠️ | 50ms → false positives ✅. 5s: right conclusion ("death learnt only after 5s") but **muddled mechanism** — said a dead node *"holds the connection open 5s."* A crashed node refuses the connection *instantly*; each ping fails fast. The 5s delay is the **`lastSeen` threshold** withholding the *declaration*, not a hanging ping. Real cost: ring routes to a corpse for 5s (failed hops, under-replicated writes). Per-ping hang only happens on a node that accepts TCP but never replies. |
+| 3 | independent views vs forced agreement | ✅ | Nailed the chain: force agreement → coordinator → SPOF → redundant coordinator needs **consensus**. Plus the availability point. Sharpened: the requirement is *consensus*, and consensus is *what makes a system CP* — it needs a majority quorum, so the minority partition must stop serving. |
+| 4 | self-suspicion & split-brain | ⊘ | Not attempted (despite the live demo minutes before). (a) A node is the **authority on its own liveness** — suspicion comes from `lastSeen` of *inbound* replies; it never pings itself, hard-sets `alive[self]=true`; a dead node isn't running to mark itself. (b) n0-says-dead / n1-says-alive with no reconciler → if it hardens (partition), both sides serve, writes diverge → **split-brain**, LWW silently drops a loser = data loss. |
+| 5 | scaling the detector | ⚠️ | Named "gossip or SWIM" but **not the mechanism**. The change: today n0 learns of n1's death by *directly pinging n1*; under gossip it learns **second-hand** — pings a few random peers, the fact propagates transitively (rumor spread), O(N) not O(N²). The *label* isn't the answer; the *how* is. |
+| 6 | extend it — reduce false positives | ⊘ | Not attempted. Any one: indirect probing (SWIM), suspicion+incarnation refutation, N-consecutive-misses / longer timeout, phi-accrual. **Universal tradeoff: every false-positive mitigation slows detection of real deaths** — more evidence/waiting delays the right convictions too. |
+
+**Through-line flagged:** the two ⚠️ and the Q5 miss are the same habit — **naming the label, not the
+mechanism.** "Gossip"/"SWIM" are labels; *how a node learns second-hand* is the answer. Q2 named the
+right outcome but the wrong *why*. Push for the mechanism on re-ask. The genuinely hard ones (Q1, Q3)
+were clean, so this is a *precision* gap, not a comprehension gap.
+
+---
+
 ## Session 5 — 2026-07-10 · cold re-ask of the nine carried-forward questions
 
 No re-teaching first, as the ritual requires. **2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘.**
