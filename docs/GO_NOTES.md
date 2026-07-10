@@ -299,6 +299,28 @@ Safe here only because the read index never lags the write index. → `Ring.Remo
 
 ---
 
+## net/http (server side)
+
+**A handler is `func(w http.ResponseWriter, r *http.Request)`.** Read the request from `r`, write the
+response into `w`. `w.Write`/`io.WriteString(w, s)` sends the body; the first write implies `200`, so
+call `w.WriteHeader(code)` *before* writing if you want another. `http.Error(w, msg, code)` does both.
+
+**`ServeMux` with method+path patterns (Go 1.22+).** `mux.HandleFunc("GET /kv/{key}", h)` — the method
+is part of the pattern, and `{key}` is a wildcard read back with `r.PathValue("key")`. Before 1.22 you
+parsed the method and path yourself.
+
+**The server blocks, so launch it with `go`.** `srv.Serve(ln)` runs until shutdown. Bind the listener
+separately (`net.Listen("tcp", ":0")`) so the OS can pick a free port and you can read the real one
+back via `ln.Addr()` — essential for tests, no port collisions. → `node.Start`
+
+**`srv.Shutdown(ctx)` is the graceful Close.** Stops accepting, lets in-flight handlers finish. Same
+resource-not-value lesson as the cache sweeper: an `http.Server` owns a goroutine and must be stopped.
+
+⚠️ **Always `resp.Body.Close()`** on a client response, even if you ignore the body — the connection
+leaks otherwise. `defer resp.Body.Close()` right after the error check.
+
+---
+
 ## Pointers and data structures
 
 **No pointer arithmetic, no `->`.** `n.next.prev = n.prev` auto-dereferences at every step; Go has

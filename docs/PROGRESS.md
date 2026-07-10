@@ -70,7 +70,9 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 **Phase 2 COMPLETE.** `hash%N` diagnosed → ring built → hash fixed (FNV→SHA-256, caught by measurement) → virtual nodes (65x→1.4x span, failures spread across survivors) → R-way ownership lookup. Next: **Phase 3, replication** — write to all R owners, read with fallback.
 
 ### Phase 3 — Replication
-- ☐ Replication factor R, primary + replicas
+- ◐ Storage node — `node/node.go`. A cache behind an HTTP server (`GET/PUT /kv/{key}`), deliberately ring-unaware; all routing will live in the coordinator. Binds `127.0.0.1:0` (OS-chosen port, read back via `ln.Addr()`), serves in a goroutine, `Close` = `srv.Shutdown` then `cache.Close`. Real HTTP, tested under `-race`. **Naive plan: R=1 sharding first → kill a node → data loss → then R=3 replication (the money moment).**
+- ☐ Coordinator: holds the ring + node addresses, routes Get/Set over HTTP (R=1 first)
+- ☐ Replication factor R, primary + replicas — write to all R owners
 - ☐ Write propagation, read fallback
 - ☐ Consistency vs availability trade-off
 
