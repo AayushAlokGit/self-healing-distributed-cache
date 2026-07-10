@@ -326,12 +326,10 @@ deletes, so it couldn't take an `RLock` anyway.)
 
 ## Carried forward — re-ask cold
 
-| From | Concept | The specific gap |
-|---|---|---|
-| S5 Q1 | **check-then-act** | **THIRD miss.** Still cannot produce an interleaving. Re-asked with the misreading corrected; deferred, unanswered. |
-| S5 Q6 | **compare, don't remember** | Same bug as S5 Q1. Slogan memorized, argument not runnable. |
-| S5 Q2 | starvation | Definition was inverted. Re-taught + **starvation mode** named. Re-ask the *mechanism*. |
-| S5 Q3 | happens-before | Taught cold this session, **untested**. Prerequisite for Phase 3 write visibility. |
-| S5 Q5 | resource semantics | Re-taught: *owns what the GC can't reclaim*; a goroutine stack is a **GC root**. Untested since. |
-| S5 Q8 | expiry-aware eviction | Right victim, wrong principle — imported Q9's lesson. Being encoded in code now. |
-| S5 Q9 | admission control | Taught twice, still not *named* unprompted. Re-ask: "what does LRU lack?" |
+**Retired 2026-07-10 at Aayush's request — do not re-ask.** The Phase 1 carry-forward list
+(check-then-act, compare-don't-remember, starvation mechanism, happens-before, resource semantics,
+expiry-aware eviction, admission control) is closed. The concepts remain taught and are recorded in
+the session logs above; several were also *demonstrated in code* during Phase 1 (expiry-aware eviction
+in `evictLocked`, resource semantics in `Close`, admission control as the reason segmented LRU was
+deferred). If any resurfaces as a real gap during Phase 2+, treat it as new material then, not as a
+debt to collect. Start a fresh carry-forward list from Phase 2 quizzes.

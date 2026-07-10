@@ -15,9 +15,8 @@ session and after each milestone. Newest entries at the top of the log.
   doubly linked list (`Set` at 1M: **25.6 ms → 579 ns, 44,199×**) → hit-rate benchmark. **Segmented
   LRU is DEFERRED, and for a measured reason, not a guess** — see the finding below. Next up:
   **Phase 2, consistent hashing.** Start with why `hash % N` breaks on resize.
-  Open the next session by re-asking the **seven** carried-forward questions cold — table at the
-  bottom of `docs/QUIZZES.md`. Aayush's `check-then-act` / `compare-don't-remember` question is
-  **still unanswered after three asks** and should go first.
+  The Phase 1 carry-forward list is **retired at Aayush's request (2026-07-10)** — do not re-ask; see
+  the note at the bottom of `docs/QUIZZES.md`. Start a fresh list from Phase 2 quizzes.
 - **The finding that closed Phase 1:** we asserted for four sessions that *"a sequential scan
   collapses LRU's hit rate."* Measured, that is **false for realistic traffic and dramatically true
   for a flat working set.** A Zipf workload loses only 12.6 points to a batch job issuing as many
@@ -62,10 +61,11 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 - ◐ Scan resistance — **taught, quizzed, measured, DEFERRED.** Four families: more evidence (segmented LRU / 2Q / InnoDB), frequency (LFU+decay, ARC, LIRS), **admission** (TinyLFU + Count-Min Sketch — the deep reframe: *LRU has no admission policy*), hinting (PG ring buffer, `MADV_SEQUENTIAL`). Not built: for skewed traffic the gain is ~12 points at a 1:1 scan ratio, which does not pay for the complexity. Revisit if a workload with a flat working set appears.
 
 ### Phase 2 — Consistent hashing
-- ☐ Why `hash % N` breaks on resize
-- ☐ The ring + wraparound
-- ☐ Virtual nodes / balance
-- ☐ Key ownership lookup
+- ☑ Why `hash % N` breaks on resize — the divisor N is a single global baked into every key's placement, so changing N re-rolls everyone. Counted over one period of 12: going 4→3 nodes moves **9 of 12 keys ≈ 75%**, i.e. ~(N-1)/N, not 1/N. Every moved key is a miss → **cache stampede** on the DB (whole keyspace, no hot key needed). Patch-the-mapping "fixes" fail worse: placement becomes a function of the *ordered history* of changes, so clients that learned failures in a different order disagree.
+- ☑ The ring + wraparound — `ring/ring.go`. Hash nodes and keys into the same 32-bit space; a key belongs to the first node **clockwise**, wrapping past the top. `Add`/`Remove`/`Get`, sorted points + `sort.Search`. **Measured: removing 1 of 10 nodes moved 9.2% of keys** (≈1/N) vs hash%N's ~90%.
+- ◐ Virtual nodes / balance — **next.** Naive ring (one point per node) measured lumpy: **3.2x busiest / 0.16x quietest, 20x span** over 10 nodes even with a good hash, because few random points cut uneven arcs. Also a dead node dumps its whole arc on one clockwise neighbour → concentration + cascade risk. Both fixed by many points per node.
+- ☑ Hash choice — **FNV-1a was a bad call, caught by measurement.** Its weak avalanche clustered `node0..node9` into a 4% sliver so one node owned **96%** of the ring. Switched to **SHA-256 truncated to 4 bytes** (crypto avalanche → uniform). `maphash` is unusable: per-process seeded. Murmur3 (fast + good avalanche) is a hand-roll candidate if hashing shows up hot.
+- ☐ Key ownership lookup (for replication: the *next R distinct* nodes clockwise)
 
 ### Phase 3 — Replication
 - ☐ Replication factor R, primary + replicas

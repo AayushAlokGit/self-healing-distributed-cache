@@ -277,6 +277,28 @@ machines disagree and can run backwards. → `Cache.tickLocked`
 
 ---
 
+## Hashing, sorting, slices
+
+**Hashers are `io.Writer`s.** `h := fnv.New32a(); h.Write([]byte(s)); h.Sum32()` — feed bytes, read
+the result. Same shape for `crypto/sha256`, though that also offers the one-shot `sha256.Sum256(b)`
+returning a `[32]byte` array. Slice + `binary.BigEndian.Uint32(sum[:4])` to pull a `uint32` out.
+
+⚠️ **Hash choice is not interchangeable.** `hash/fnv` and `hash/crc32` have **weak avalanche**: inputs
+sharing a prefix and differing in one trailing byte (`node0`..`node9`) produce outputs that stay
+clustered — on a hash ring, one node ended up owning 96% of the circle. A crypto hash randomizes every
+output bit, so any truncation is uniform. → `ring/hashKey`. And **never** `hash/maphash` for anything
+cross-process: it is per-process seeded on purpose, so two processes disagree.
+
+**`sort.Search(n, f)`** is binary search over an *index range*, not a slice. `f` must be monotonic
+(false…false true…true); it returns the first `i` where `f(i)` is true, or `n` if never. The clockwise
+walk on a ring: `i := sort.Search(len(pts), func(i int){ return pts[i].hash >= h }); if i==len(pts) { i=0 }`.
+
+**Filter-in-place** reuses the backing array: `kept := s[:0]; for _, x := range s { if keep(x) { kept = append(kept, x) } }; s = kept`.
+`s[:0]` is length 0, full capacity, same pointer — so `append` overwrites the original as it goes.
+Safe here only because the read index never lags the write index. → `Ring.Remove`
+
+---
+
 ## Pointers and data structures
 
 **No pointer arithmetic, no `->`.** `n.next.prev = n.prev` auto-dereferences at every step; Go has
