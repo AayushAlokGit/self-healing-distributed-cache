@@ -70,10 +70,10 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 **Phase 2 COMPLETE.** `hash%N` diagnosed → ring built → hash fixed (FNV→SHA-256, caught by measurement) → virtual nodes (65x→1.4x span, failures spread across survivors) → R-way ownership lookup. Next: **Phase 3, replication** — write to all R owners, read with fallback.
 
 ### Phase 3 — Replication
-- ◐ Storage node — `node/node.go`. A cache behind an HTTP server (`GET/PUT /kv/{key}`), deliberately ring-unaware; all routing will live in the coordinator. Binds `127.0.0.1:0` (OS-chosen port, read back via `ln.Addr()`), serves in a goroutine, `Close` = `srv.Shutdown` then `cache.Close`. Real HTTP, tested under `-race`. **Naive plan: R=1 sharding first → kill a node → data loss → then R=3 replication (the money moment).**
-- ☐ Coordinator: holds the ring + node addresses, routes Get/Set over HTTP (R=1 first)
-- ☐ Replication factor R, primary + replicas — write to all R owners
-- ☐ Write propagation, read fallback
+- ◐ Storage node (Store Engine layer) — `node/node.go`. A cache behind an HTTP server (`GET/PUT /kv/{key}`), the internal endpoint one node calls on another. Binds `127.0.0.1:0` (OS-chosen port, read back via `ln.Addr()`), serves in a goroutine, `Close` = `srv.Shutdown` then `cache.Close`. Real HTTP, tested under `-race`.
+- ☑ **Coordinating role (R=1), NOT a central coordinator** — `node/node.go`. Every node holds its own ring + peer map (injected via `SetMembership`; gossip in Phase 4) and exposes client-facing `/get`+`/set` alongside the internal `/kv`. Any node coordinates any key: `ring.Get(key)` → local cache if it owns it, else forward over HTTP (2s timeout so a dead owner fails fast). Tested under `-race`: any node routes any key to its owner. **Naive failure demonstrated: at R=1, killing a key's owner returns 502 from every survivor — data gone, no copy to fall back to. This earns replication.**
+- ☐ Replication factor R=3 — coordinating node writes to all R owners (`GetClockwiseN`); **quorum W-ack is a knob, not consensus**.
+- ☐ Read fallback — try primary, then next replica clockwise (the money moment: kill a node, reads keep serving).
 - ☐ Consistency vs availability trade-off
 
 ### Phase 4 — Failure detection
