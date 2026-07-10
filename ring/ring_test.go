@@ -139,10 +139,14 @@ func TestVirtualNodesFlattenLoad(t *testing.T) {
 
 // The second reason for virtual nodes (Q8): a naive node's whole arc dumps onto
 // its one clockwise neighbour, risking a cascade. With many scattered points,
-// the dead node's keys spread across every survivor. Recorded run:
+// the dead node's keys spread across (almost) every survivor. Recorded run:
 //
 //	naive:  node3's keys landed on 1 survivor,  which took 100% of them
 //	vnodes: node3's keys landed on 9 survivors, busiest took 19%
+//
+// Hitting all N-1 is not guaranteed — the ceiling is min(replicas, N-1) and a
+// survivor is missed with probability ~(1-1/(N-1))^replicas — so the test only
+// asserts a wide spread, not the exact count.
 func TestFailureSpreadsLoadAcrossSurvivors(t *testing.T) {
 	const (
 		nodes = 10
@@ -186,8 +190,8 @@ func TestFailureSpreadsLoadAcrossSurvivors(t *testing.T) {
 	if n1 != 1 {
 		t.Fatalf("naive ring should dump a dead node's whole arc on one neighbour, hit %d", n1)
 	}
-	if nV < nodes-1 {
-		t.Fatalf("vnodes should spread across all %d survivors, hit only %d", nodes-1, nV)
+	if nV < nodes/2 {
+		t.Fatalf("vnodes should spread across a majority of the %d survivors, hit only %d", nodes-1, nV)
 	}
 	if shareV > 0.25 {
 		t.Fatalf("one survivor absorbed %.0f%% of the dead node's load", shareV*100)
