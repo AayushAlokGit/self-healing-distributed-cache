@@ -39,6 +39,10 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
   probe **downloads the whole value**. A `HEAD` makes the check free and roughly halves heal traffic.
 - **(d) NOT the arc-diff heal** (touch only the ring arcs that changed owner). S9 Q7 sketched it and argued
   **against** building it: it taxes every `Set` forever to speed up a rare death. Wait for a measured need.
+- **(e) Pin the `cluster` flake** — **2 of 4** full-suite `-race` runs fail; **0 of 4** in isolation. Fails under
+  load, passes alone = a test leaning on a timing budget it does not own (a fixed `time.Sleep` where it should
+  **poll for the condition**). Reproduce it with `go test -race -count=1 ./...` (the whole suite is the load), not
+  by re-running `./cluster/`. A flake you tolerate is a flake that teaches you to ignore red.
 
 ### Carried forward — re-ask cold (full text in `QUIZZES.md`)
 1. **Presence ≠ version** (S9) — the only genuine knowledge gap on the board.
@@ -474,6 +478,20 @@ Verifying a certificate means knowing who you trust, and that list is **just a f
 `x509: certificate signed by unknown authority` while the deploy goes **green** and the health check passes. Now
 `COPY --from=build /etc/ssl/certs/ca-certificates.crt`. ⚠️ **A passing health check does not mean a working
 feature** — nothing on the request path touched TLS, so nothing on the request path could fail.
+
+Then the comment pass the other packages already had (`notify/`, `visits.go`, the deploy files): narration out,
+contracts and ⚠️ traps in. Go files land at 16–21%, the band the rest of the project sits in.
+
+Last, **the push now names the visitor's IP** rather than only a hash of it. Worth being clear-eyed about what that
+trades: an ntfy topic has no password, so the topic *name* is now what guards visitor IPs, not merely the fact that
+somebody showed up — a guessable topic went from an annoyance to a privacy leak. The `sha256` stays as the **dedup
+key** (it is only ever compared, never read); it was never privacy *against a topic holder* anyway, since an IPv4
+address is brute-forced from its hash in seconds. **The security of the whole thing is one unguessable string.**
+
+⚠️ **The `cluster` flake, measured rather than shrugged at:** **2 failures in 4** full-suite `-race` runs this
+session, and **0 in 4** when `./cluster/` runs alone (also clean alongside `cache`+`node`). Fails under a *full*
+load, passes in isolation — the signature of a **test leaning on a timing budget it does not own**, not of a broken
+cluster. Still unpinned, and now the top code item.
 
 ### Session 14 — 2026-07-11 · Visit notifications, and the interface under them
 **Build only, no quiz.** An ntfy push when somebody opens the live demo. Not a distsys feature, but three of its

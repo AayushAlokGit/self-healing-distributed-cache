@@ -77,7 +77,8 @@ string, install [ntfy](https://ntfy.sh) on your phone, and subscribe. Unset, the
 ⚠️ **The topic name is the only secret ntfy has** — no key, no account. Anyone who knows it can read your
 notifications *and* send you some. Keep it in an env var (`render.yaml` marks it `sync: false`, so it never
 enters git), and **never** as a `VITE_*` variable — those are inlined into the bundle every visitor
-downloads. The push carries a *hash* of the visitor's IP, never the IP.
+downloads. The push names the visitor's IP, browser, and where they came from — so the topic name is
+guarding *visitor IPs*. Make it long and random.
 
 The interesting part is that **a visit is not a request**: the dashboard polls `/api/state` about once a
 second, so a naive push-per-request is a push per second per open tab. `cmd/server/visits.go` dedups on the

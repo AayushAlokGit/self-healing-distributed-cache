@@ -355,14 +355,19 @@ tab. Three guards turn the poll storm back into visits:
 
 | Guard | Why |
 |---|---|
-| dedup on `sha256(IP + UA)` | one visitor is one push |
+| dedup on `sha256(IP + UA)` | one visitor is one push — hashed because the key is only ever *compared*, never read |
 | an **idle** window, refreshed on *every* poll | a tab left open all afternoon is **one** visit; a *fixed* window would push every 30 min at somebody who never left |
 | ≤ 20 pushes/hour, hard | the API is public — ⚠️ a bot sweeping it must not become a **DoS on your own phone** |
 
 ⚠️ **The ntfy topic is the only secret ntfy has** — no key, no account: whoever knows the name can *read*
 your notifications *and* send you some. So it is an env var (`$NTFY_TOPIC`, `sync: false` in
 `render.yaml`), never in git, never logged, and **never a `VITE_*`** — those are inlined into the bundle
-every visitor downloads. For the same reason the message carries a *hash* of the IP, not the IP.
+every visitor downloads.
+
+⚠️ **The message carries the visitor's IP** (the same thing any web server logs), so the topic name is what
+guards *visitor IPs*, not merely the fact that somebody showed up. A guessable topic is now a privacy leak
+rather than an annoyance. The `sha256` is a dedup key, not a privacy measure — it never was one against
+anybody holding the topic, since an IP is trivially brute-forced from its hash.
 
 Two Go traps the design turns on: `*http.Request` is **dead once the handler returns**, so the message is
 built before the goroutine spawns; and `r.Context()` is **cancelled when the response is written**, so the

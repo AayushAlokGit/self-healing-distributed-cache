@@ -23,6 +23,10 @@ import (
 // refreshed on every poll, so a tab left open all afternoon stays one visit; and a cap per
 // hour, because the API is public and a bot sweeping it must not become a denial-of-service
 // on somebody's phone.
+//
+// ⚠️ The message carries the visitor's IP, and an ntfy topic has no password — its name is
+// the only thing protecting it. So the topic name is now guarding visitor IPs, not just the
+// fact that somebody showed up. Keep it long, random, and out of everything.
 type visits struct {
 	to  notify.Notifier
 	log *slog.Logger
@@ -61,8 +65,9 @@ func (v *visits) middleware(next http.Handler) http.Handler {
 func (v *visits) visit(r *http.Request, now time.Time) (notify.Notification, bool) {
 	// ⚠️ Read everything off r HERE. The caller hands the result to a goroutine that outlives
 	// the handler, and r is not safe to touch once the handler has returned.
-	id := visitorID(r)
-	body := fmt.Sprintf("%s · %s · %s", id, describeUA(r.UserAgent()), source(r))
+	ip := clientIP(r)
+	id := visitorID(ip, r.UserAgent())
+	body := fmt.Sprintf("%s · %s · %s", ip, describeUA(r.UserAgent()), source(r))
 
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -121,11 +126,11 @@ func (v *visits) send(n notify.Notification) {
 	v.log.Debug("visit notified", "visit", n.Body)
 }
 
-// visitorID identifies a visitor without telling the notifier who they are: an ntfy topic is
-// readable by anyone who guesses its name, so a raw IP has no business travelling in the
-// message. The hash dedups just as well and says nothing about the person.
-func visitorID(r *http.Request) string {
-	sum := sha256.Sum256([]byte(clientIP(r) + "|" + r.UserAgent()))
+// visitorID is the dedup key: one IP + user-agent is one visitor. Hashed because it is only
+// ever compared, never read — an IP is fine in a map, but a fixed-width opaque key is what
+// the rest of the type actually needs.
+func visitorID(ip, ua string) string {
+	sum := sha256.Sum256([]byte(ip + "|" + ua))
 	return hex.EncodeToString(sum[:])[:8]
 }
 

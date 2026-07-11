@@ -75,6 +75,22 @@ func TestAVisitorWhoLeavesAndReturnsIsANewVisit(t *testing.T) {
 	}
 }
 
+// The notification has to say WHO, not just that somebody came.
+func TestTheNotificationCarriesTheVisitorsIP(t *testing.T) {
+	v := newTestVisits()
+
+	n, ok := v.visit(poll("203.0.113.9", chrome), t0)
+	if !ok {
+		t.Fatal("the first poll did not count as a visit")
+	}
+	if !strings.Contains(n.Body, "203.0.113.9") {
+		t.Errorf("body = %q, want the visitor's IP in it", n.Body)
+	}
+	if !strings.Contains(n.Body, "Chrome on Windows") {
+		t.Errorf("body = %q, want the client described too", n.Body)
+	}
+}
+
 func TestDifferentVisitorsEachNotify(t *testing.T) {
 	v := newTestVisits()
 
@@ -220,8 +236,10 @@ func TestARealStatePollPushesThroughRoutes(t *testing.T) {
 		if !strings.HasPrefix(msg, "/smoke-topic ") {
 			t.Errorf("published to %q, want the topic as the path", msg)
 		}
-		if !strings.Contains(msg, "Chrome on Windows") || !strings.Contains(msg, "https://dashboard.test") {
-			t.Errorf("notification lost its detail: %q", msg)
+		for _, want := range []string{"203.0.113.9", "Chrome on Windows", "https://dashboard.test"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("notification lost %q: %q", want, msg)
+			}
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a dashboard poll through routes() did not push a notification")
