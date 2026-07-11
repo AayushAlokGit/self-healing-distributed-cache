@@ -7,8 +7,7 @@ import (
 	"testing"
 )
 
-// start brings up a node on an OS-chosen port and returns it, failing the test
-// if the port cannot be bound.
+// start brings up a node on an OS-chosen port, failing the test if it cannot bind.
 func start(t *testing.T, id string) *Node {
 	t.Helper()
 	n := New(id, "127.0.0.1:0", 1000)
@@ -68,8 +67,8 @@ func TestOverwrite(t *testing.T) {
 	}
 }
 
-// A node's address is live the moment Start returns, so a coordinator can route
-// to it without a race against the server goroutine.
+// Addr must be live the moment Start returns, so a coordinator can route to it
+// without racing the server goroutine.
 func TestAddrIsBoundAfterStart(t *testing.T) {
 	n := start(t, "n0")
 	if n.Addr() == "127.0.0.1:0" || !strings.HasPrefix(n.Addr(), "127.0.0.1:") {

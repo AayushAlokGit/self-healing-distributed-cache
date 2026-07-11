@@ -10,9 +10,8 @@ import (
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
 )
 
-// startCluster brings up len(ids) nodes and gives each its own ring built from
-// all the ids plus the shared peer map. Each node holds an independent ring, as
-// it will once gossip (Phase 4) maintains per-node views.
+// startCluster brings up len(ids) nodes, each with its own independent ring built
+// from all the ids.
 func startCluster(t *testing.T, ids ...string) map[string]*Node {
 	t.Helper()
 	nodes := make(map[string]*Node, len(ids))
@@ -65,8 +64,8 @@ func clientGet(t *testing.T, n *Node, key string) (string, int) {
 	return string(body), resp.StatusCode
 }
 
-// ownerOf computes the owner id the way the cluster does, so tests can find and
-// kill the exact node holding a key.
+// ownerOf computes the owner id the way the cluster does, so a test can kill the
+// exact node holding a key.
 func ownerOf(ids []string, key string) string {
 	r := ring.New()
 	for _, id := range ids {
@@ -75,9 +74,8 @@ func ownerOf(ids []string, key string) string {
 	return r.Get(key)
 }
 
-// The point of the coordinating role: a client can hit ANY node with ANY key and
-// get the right answer, because that node routes to the owner. Written through
-// one node, read back through every node.
+// A client can hit any node with any key and get the right answer: the node it hit
+// routes to the owner. Written through one node, read back through every node.
 func TestAnyNodeRoutesToOwner(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)
@@ -98,9 +96,8 @@ func TestAnyNodeRoutesToOwner(t *testing.T) {
 	}
 }
 
-// The failure that earns replication. At R=1 a key lives on exactly one node, so
-// killing that node loses the key — no copy exists to fall back to. Any survivor
-// still routes there and gets a 502, not the value.
+// The failure that earns replication: at R=1 a key lives on one node, so killing it
+// loses the key. No copy exists to fall back to.
 func TestKillingOwnerLosesDataAtR1(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)
@@ -114,7 +111,7 @@ func TestKillingOwnerLosesDataAtR1(t *testing.T) {
 	}
 
 	owner := ownerOf(ids, key)
-	nodes[owner].Close() // kill it
+	nodes[owner].Close()
 
 	var survivor *Node
 	for id, n := range nodes {
@@ -132,9 +129,9 @@ func TestKillingOwnerLosesDataAtR1(t *testing.T) {
 		owner, key, code)
 }
 
-// The money moment. At R=3 a key lives on three nodes, so reads keep serving as
-// owners die — the coordinator falls back down the replica list — and the key is
-// lost only when the last of the three is gone. R copies tolerate R-1 deaths.
+// At R=3 reads keep serving as owners die: the coordinator falls back down the replica
+// list, and the key is lost only when the last of the three is gone. R copies tolerate
+// R-1 deaths.
 func TestReadFallbackSurvivesNodeDeaths(t *testing.T) {
 	const rf = 3
 	ids := []string{"n0", "n1", "n2", "n3", "n4"}
@@ -150,8 +147,8 @@ func TestReadFallbackSurvivesNodeDeaths(t *testing.T) {
 		ownerSet[o] = true
 	}
 
-	// Read through a node that owns nothing, so the coordinator survives every
-	// kill and every read is a real fallback across the network.
+	// Read through a node that owns nothing, so the coordinator survives every kill and
+	// every read is a real fallback across the network.
 	var coord *Node
 	for id, n := range nodes {
 		if !ownerSet[id] {

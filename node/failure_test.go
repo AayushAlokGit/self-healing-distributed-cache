@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// waitUntil polls f until it returns true or the deadline passes, so tests never
-// hard-code a sleep for an event whose timing is only bounded, not exact.
+// waitUntil polls f until it returns true or the deadline passes, so no test hard-codes
+// a sleep for an event whose timing is only bounded, not exact.
 func waitUntil(t *testing.T, within time.Duration, what string, f func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -19,8 +19,8 @@ func waitUntil(t *testing.T, within time.Duration, what string, f func() bool) {
 	}
 }
 
-// The heartbeat detects a death: after a node is killed, its peers drop it from
-// their alive view (and, in lockstep, from their ring) within ~failureTimeout.
+// After a node is killed, its peers drop it from their alive view (and, in lockstep,
+// from their ring) within ~failureTimeout.
 func TestHeartbeatDetectsDeath(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)
@@ -45,17 +45,15 @@ func TestHeartbeatDetectsDeath(t *testing.T) {
 		t.Fatalf("n0 wrongly demoted a live node: %v", view)
 	}
 
-	// n2 should reach the same conclusion independently — no shared authority.
+	// n2 must reach the same conclusion independently: there is no shared authority.
 	waitUntil(t, 3*time.Second, "n2 detects n1 dead", func() bool {
 		return !nodes["n2"].AlivePeers()["n1"]
 	})
 }
 
-// A crash and a slow node are the same observation — silence. A node that is
-// fully alive but stalls its health replies (a GC-pause stand-in) is declared
-// dead by its peers, the false positive a short timeout buys. And because a node
-// never suspects itself, the views diverge: n0 says "n1 dead", n1 says "n1 alive"
-// — the seed of split-brain. Un-stall it and it flaps back.
+// A crash and a slow node are the same observation: silence. A node that is fully alive
+// but stalls its health replies is declared dead by its peers, and since a node never
+// suspects itself, the views diverge (n0 says "n1 dead", n1 says "n1 alive").
 func TestSlowNodeIsFalselyDeclaredDead(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)
@@ -68,8 +66,8 @@ func TestSlowNodeIsFalselyDeclaredDead(t *testing.T) {
 	})
 	t.Logf("false positive: n1 is alive but n0 marked it dead after ~%v of silence", defaultFailureTimeout)
 
-	// The proof it was false: n1 is running fine and still counts itself alive.
-	// So n0 and n1 now disagree about n1 — asymmetric views, the split-brain seed.
+	// The proof it was false: n1 is running fine, still counts itself alive, and still
+	// serves real traffic.
 	if !nodes["n1"].AlivePeers()["n1"] {
 		t.Fatalf("n1 should never suspect itself, even while stalled")
 	}
@@ -77,8 +75,8 @@ func TestSlowNodeIsFalselyDeclaredDead(t *testing.T) {
 		t.Fatalf("stalled n1 should still serve real traffic, got (%q, %d)", v, code)
 	}
 
-	// Stop stalling: the next ping lands, and n0 re-admits n1. A healthy node was
-	// evicted and re-added for nothing — a flap, pure cost of guessing too eagerly.
+	// Stop stalling: the next ping lands and n0 re-admits n1. A healthy node was evicted
+	// and re-added for nothing.
 	nodes["n1"].PauseHealth(false)
 	waitUntil(t, 3*time.Second, "n0 re-admits the recovered n1", func() bool {
 		return nodes["n0"].AlivePeers()["n1"]
@@ -86,9 +84,8 @@ func TestSlowNodeIsFalselyDeclaredDead(t *testing.T) {
 	t.Logf("flap: n1 answered again and n0 re-added it — the false positive cost a needless eviction+recovery")
 }
 
-// Once a node is detected dead it leaves the ring, so ownership recomputes and a
-// key it used to own routes to a live node with no failed hop. At R=1 this is
-// visible as the owner id changing.
+// A detected death leaves the ring, so ownership recomputes and a key the dead node
+// used to own routes to a live node with no failed hop.
 func TestDeadNodeLeavesTheRing(t *testing.T) {
 	ids := []string{"n0", "n1", "n2"}
 	nodes := startCluster(t, ids...)

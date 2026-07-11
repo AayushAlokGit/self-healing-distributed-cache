@@ -7,15 +7,14 @@ import (
 	"time"
 )
 
-// setHealGracePeriod sets the heal grace period on every node.
 func setHealGracePeriod(nodes map[string]*Node, d time.Duration) {
 	for _, n := range nodes {
 		n.SetHealGracePeriod(d)
 	}
 }
 
-// logHealCopies prints a per-node breakdown of pushed copies, so a storm shows
-// which nodes did the needless work, not just the total.
+// logHealCopies prints a per-node breakdown, so a storm shows which nodes did the
+// needless work, not just the total.
 func logHealCopies(t *testing.T, nodes map[string]*Node, label string) {
 	t.Helper()
 	ids := make([]string, 0, len(nodes))
@@ -33,7 +32,6 @@ func logHealCopies(t *testing.T, nodes map[string]*Node, label string) {
 	t.Logf("  [%s] total %d copies", label, total)
 }
 
-// totalHealCopies sums the key copies every node has pushed during heals.
 func totalHealCopies(nodes map[string]*Node) int64 {
 	var total int64
 	for _, n := range nodes {
@@ -42,9 +40,8 @@ func totalHealCopies(nodes map[string]*Node) int64 {
 	return total
 }
 
-// waitHealSettled waits until the cluster's heal-copy count stops climbing, so a
-// storm is measured in full rather than sampled mid-flight. Terminates because a
-// stable membership fires no new heal triggers.
+// waitHealSettled waits until the cluster's heal-copy count stops climbing, so a storm
+// is measured in full rather than sampled mid-flight.
 func waitHealSettled(t *testing.T, nodes map[string]*Node) int64 {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -62,18 +59,16 @@ func waitHealSettled(t *testing.T, nodes map[string]*Node) int64 {
 	}
 }
 
-// holds reports whether a node physically has the key in its own cache, bypassing
-// all routing — the direct question "is there a copy here?" that a heal must make
-// true again on the promoted owner.
+// holds reports whether a node physically has the key in its own cache, bypassing all
+// routing.
 func holds(n *Node, key string) bool {
 	_, ok := n.cache.Get(key)
 	return ok
 }
 
-// The other half of the money moment. At R=3 a key lives on three owners; killing
-// one drops it to two live copies — the range is under-replicated, one death from
-// loss. Self-heal restores R: the death promotes a new owner, and the range's
-// primary copies the key onto it, back to three copies, with no client involved.
+// Killing one of a key's three owners leaves it under-replicated. The heal restores R:
+// the death promotes a new owner, and a holder copies the key onto it, with no client
+// involved.
 func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 	const rf = 3
 	ids := []string{"n0", "n1", "n2", "n3", "n4"}
@@ -90,8 +85,8 @@ func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 		}
 	}
 
-	// Killing the primary both promotes a new primary and creates a newcomer that
-	// has never seen the key — the copy the heal must produce.
+	// Killing the primary promotes a new primary and creates a newcomer owner that has
+	// never seen the key: the copy the heal must produce.
 	killed := oldOwners[0]
 	var remaining []string
 	for _, id := range ids {
@@ -122,15 +117,14 @@ func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 	killedAt := time.Now()
 	nodes[killed].Close()
 
-	// The heal has run once the newcomer physically holds the key: the new primary
-	// detected the death, recomputed owners, and pushed the copy — no client read.
+	// The heal has run once the newcomer physically holds the key, with no client read.
 	waitUntil(t, 3*time.Second, "the promoted owner receives its copy via self-heal", func() bool {
 		return holds(nodes[newcomer], key)
 	})
 	t.Logf("self-heal: killed owner %s; newcomer %s received %q in %v (no client involved)",
 		killed, newcomer, key, time.Since(killedAt).Round(10*time.Millisecond))
 
-	// R restored: all three current owners hold a live copy again.
+	// R restored: every current owner holds a live copy again.
 	for _, id := range newOwners {
 		if !holds(nodes[id], key) {
 			t.Fatalf("after heal, owner %s should hold %q — range is still under-replicated", id, key)
@@ -139,13 +133,9 @@ func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 	t.Logf("R=%d restored: %q lives on %v again, two live copies healed back to three", rf, key, newOwners)
 }
 
-// The storm, with NO grace period. PauseHealth makes a fully-alive node look
-// dead; its peers convict it the instant they see silence, a newcomer is promoted
-// for every key the "dead" node owned, and those newcomers get copies of keys
-// that were never actually lost. Even with the check-first heal (which skips
-// re-copying to replicas that already hold the key), that is dozens of needless
-// copies — Q6's "copied for nothing" made countable. The grace period
-// (TestGracePeriodPreventsHealStorm) is the same scenario fixed.
+// With no grace period, a false positive costs a storm: peers convict a fully-alive
+// node the instant they see silence, and the promoted newcomers get copies of keys that
+// were never lost. TestGracePeriodPreventsHealStorm is the same scenario fixed.
 func TestFalsePositiveTriggersHealStorm(t *testing.T) {
 	const rf = 3
 	ids := []string{"n0", "n1", "n2", "n3", "n4"}
@@ -177,11 +167,9 @@ func TestFalsePositiveTriggersHealStorm(t *testing.T) {
 	logHealCopies(t, nodes, "storm")
 }
 
-// The fix. Same false positive, but with a grace period the expensive
-// re-replication waits and rechecks: n1 recovers inside the window, nothing is
-// left suspected dead, and the heal is skipped entirely. The storm that cost
-// 200+ copies now costs zero — the cheap re-route still happened instantly, only
-// the expensive copy was withheld until the death was confirmed.
+// The fix: with a grace period the expensive re-replication waits and rechecks, n1
+// recovers inside the window, and the storm costs zero copies. The cheap re-route still
+// happened instantly; only the copying was withheld until the death was confirmed.
 func TestGracePeriodPreventsHealStorm(t *testing.T) {
 	const rf = 3
 	ids := []string{"n0", "n1", "n2", "n3", "n4"}
@@ -195,7 +183,7 @@ func TestGracePeriodPreventsHealStorm(t *testing.T) {
 		clientSet(t, nodes["n0"], "k:"+strconv.Itoa(i), "v"+strconv.Itoa(i))
 	}
 
-	// The same false positive as the storm test: n1 is alive but looks silent.
+	// The same false positive as the storm test.
 	nodes["n1"].PauseHealth(true)
 	waitUntil(t, 3*time.Second, "peers falsely declare the alive n1 dead", func() bool {
 		return !nodes["n0"].AlivePeers()["n1"] && !nodes["n2"].AlivePeers()["n1"]
