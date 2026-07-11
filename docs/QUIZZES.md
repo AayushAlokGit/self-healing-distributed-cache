@@ -10,6 +10,21 @@ Question text + model answers, so quizzes can be re-asked cold weeks later. Scor
 
 ---
 
+## Session 7 — 2026-07-10 · cold re-ask of the two carried-forward Q's (Q4, Q6)
+
+Taken cold at session start, before any Phase 5 teaching, per the ritual. **Q4 ✅ · Q6 ⊘ (taught).**
+
+| Q | Concept | | The gap |
+|---|---|---|---|
+| 4 | self-suspicion & split-brain | ✅ | (a) Clean: node is authority on its own liveness, hard-sets `alive[self]=true`, never self-suspects. (b) Full split-brain chain (partition → both AP sides accept writes → concurrent same-key writes conflict → stale reads → consistency lost). **Sharpened:** the *conflict* isn't the loss; the loss is at **reconciliation** — LWW keeps the newer copy and **silently discards the older acked write**. Carry it one step to where the byte vanishes. |
+| 6 | reduce false positives + the universal tradeoff | ⊘ | Third blank (S6 ×1, this ×1 as re-ask, plus S6 note). **Taught, not attempted.** Levers: longer timeout / N-consecutive-misses / indirect probing / suspicion+refutation / phi-accrual. **The tradeoff (the actual point):** every mitigation reduces false positives by gathering more evidence or waiting longer — which delays *correct* convictions exactly as much as wrong ones, because at decision time a slow node and a dead node are the same silence. Detection speed and accuracy are one dial pointed opposite ways. This is Q1's impossibility seen from the other side. |
+
+**Carry into Phase 5 wiring:** Q6's tradeoff isn't academic — a false positive that triggers a full
+**re-replication storm** (copy a whole range to restore R) turns "a few failed hops" into "gigabytes
+copied for nothing." One of the three self-heal design questions.
+
+---
+
 ## Session 6 — 2026-07-10 · Phase 4 milestone quiz (failure detection)
 
 **2 ✅ · 2 ⚠️ · 2 ⊘.** Taken cold at phase end. Q4 was left blank despite being walked through live

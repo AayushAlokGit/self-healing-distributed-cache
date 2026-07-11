@@ -4,24 +4,29 @@ Living log of where we are, what's been taught, and quiz results. Update at the 
 session and after each milestone. Newest entries at the top of the log.
 
 ## Current status
-- **Phase:** **Phases 0–4 COMPLETE. Starting Phase 5 (self-heal).** Go 1.26.5 installed; HLD
-  APPROVED, all 6 §10 decisions LOCKED (2026-07-08). Phase 4 (failure detection) closed 2026-07-10:
-  heartbeats + timeout detection, false-positive demo, gossip/SWIM intuition — see the Phase 4
-  checklist and the Session 6 milestone quiz (2 ✅ · 2 ⚠️ · 2 ⊘).
+- **Phase:** **Phases 0–4 COMPLETE. Phase 5 (self-heal) IN PROGRESS — step 1 (naive re-replication)
+  built & measured.** Go 1.26.5 installed; HLD APPROVED, all 6 §10 decisions LOCKED (2026-07-08).
+  Phase 4 (failure detection) closed 2026-07-10: heartbeats + timeout detection, false-positive demo,
+  gossip/SWIM intuition. **Session 7 (2026-07-10):** re-asked carried-forward Q4 ✅ / Q6 taught; taught
+  Phase 5 design Q's 1–3; built the naive heal (kill an owner → range re-replicates 2→3 copies in
+  ~550ms, no client). Next: the storm demo + grace period. See the Phase 5 checklist.
 - **Locked decisions:** (1) nodes = goroutines in one process, real HTTP over localhost ports;
   (2) primary-only write ack to start, W-ack knob added in Phase 3; (3) all-to-all heartbeats;
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phases 1–4 are COMPLETE** (single-node cache → consistent hashing → R=3
-  replication + fallback [the money moment] → failure detection). Next up: **Phase 5, self-heal** —
-  make a *detected* death (Phase 4) *trigger* re-replication so an under-replicated key range is
-  restored to R copies while still serving reads. This is the "kill a node, watch it **re-replicate**"
-  half of the demo. Open questions to teach first: who runs the heal (HLD §6: no dedicated healer —
-  each range's current primary coordinates its own, deterministically from the ring), how a node
-  knows *which* keys to copy without a global keyset, and how to avoid a re-replication storm on a
-  false positive. **Carry into Session 7 cold:** Q4 (self-suspicion & split-brain) and Q6 (false-
-  positive mitigations) from the Phase 4 quiz — both left blank.
+- **Next action:** **Phase 5 step 1 (naive re-replication) is DONE** — a detected death now triggers
+  the promoted primary to copy under-replicated keys onto the new owner (2→3 copies, ~550ms, no
+  client). The three design Q's are taught. **Next: step 2 — demonstrate the re-replication storm**
+  by pointing `PauseHealth` at the heal (a false positive triggers needless cluster-wide copying),
+  then **step 3 — add a heal grace period** (wait out a brief suspicion before the *expensive*
+  reaction; the cheap reversible re-route still fires fast) and show the storm vanish while a real
+  death still heals. Then make "serving reads during heal" explicit (already true via read fallback). **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
+  now **✅** — sharpened that the data loss happens at *reconciliation* (LWW silently drops the older
+  acked write), not at the conflict itself. Q6 (false-positive mitigations + the universal tradeoff)
+  **taught, not attempted — third blank**; the tradeoff (every mitigation delays correct convictions
+  as much as wrong ones — a slow node and a dead node are the same silence) feeds directly into the
+  Phase 5 re-replication-storm question.
 - **The finding that closed Phase 1:** we asserted for four sessions that *"a sequential scan
   collapses LRU's hit rate."* Measured, that is **false for realistic traffic and dramatically true
   for a flat working set.** A Zipf workload loses only 12.6 points to a batch job issuing as many
@@ -90,9 +95,23 @@ Mark ☑ when taught AND the quick-check quiz was passed.
 **Phase 4 COMPLETE.** Heartbeats + timeout detection (death caught in ~490–600ms = timeout + up to one beat) → false-positive demonstrated (`PauseHealth`: a healthy-but-stalled node convicted, then flaps back — the timeout's cost made concrete) → gossip/SWIM intuition. The ring now holds only nodes a view believes alive; each view is independent (no consensus). Next: **Phase 5, self-heal** — a detected death should *trigger* re-replication to restore R, the other half of the money moment.
 
 ### Phase 5 — Self-heal
-- ☐ Data migration on membership change
-- ☐ Re-replication to restore R
-- ☐ Serving reads during heal
+- ◐ Re-replication to restore R — **step 1 (naive) built.** `node/node.go`: a coalescing
+  `healTrigger` (buffered-1 chan, non-blocking send) fires on any membership change; a separate
+  `healLoop` goroutine runs `heal()` (kept off the heartbeat loop so slow copies don't stall pinging
+  → more false deaths). The heal invariant: **for every key this node is *primary* of, push a copy to
+  that key's other current owners** (primary-only, so co-owners don't all push the same key;
+  idempotent overwrite). `cache.Snapshot()` enumerates live entries **without touching recency** — a
+  bulk heal scan must not look like user access or it re-creates the Phase-1 sequential-scan LRU
+  pollution. Measured under `-race` (`TestHealRestoresReplicationAfterDeath`): killed the primary of
+  a key at R=3, the promoted newcomer received its copy in **~550ms** (= detection ~500ms + heal),
+  two live copies healed back to three, **no client involved**. Design Q's 1–3 taught first (who
+  heals = primary, deterministically from ring, no election; which keys = local scan only, no global
+  keyset; storm = decouple cheap reversible re-routing from expensive re-replication).
+  - **Naive on purpose:** re-pushes *every* key it's primary of (not just the dead node's), and to
+    co-owners that already have the copy — both wasted sends = the re-replication **storm** step 2
+    will measure on a false positive, before step 3 adds the grace period.
+- ☐ Storm demo (false positive → needless re-replication) + grace period fix
+- ☐ Serving reads during heal (already true via read fallback — make it explicit/measured)
 
 ### Phase 6 — Dashboard
 - ☐ Ring viz + failure-injection controls

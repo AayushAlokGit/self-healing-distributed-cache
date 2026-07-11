@@ -108,6 +108,24 @@ case <-c.done:   return
 ⚠️ **Adding `default` flips the semantics: `select` never blocks.** If no case is ready, run
 `default` immediately. → `bench_test.go` (a flat-out sweeper loop)
 
+### Coalescing signal: a buffered-1 channel + non-blocking send
+A **flag**, not a queue. Buffer 1 holds "there is work pending"; the non-blocking send drops the
+signal if one is already buffered, so a burst of events schedules exactly **one** wakeup:
+
+```go
+healTrigger := make(chan struct{}, 1)   // buffered to 1
+// producer (must never block): 
+select {
+case healTrigger <- struct{}{}:  // signal pending
+default:                          // already pending — drop, don't queue
+}
+// consumer: for { select { case <-done: return; case <-healTrigger: heal() } }
+```
+
+Use it when the reaction is **idempotent / re-derives full state** — one heal pass re-asserts the
+whole invariant, so collapsing ten triggers into one loses nothing. Contrast a buffered queue, which
+you'd want only if each event carried distinct work that must each be processed. → `node.healTrigger`
+
 ### `time.Ticker` vs `time.Sleep`
 Use a `Ticker` when a goroutine must remain interruptible. **`Sleep` cannot be interrupted**, so a
 `Close()` would block for up to a full interval. `select` can only race *channels*, and

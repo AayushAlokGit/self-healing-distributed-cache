@@ -66,6 +66,11 @@ type Node struct {
 	done              chan struct{}
 	wg                sync.WaitGroup
 
+	// healTrigger is a coalescing signal, not a queue: buffered to 1 and sent to
+	// non-blocking, so a burst of membership changes schedules exactly one heal
+	// pass (which re-asserts the whole replication invariant anyway).
+	healTrigger chan struct{}
+
 	// healthPaused stalls this node's /health responses without stopping the rest
 	// of it: a stand-in for a GC pause so a demo can show a live node being falsely
 	// declared dead. Atomic, not mutex-guarded, so it stays off the hot read path.
@@ -99,6 +104,7 @@ func New(id, addr string, capacity int) *Node {
 		failureTimeout:    defaultFailureTimeout,
 		healthClient:      &http.Client{Timeout: defaultFailureTimeout},
 		done:              make(chan struct{}),
+		healTrigger:       make(chan struct{}, 1),
 	}
 
 	mux := http.NewServeMux()
@@ -183,6 +189,7 @@ func (n *Node) Start() error {
 
 	go n.srv.Serve(ln)
 	n.wg.Go(n.heartbeatLoop)
+	n.wg.Go(n.healLoop)
 	return nil
 }
 
@@ -228,6 +235,7 @@ func (n *Node) heartbeatRound() {
 	for id := range answered {
 		n.lastSeen[id] = now
 	}
+	membershipChanged := false
 	for id := range n.peers {
 		if id == n.id {
 			continue
@@ -237,9 +245,22 @@ func (n *Node) heartbeatRound() {
 		case n.alive[id] && !isAlive:
 			n.alive[id] = false
 			n.ring.Remove(id) // stop routing to the corpse
+			membershipChanged = true
 		case !n.alive[id] && isAlive:
 			n.alive[id] = true
 			n.ring.Add(id) // it came back
+			membershipChanged = true
+		}
+	}
+
+	// Ownership just shifted, so some ranges may be under-replicated (a death) or
+	// owe a copy to a returned node (a recovery). Kick the heal — either way the
+	// fix is the same: re-assert the replication invariant. Non-blocking so the
+	// heartbeat loop never stalls on it; coalescing so a burst schedules one pass.
+	if membershipChanged {
+		select {
+		case n.healTrigger <- struct{}{}:
+		default:
 		}
 	}
 }
@@ -253,6 +274,50 @@ func (n *Node) pingHealth(addr string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// healLoop waits for a membership change to signal that ownership shifted, then
+// re-replicates. Separate from the heartbeat loop on purpose: a heal copies data
+// over the network and can be slow, and the heartbeat must keep pinging or it
+// would start declaring more false deaths while stuck healing.
+func (n *Node) healLoop() {
+	for {
+		select {
+		case <-n.done:
+			return
+		case <-n.healTrigger:
+			n.heal()
+		}
+	}
+}
+
+// heal re-asserts the replication invariant: for every key this node is the
+// primary owner of, push a copy to that key's other current owners. When a death
+// promotes a new owner, this is what actually moves the bytes so the range is
+// back to R live copies. Idempotent — a co-owner that already has the key just
+// overwrites it.
+//
+// Naive on purpose (Phase 5 step 1): it re-pushes every key it is primary of, not
+// only those the dead node held, and pushes to co-owners that already have a copy.
+// Both are wasted sends — the re-replication storm step 2 will measure.
+func (n *Node) heal() {
+	for key, value := range n.cache.Snapshot() {
+		select {
+		case <-n.done:
+			return // stop promptly on Close rather than finish a long scan
+		default:
+		}
+
+		owners := n.ownersFor(key)
+		// Only the primary coordinates a key's heal, so co-owners don't all push
+		// the same key to the same target.
+		if len(owners) == 0 || owners[0].id != n.id {
+			continue
+		}
+		for _, o := range owners[1:] {
+			n.storeOn(o.addr, key, value) // naive: no retry; a failed copy waits for the next heal
+		}
+	}
 }
 
 // PauseHealth stalls (or resumes) this node's /health responses. The node keeps

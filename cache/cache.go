@@ -304,6 +304,27 @@ func (c *Cache) Set(key, value string, ttl time.Duration) {
 	}
 }
 
+// Snapshot returns a copy of every live entry as key→value, skipping the expired.
+//
+// It deliberately does NOT touch recency. A bulk scan for replication must not
+// look like user access: marking every key most-recently-used would be the very
+// sequential-scan pollution LRU is vulnerable to (see Phase 1) — a background
+// heal would evict the hot set it is trying to protect.
+func (c *Cache) Snapshot() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	out := make(map[string]string, len(c.data))
+	for k, n := range c.data {
+		if n.expired(now) {
+			continue
+		}
+		out[k] = n.value
+	}
+	return out
+}
+
 // Len returns how many entries the cache physically holds, including expired
 // ones neither Get nor the sweeper has reclaimed yet.
 func (c *Cache) Len() int {
