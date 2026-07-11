@@ -67,6 +67,7 @@ type Node struct {
 
 	replicationFactor int
 	writeQuorum       int
+	ringReplicas      int // virtual points per node; 0 uses the ring's default (150)
 
 	heartbeatInterval time.Duration
 	failureTimeout    time.Duration
@@ -155,7 +156,7 @@ func (n *Node) SetMembership(peers map[string]string) {
 	n.peers = peers
 	n.lastSeen = make(map[string]time.Time, len(peers))
 	n.alive = make(map[string]bool, len(peers))
-	r := ring.New()
+	r := n.newRingLocked()
 	for id := range peers {
 		n.lastSeen[id] = now
 		n.alive[id] = true
@@ -163,6 +164,25 @@ func (n *Node) SetMembership(peers map[string]string) {
 	}
 	n.alive[n.id] = true // a node never suspects itself
 	n.ring = r
+}
+
+// newRingLocked builds a ring using this node's configured virtual-point count,
+// or the ring package default when unset. Caller holds n.mu.
+func (n *Node) newRingLocked() *ring.Ring {
+	if n.ringReplicas > 0 {
+		return ring.NewWithReplicas(n.ringReplicas)
+	}
+	return ring.New()
+}
+
+// SetRingReplicas sets how many virtual points each node contributes to this
+// node's ring. The demo turns this down so the ring's arcs are big enough to see;
+// the default (ring.New, ~150) stays optimal for real balance. Call before
+// SetMembership, which is what actually builds the ring.
+func (n *Node) SetRingReplicas(k int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.ringReplicas = k
 }
 
 // SetPeerAddr updates the address for one peer without resetting liveness or the

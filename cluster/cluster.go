@@ -27,19 +27,26 @@ import (
 const (
 	nodeCapacity = 10000
 	maxEvents    = 40
+
+	// Virtual points per node, demo-only. The library default (~150) gives the
+	// smoothest load balance, but its 750 ring points render as an illegible haze.
+	// The demo trades balance for a ring whose arcs are big enough to see — the
+	// engineering rigor stays in the tests, which use the default.
+	demoRingReplicas = 8
 )
 
 // Cluster owns the nodes and the authoritative membership.
 type Cluster struct {
-	mu       sync.Mutex
-	ids      []string
-	rf, wq   int
-	grace    time.Duration
-	nodes    map[string]*node.Node // live nodes only; a killed id is absent
-	addrs    map[string]string     // last address per id (survives a kill/revive)
-	client   *http.Client
-	events   []Event
-	nextTick uint64 // monotonic event id, so the UI can dedupe without a clock
+	mu           sync.Mutex
+	ids          []string
+	rf, wq       int
+	grace        time.Duration
+	ringReplicas int
+	nodes        map[string]*node.Node // live nodes only; a killed id is absent
+	addrs        map[string]string     // last address per id (survives a kill/revive)
+	client       *http.Client
+	events       []Event
+	nextTick     uint64 // monotonic event id, so the UI can dedupe without a clock
 }
 
 // Event is one entry in the dashboard's activity log.
@@ -52,13 +59,14 @@ type Event struct {
 // New builds (but does not start) a cluster of the given node ids.
 func New(rf, wq int, grace time.Duration, ids ...string) *Cluster {
 	return &Cluster{
-		ids:    ids,
-		rf:     rf,
-		wq:     wq,
-		grace:  grace,
-		nodes:  make(map[string]*node.Node, len(ids)),
-		addrs:  make(map[string]string, len(ids)),
-		client: &http.Client{Timeout: 2 * time.Second},
+		ids:          ids,
+		rf:           rf,
+		wq:           wq,
+		grace:        grace,
+		ringReplicas: demoRingReplicas,
+		nodes:        make(map[string]*node.Node, len(ids)),
+		addrs:        make(map[string]string, len(ids)),
+		client:       &http.Client{Timeout: 2 * time.Second},
 	}
 }
 
@@ -86,6 +94,7 @@ func (c *Cluster) wireAll() {
 	peers := make(map[string]string, len(c.addrs))
 	maps.Copy(peers, c.addrs)
 	for _, n := range c.nodes {
+		n.SetRingReplicas(c.ringReplicas) // before SetMembership, which builds the ring
 		n.SetMembership(peers)
 		n.SetReplication(c.rf, c.wq)
 		n.SetHealGracePeriod(c.grace)
@@ -136,6 +145,7 @@ func (c *Cluster) Revive(id string) error {
 	// killed node instantly).
 	peers := make(map[string]string, len(c.addrs))
 	maps.Copy(peers, c.addrs)
+	n.SetRingReplicas(c.ringReplicas)
 	n.SetMembership(peers)
 	n.SetReplication(c.rf, c.wq)
 	n.SetHealGracePeriod(c.grace)

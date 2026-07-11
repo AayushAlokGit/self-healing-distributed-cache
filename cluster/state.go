@@ -58,7 +58,9 @@ func (c *Cluster) State() State {
 	sort.Strings(aliveIDs)
 
 	// Authoritative ring of the currently-alive nodes: where keys *should* live.
-	r := ring.New()
+	// Same virtual-point count the nodes use, so the owners shown here match what
+	// the nodes actually compute for routing and heal.
+	r := ring.NewWithReplicas(c.ringReplicas)
 	for _, id := range aliveIDs {
 		r.Add(id)
 	}
@@ -74,11 +76,17 @@ func (c *Cluster) State() State {
 		}
 	}
 
+	// Non-nil empty slices, not nil: a nil slice marshals to JSON null, and the
+	// frontend does keys.filter(...) / vnodes.map(...) — null crashes it. This
+	// matters exactly when everything is dead (no keys, no ring points).
 	st := State{
 		RF:              c.rf,
 		AliveCount:      len(aliveIDs),
 		TotalHealCopies: totalHeal,
-		Events:          append([]Event(nil), c.events...),
+		Nodes:           []NodeState{},
+		Keys:            []KeyState{},
+		VNodes:          []VNode{},
+		Events:          append([]Event{}, c.events...),
 	}
 
 	// Nodes: every known id, alive or not. A dead node keeps its angle so it stays

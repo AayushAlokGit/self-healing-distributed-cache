@@ -41,7 +41,15 @@ export interface State {
 export async function getState(): Promise<State> {
   const res = await fetch('/api/state')
   if (!res.ok) throw new Error(`state ${res.status}`)
-  return res.json()
+  const s = await res.json()
+  // Defensive: never let a null array (e.g. all nodes dead) blank the UI.
+  return {
+    ...s,
+    nodes: s.nodes ?? [],
+    keys: s.keys ?? [],
+    vnodes: s.vnodes ?? [],
+    events: s.events ?? [],
+  }
 }
 
 async function post(path: string, body: unknown): Promise<void> {

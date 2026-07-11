@@ -9,10 +9,28 @@ function svgEl(tag: string, attrs: Record<string, string | number>): SVGElement 
   return e
 }
 
+// arcPath draws the ring segment from angle a1 clockwise to a2 at radius r.
+function arcPath(a1: number, a2: number, r: number): string {
+  const [x1, y1] = xy(a1, r)
+  const [x2, y2] = xy(a2, r)
+  let delta = a2 - a1
+  if (delta < 0) delta += 360
+  const largeArc = delta > 180 ? 1 : 0
+  return `M ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2}`
+}
+
 export function RingViz({ state, prev }: { state: State; prev: State | null }) {
   const packetsRef = useRef<SVGGElement>(null)
   const mA = markerAngles(state.nodes)
   const underCount = state.keys.filter((k) => k.underReplicated).length
+
+  // Colored arcs: the segment from one virtual point to the next clockwise is
+  // owned by the node the next point belongs to — so the ring literally shows
+  // which slice belongs to whom. vnodes arrive sorted by angle.
+  const arcs = state.vnodes.map((v, i) => {
+    const next = state.vnodes[(i + 1) % state.vnodes.length]
+    return { d: arcPath(v.angle, next.angle, RING), owner: next.node }
+  })
 
   // Imperative particle layer: diff prev vs current to fly a packet when a key
   // gains a holder (re-replication) and pulse a shockwave when a node dies/returns.
@@ -82,44 +100,16 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
           </filter>
         </defs>
 
-        <circle className="ringline" cx="360" cy="360" r={RING} />
+        <circle className="ringbase" cx="360" cy="360" r={RING} />
 
-        {/* virtual points, colored by node — the real load spread */}
+        {/* the ring itself, as arcs colored by the node that owns each slice */}
         <g>
-          {state.vnodes.map((v, i) => {
-            const [x1, y1] = xy(v.angle, RING - 8)
-            const [x2, y2] = xy(v.angle, RING + 8)
-            return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} className="vtick" stroke={colorFor(v.node)} />
-          })}
+          {arcs.map((a, i) => (
+            <path key={i} className="varc" d={a.d} stroke={colorFor(a.owner)} />
+          ))}
         </g>
 
-        {/* ownership links: key -> each current holder */}
-        <g>
-          {state.keys.flatMap((k) => {
-            const [kx, ky] = xy(k.angle, KEY_R)
-            const primary = k.owners[0]
-            return k.holders
-              .filter((h) => mA[h] !== undefined)
-              .map((h) => {
-                const [hx, hy] = xy(mA[h], NODE_R)
-                return (
-                  <line
-                    key={k.key + '-' + h}
-                    x1={kx}
-                    y1={ky}
-                    x2={hx}
-                    y2={hy}
-                    className="link"
-                    stroke={colorFor(h)}
-                    strokeWidth={h === primary ? 2 : 1.1}
-                    opacity={h === primary ? 0.5 : 0.22}
-                  />
-                )
-              })
-          })}
-        </g>
-
-        {/* key dots on their true hash angle */}
+        {/* key dots on their true hash angle, colored by primary owner */}
         <g>
           {state.keys.map((k) => {
             const [kx, ky] = xy(k.angle, KEY_R)
@@ -194,8 +184,8 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
       </div>
 
       <div className="caption">
-        Each node scatters ~150 <b>virtual points</b> (ticks) around the ring so load spreads evenly. A
-        key belongs to the next 3 distinct nodes clockwise. Kill one and watch its keys re-replicate.
+        The ring is split into arcs, each colored by the node that owns that slice. A key (dot) is
+        owned by the first node clockwise. Kill a node and watch its keys jump to new owners.
       </div>
     </div>
   )

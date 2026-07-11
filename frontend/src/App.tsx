@@ -1,5 +1,6 @@
 import { ActivityLog } from './components/ActivityLog'
 import { KeysPanel } from './components/KeysPanel'
+import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
 import { RingViz } from './components/RingViz'
 import { Stats } from './components/Stats'
@@ -24,7 +25,10 @@ export default function App() {
 
       {state ? (
         <div className="grid">
-          <RingViz state={state} prev={prev} />
+          <div className="left">
+            <RingViz state={state} prev={prev} />
+            <KeyTable keys={state.keys} />
+          </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
             <KeysPanel onAction={refresh} />

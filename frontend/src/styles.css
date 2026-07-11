@@ -43,7 +43,18 @@ svg { width: 100%; height: auto; max-height: 80vh; aspect-ratio: 1 / 1; display:
 .legend .row { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 .legend .dot { width: 9px; height: 9px; border-radius: 50%; }
 
+.left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .side { display: flex; flex-direction: column; gap: 16px; }
+.muted-note { color: var(--muted); font-size: 12px; }
+
+.keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; }
+.keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: rgba(10, 16, 26, 0.5); border: 1px solid rgba(120, 160, 220, 0.08); font-size: 12px; transition: 0.2s; }
+.keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
+.keychip .owners { display: flex; gap: 4px; align-items: center; }
+.keychip .odot { width: 9px; height: 9px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+.keychip .odot.primary { width: 12px; height: 12px; }
+.keychip.under { border-color: rgba(255, 84, 112, 0.5); box-shadow: 0 0 12px rgba(255, 84, 112, 0.12); }
+.keychip .warn { color: var(--danger); font-size: 12px; animation: healpulse 1.15s ease-in-out infinite; }
 .card { background: var(--panel); border: 1px solid var(--panel-brd); border-radius: 16px; padding: 16px; backdrop-filter: blur(8px); }
 .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1.6px; color: var(--muted); }
 
@@ -86,9 +97,8 @@ input:focus { outline: none; border-color: #22d3ee; }
 .tag.info { background: rgba(120, 160, 220, 0.18); color: var(--muted); }
 
 /* SVG bits */
-.ringline { fill: none; stroke: rgba(120, 160, 220, 0.2); stroke-width: 1.5; }
-.vtick { stroke-width: 2.4; stroke-linecap: round; opacity: 0.5; }
-.link { stroke-width: 1.4; opacity: 0.32; }
+.ringbase { fill: none; stroke: rgba(120, 160, 220, 0.12); stroke-width: 1.5; }
+.varc { fill: none; stroke-width: 16; stroke-linecap: butt; opacity: 0.9; transition: stroke 0.5s ease; filter: saturate(1.1); }
 .keydot { transition: cx 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), cy 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .keydot.under { animation: underpulse 1s ease-in-out infinite; }
 @keyframes underpulse { 0%, 100% { r: 5; filter: drop-shadow(0 0 2px var(--danger)); } 50% { r: 8; filter: drop-shadow(0 0 8px var(--danger)); } }
