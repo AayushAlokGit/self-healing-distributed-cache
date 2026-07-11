@@ -1,9 +1,39 @@
 package node
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
+
+// totalHealCopies sums the key copies every node has pushed during heals.
+func totalHealCopies(nodes map[string]*Node) int64 {
+	var total int64
+	for _, n := range nodes {
+		total += n.HealCopies()
+	}
+	return total
+}
+
+// waitHealSettled waits until the cluster's heal-copy count stops climbing, so a
+// storm is measured in full rather than sampled mid-flight. Terminates because a
+// stable membership fires no new heal triggers.
+func waitHealSettled(t *testing.T, nodes map[string]*Node) int64 {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	prev := int64(-1)
+	for {
+		cur := totalHealCopies(nodes)
+		if cur == prev {
+			return cur
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("heal-copy count never settled (last %d)", cur)
+		}
+		prev = cur
+		time.Sleep(150 * time.Millisecond)
+	}
+}
 
 // holds reports whether a node physically has the key in its own cache, bypassing
 // all routing — the direct question "is there a copy here?" that a heal must make
@@ -80,4 +110,47 @@ func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 		}
 	}
 	t.Logf("R=%d restored: %q lives on %v again, two live copies healed back to three", rf, key, newOwners)
+}
+
+// The storm. A false positive is not free. PauseHealth makes a fully-alive node
+// look dead; its peers each run a heal and copy keys around to "restore" a
+// replication that was never lost. Un-pausing flaps it back — a second membership
+// change, a second storm. Nothing died, yet the cluster copied data twice. This
+// is Q6's "gigabytes copied for nothing" made countable; step 3's grace period
+// is what shrinks it toward zero.
+func TestFalsePositiveTriggersHealStorm(t *testing.T) {
+	const rf = 3
+	ids := []string{"n0", "n1", "n2", "n3", "n4"}
+	nodes := startCluster(t, ids...)
+	setReplication(nodes, rf, 1)
+
+	const keys = 100
+	for i := range keys {
+		clientSet(t, nodes["n0"], "k:"+strconv.Itoa(i), "v"+strconv.Itoa(i))
+	}
+
+	// No membership change has happened, so the heal has never run.
+	if c := totalHealCopies(nodes); c != 0 {
+		t.Fatalf("baseline: no death yet, want 0 heal copies, got %d", c)
+	}
+
+	// n1 is alive and well; it just stops answering /health in time.
+	nodes["n1"].PauseHealth(true)
+	waitUntil(t, 3*time.Second, "peers falsely declare the alive n1 dead", func() bool {
+		return !nodes["n0"].AlivePeers()["n1"] && !nodes["n2"].AlivePeers()["n1"]
+	})
+	afterDeath := waitHealSettled(t, nodes)
+	if afterDeath == 0 {
+		t.Fatalf("expected a heal storm from the false positive, got 0 copies")
+	}
+	t.Logf("false positive: n1 never died, yet the cluster made %d key copies to 'restore' R", afterDeath)
+
+	// The flap back is a second membership change -> a second storm.
+	nodes["n1"].PauseHealth(false)
+	waitUntil(t, 3*time.Second, "peers re-admit the recovered n1", func() bool {
+		return nodes["n0"].AlivePeers()["n1"] && nodes["n2"].AlivePeers()["n1"]
+	})
+	afterFlap := waitHealSettled(t, nodes)
+	t.Logf("flap: re-admitting n1 copied another %d keys; %d total copies for a node alive the whole time",
+		afterFlap-afterDeath, afterFlap)
 }

@@ -71,6 +71,10 @@ type Node struct {
 	// pass (which re-asserts the whole replication invariant anyway).
 	healTrigger chan struct{}
 
+	// healCopies counts key copies pushed during heals, cumulative. It climbing
+	// while nothing actually died is the re-replication storm, made countable.
+	healCopies atomic.Int64
+
 	// healthPaused stalls this node's /health responses without stopping the rest
 	// of it: a stand-in for a GC pause so a demo can show a live node being falsely
 	// declared dead. Atomic, not mutex-guarded, so it stays off the hot read path.
@@ -316,6 +320,7 @@ func (n *Node) heal() {
 		}
 		for _, o := range owners[1:] {
 			n.storeOn(o.addr, key, value) // naive: no retry; a failed copy waits for the next heal
+			n.healCopies.Add(1)
 		}
 	}
 }
@@ -334,6 +339,11 @@ func (n *Node) AlivePeers() map[string]bool {
 	maps.Copy(view, n.alive)
 	return view
 }
+
+// HealCopies is the cumulative number of key copies this node has pushed during
+// heals, for tests and the dashboard. A climbing count with no real death is the
+// re-replication storm — the cost of the detector guessing wrong.
+func (n *Node) HealCopies() int64 { return n.healCopies.Load() }
 
 // Addr is the node's bound address, e.g. "127.0.0.1:53187".
 func (n *Node) Addr() string { return n.addr }
