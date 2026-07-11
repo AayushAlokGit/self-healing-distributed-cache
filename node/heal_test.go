@@ -1,10 +1,37 @@
 package node
 
 import (
+	"sort"
 	"strconv"
 	"testing"
 	"time"
 )
+
+// setHealGracePeriod sets the heal grace period on every node.
+func setHealGracePeriod(nodes map[string]*Node, d time.Duration) {
+	for _, n := range nodes {
+		n.SetHealGracePeriod(d)
+	}
+}
+
+// logHealCopies prints a per-node breakdown of pushed copies, so a storm shows
+// which nodes did the needless work, not just the total.
+func logHealCopies(t *testing.T, nodes map[string]*Node, label string) {
+	t.Helper()
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var total int64
+	for _, id := range ids {
+		c := nodes[id].HealCopies()
+		total += c
+		t.Logf("  [%s] %s pushed %d copies", label, id, c)
+	}
+	t.Logf("  [%s] total %d copies", label, total)
+}
 
 // totalHealCopies sums the key copies every node has pushed during heals.
 func totalHealCopies(nodes map[string]*Node) int64 {
@@ -112,24 +139,24 @@ func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 	t.Logf("R=%d restored: %q lives on %v again, two live copies healed back to three", rf, key, newOwners)
 }
 
-// The storm. A false positive is not free. PauseHealth makes a fully-alive node
-// look dead; its peers each run a heal and copy keys around to "restore" a
-// replication that was never lost. Un-pausing flaps it back — a second membership
-// change, a second storm. Nothing died, yet the cluster copied data twice. This
-// is Q6's "gigabytes copied for nothing" made countable; step 3's grace period
-// is what shrinks it toward zero.
+// The storm, with NO grace period (the naive heal). PauseHealth makes a
+// fully-alive node look dead; its peers each heal the instant they convict it and
+// copy keys around to "restore" a replication that was never lost. Nothing died,
+// yet the cluster copies hundreds of keys — Q6's "gigabytes copied for nothing"
+// made countable. TestGracePeriodPreventsHealStorm is the same scenario fixed.
 func TestFalsePositiveTriggersHealStorm(t *testing.T) {
 	const rf = 3
 	ids := []string{"n0", "n1", "n2", "n3", "n4"}
 	nodes := startCluster(t, ids...)
 	setReplication(nodes, rf, 1)
+	setHealGracePeriod(nodes, 0) // naive: heal the instant a death is detected
 
 	const keys = 100
 	for i := range keys {
 		clientSet(t, nodes["n0"], "k:"+strconv.Itoa(i), "v"+strconv.Itoa(i))
 	}
 
-	// No membership change has happened, so the heal has never run.
+	// No death has happened, so the heal has never run.
 	if c := totalHealCopies(nodes); c != 0 {
 		t.Fatalf("baseline: no death yet, want 0 heal copies, got %d", c)
 	}
@@ -139,18 +166,51 @@ func TestFalsePositiveTriggersHealStorm(t *testing.T) {
 	waitUntil(t, 3*time.Second, "peers falsely declare the alive n1 dead", func() bool {
 		return !nodes["n0"].AlivePeers()["n1"] && !nodes["n2"].AlivePeers()["n1"]
 	})
-	afterDeath := waitHealSettled(t, nodes)
-	if afterDeath == 0 {
+
+	storm := waitHealSettled(t, nodes)
+	if storm == 0 {
 		t.Fatalf("expected a heal storm from the false positive, got 0 copies")
 	}
-	t.Logf("false positive: n1 never died, yet the cluster made %d key copies to 'restore' R", afterDeath)
+	t.Logf("false positive, NO grace period: n1 never died, yet the cluster copied %d keys", storm)
+	logHealCopies(t, nodes, "storm")
+}
 
-	// The flap back is a second membership change -> a second storm.
+// The fix. Same false positive, but with a grace period the expensive
+// re-replication waits and rechecks: n1 recovers inside the window, nothing is
+// left suspected dead, and the heal is skipped entirely. The storm that cost
+// 200+ copies now costs zero — the cheap re-route still happened instantly, only
+// the expensive copy was withheld until the death was confirmed.
+func TestGracePeriodPreventsHealStorm(t *testing.T) {
+	const rf = 3
+	ids := []string{"n0", "n1", "n2", "n3", "n4"}
+	nodes := startCluster(t, ids...)
+	setReplication(nodes, rf, 1)
+	const grace = 2 * time.Second
+	setHealGracePeriod(nodes, grace)
+
+	const keys = 100
+	for i := range keys {
+		clientSet(t, nodes["n0"], "k:"+strconv.Itoa(i), "v"+strconv.Itoa(i))
+	}
+
+	// The same false positive as the storm test: n1 is alive but looks silent.
+	nodes["n1"].PauseHealth(true)
+	waitUntil(t, 3*time.Second, "peers falsely declare the alive n1 dead", func() bool {
+		return !nodes["n0"].AlivePeers()["n1"] && !nodes["n2"].AlivePeers()["n1"]
+	})
+
+	// Recover well within the grace window, before any copy is committed.
 	nodes["n1"].PauseHealth(false)
 	waitUntil(t, 3*time.Second, "peers re-admit the recovered n1", func() bool {
 		return nodes["n0"].AlivePeers()["n1"] && nodes["n2"].AlivePeers()["n1"]
 	})
-	afterFlap := waitHealSettled(t, nodes)
-	t.Logf("flap: re-admitting n1 copied another %d keys; %d total copies for a node alive the whole time",
-		afterFlap-afterDeath, afterFlap)
+
+	// Wait past the grace period: the pending heal rechecks, finds nothing dead,
+	// and skips.
+	time.Sleep(grace + 500*time.Millisecond)
+	if c := totalHealCopies(nodes); c != 0 {
+		t.Fatalf("grace period should have prevented the storm, but %d copies were made", c)
+	}
+	t.Logf("grace period (%v) absorbed the false positive: 0 copies, versus 200+ with no grace", grace)
+	logHealCopies(t, nodes, "grace")
 }

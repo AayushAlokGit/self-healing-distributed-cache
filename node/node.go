@@ -44,6 +44,14 @@ const (
 	// (a GC pause looks like death); longer = fewer false positives but the ring
 	// routes to a corpse for longer. 5 missed beats.
 	defaultFailureTimeout = 500 * time.Millisecond
+
+	// A death is re-routed immediately (cheap, reversible), but re-replication
+	// waits this long before committing to the expensive copy, then rechecks: a
+	// brief false positive (a GC pause) recovers inside the window and is skipped
+	// entirely. The price is the universal one — a genuine death sits
+	// under-replicated this much longer before it heals. Decoupling the two
+	// reactions is the point: convict cheaply on suspicion, copy only on conviction.
+	defaultHealGracePeriod = 1 * time.Second
 )
 
 // Node is a peer in the cluster: a cache (Store Engine), an HTTP server, and its
@@ -62,7 +70,8 @@ type Node struct {
 
 	heartbeatInterval time.Duration
 	failureTimeout    time.Duration
-	healthClient      *http.Client // short timeout; a slow ping is a missed beat
+	healGracePeriod   time.Duration // guarded by mu; wait before the expensive heal
+	healthClient      *http.Client  // short timeout; a slow ping is a missed beat
 	done              chan struct{}
 	wg                sync.WaitGroup
 
@@ -106,6 +115,7 @@ func New(id, addr string, capacity int) *Node {
 		writeQuorum:       defaultWriteQuorum,
 		heartbeatInterval: defaultHeartbeatInterval,
 		failureTimeout:    defaultFailureTimeout,
+		healGracePeriod:   defaultHealGracePeriod,
 		healthClient:      &http.Client{Timeout: defaultFailureTimeout},
 		done:              make(chan struct{}),
 		healTrigger:       make(chan struct{}, 1),
@@ -162,6 +172,23 @@ func (n *Node) SetReplication(replicationFactor, writeQuorum int) {
 	defer n.mu.Unlock()
 	n.replicationFactor = replicationFactor
 	n.writeQuorum = writeQuorum
+}
+
+// SetHealGracePeriod overrides how long a detected death waits before the node
+// re-replicates. Zero heals immediately (the naive behavior). For tests that want
+// to show the storm (0) versus the fix (a real grace period).
+func (n *Node) SetHealGracePeriod(d time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.healGracePeriod = d
+}
+
+// gracePeriod reads the heal grace period under the lock, since a setter may
+// change it while healLoop is running.
+func (n *Node) gracePeriod() time.Duration {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.healGracePeriod
 }
 
 type owner struct{ id, addr string }
@@ -239,7 +266,7 @@ func (n *Node) heartbeatRound() {
 	for id := range answered {
 		n.lastSeen[id] = now
 	}
-	membershipChanged := false
+	deathDetected := false
 	for id := range n.peers {
 		if id == n.id {
 			continue
@@ -248,20 +275,20 @@ func (n *Node) heartbeatRound() {
 		switch {
 		case n.alive[id] && !isAlive:
 			n.alive[id] = false
-			n.ring.Remove(id) // stop routing to the corpse
-			membershipChanged = true
+			n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
+			deathDetected = true
 		case !n.alive[id] && isAlive:
 			n.alive[id] = true
-			n.ring.Add(id) // it came back
-			membershipChanged = true
+			n.ring.Add(id) // it came back — cheap re-route, no heal needed
 		}
 	}
 
-	// Ownership just shifted, so some ranges may be under-replicated (a death) or
-	// owe a copy to a returned node (a recovery). Kick the heal — either way the
-	// fix is the same: re-assert the replication invariant. Non-blocking so the
-	// heartbeat loop never stalls on it; coalescing so a burst schedules one pass.
-	if membershipChanged {
+	// Only a death may leave a range under-replicated, so only a death kicks the
+	// heal. A recovery re-routes for free: a node that flapped back never lost
+	// data, so there is nothing to reconcile. Non-blocking so the heartbeat loop
+	// never stalls; coalescing so a burst schedules one pass. The heal itself
+	// waits out a grace period before committing to any copy (see healLoop).
+	if deathDetected {
 		select {
 		case n.healTrigger <- struct{}{}:
 		default:
@@ -290,9 +317,34 @@ func (n *Node) healLoop() {
 		case <-n.done:
 			return
 		case <-n.healTrigger:
-			n.heal()
+			// The re-route already happened (cheap, reversible). Wait out a grace
+			// period before the expensive re-replication, then recheck: a brief
+			// false positive (a GC pause) recovers inside the window, leaving
+			// nothing suspected dead, and we skip the needless copy entirely.
+			select {
+			case <-n.done:
+				return
+			case <-time.After(n.gracePeriod()):
+			}
+			if n.hasSuspectedDead() {
+				n.heal()
+			}
 		}
 	}
+}
+
+// hasSuspectedDead reports whether this node currently believes any peer is dead.
+// The grace-period gate: if the suspect recovered while we waited, this is false
+// and the heal is skipped.
+func (n *Node) hasSuspectedDead() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	for id, alive := range n.alive {
+		if id != n.id && !alive {
+			return true
+		}
+	}
+	return false
 }
 
 // heal re-asserts the replication invariant: for every key this node is the
