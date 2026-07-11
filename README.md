@@ -53,7 +53,45 @@ grace period withholds the expensive re-replication — resume it in time and no
 the difference between a cheap reversible reroute and an expensive irreversible copy. It is API-only;
 the dashboard button was dropped.
 
-Backend flags: `-addr :8080`, `-grace 2s` (heal grace period), `-seed 12` (keys to preload).
+Backend flags: `-addr :8080` (or `$PORT`), `-grace 2s` (heal grace period), `-seed 12` (keys to preload).
+
+## Deploy
+
+Two pieces, two hosts, both free: the **dashboard** is static files on a CDN, the **cluster** is a
+long-running container.
+
+> **Why the backend cannot be serverless.** The five nodes are goroutines holding in-memory state and
+> heartbeating every 100 ms. A serverless platform freezes or kills the process between requests, so
+> the heartbeats stop — and when traffic resumes, every node sees stale beats and **falsely convicts
+> every other node as dead.** This is the same reason Google Cloud Run needs *instance-based billing*
+> (`CPU always allocated`) rather than its default request-based mode. It needs a real process.
+
+**1 — Backend → Render** (free, no credit card). The repo carries a [`render.yaml`](render.yaml)
+Blueprint, so: New → Blueprint → pick this repo → Apply. Render builds the [`Dockerfile`](Dockerfile),
+injects `$PORT`, and health-checks `/`. Note the service URL it gives you.
+
+**2 — Frontend → Vercel** (or Netlify/Pages). Point it at the **`frontend/`** directory (framework:
+Vite, build `npm run build`, output `dist`) and set one environment variable:
+
+```
+VITE_API_URL = https://<your-render-service>.onrender.com
+```
+
+⚠️ **Vite inlines `VITE_API_URL` at build time, not run time.** Change the backend URL and you must
+*rebuild* the frontend — there is no runtime config to edit on the CDN. Set it before the first build,
+or redeploy after.
+
+⚠️ Once split across two origins, the backend's permissive CORS (`Access-Control-Allow-Origin: *`,
+`cmd/server/server.go`) stops being decoration and becomes **load-bearing**. It also allows only
+`GET`/`POST` — which is why every mutating control-API route is a `POST`, including the deletes. (The
+node↔node protocol, which no browser touches, uses real `PUT`/`DELETE` verbs.)
+
+**The cold start is real and accepted.** Render's free tier sleeps a service after ~15 minutes idle, and
+the next request pays **~30–60 s** to wake it. Sleeping *terminates the process*, so the cache is wiped
+and the cluster re-seeds on boot. Rather than look broken, the dashboard detects this and shows
+*"waking the cluster…"* instead of an error. If that ever becomes unacceptable, the fix is a host that
+does not sleep (Northflank's free tier does not) — **not** a GitHub Actions cron pinger, which is an
+explicit violation of GitHub's Acceptable Use Policy.
 
 ## Status — complete
 

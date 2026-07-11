@@ -26,7 +26,9 @@ heartbeats; (4) HTTP/JSON transport; (5) dashboard polish is a **priority** (it 
 money moment) and must stay static-hostable and free; (6) **R=3**, configurable.
 
 ### Next action — pick one
-- **(a) Deploy to a free host + writeup** ← *recommended*. The writeup should carry two honesty
+- **(a) Deploy** — *config is committed, the clicking is not done.* Backend → **Render** (free, no card,
+  `render.yaml` + `Dockerfile` in the repo); frontend → **Vercel**, root `frontend/`, with
+  `VITE_API_URL` pointing at the Render URL. Then the **writeup**, which should carry two honesty
   caveats: **cluster-in-a-box** (only the *topology* is collapsed — the protocol is real) and S9 Q5's
   **no god's-eye view exists** (the dashboard's omniscient state is impossible in a real deployment,
   because *dead* is a **belief**, not a property; an honest dashboard would show N disagreeing views).
@@ -473,6 +475,25 @@ re-replicate.
 
 ## Session log
 What happened, in order. The detail lives in the checklist above; this is the narrative and the surprises.
+
+### Session 12 — 2026-07-11 · Deployment, and the host that would have broken the demo
+**Build only, no quiz.** Split deploy wired up: `$PORT` (container hosts choose the port and inject it —
+bind anything else and the platform's health check never answers, so the deploy is marked failed),
+`VITE_API_URL` (⚠️ Vite inlines it at **build** time; changing the backend URL means a *rebuild*), a
+`scratch`-based `Dockerfile` (zero deps ⇒ static binary ⇒ empty base image), and a `render.yaml`.
+
+**The find: the wrong host silently breaks the whole thesis.** Google Cloud Run's default is
+*request-based billing*, where **CPU is only allocated during a request**. The heartbeat goroutines
+would freeze between clicks, and on the next request every node would see stale beats and **falsely
+convict every other node as dead** — the failure detector firing on the platform's idleness rather than
+on any real failure. Serverless is disqualified for the same reason. *A system whose liveness is defined
+by "did I hear from you recently" cannot run somewhere that stops time when nobody is looking.*
+
+Chose **Render free** (no card) and **accepted its ~30–60 s cold start**: sleeping terminates the
+process, so the ring re-seeds on boot. The dashboard now tells that story instead of showing an error —
+locally "unreachable" means *you forgot to start the backend*, deployed it means *the cluster is waking*,
+and they are not the same message. Rejected the GitHub-Actions keep-alive pinger: it is an explicit
+Acceptable Use violation.
 
 ### Session 11 — 2026-07-11 · Delete, and the ring that cannot tell you where the data is
 **Build only, no quiz.** Seeding took a key count; then **delete** — one key (the ✕ on its chip) and

@@ -1,0 +1,23 @@
+# Render Blueprint — the BACKEND only (the cluster-in-a-box + its control API).
+# The dashboard is a static build that deploys separately; see README, "Deploy".
+#
+# Checking this in means the service is defined by the repo, not by a web form somebody
+# clicked once and cannot reproduce.
+services:
+  - type: web
+    name: self-healing-cache-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+
+    # Render pings this to decide the deploy succeeded. GET / returns a 200 service hint
+    # (cmd/server/server.go), so there is nothing extra to build.
+    healthCheckPath: /
+
+    # ⚠️ PORT is deliberately NOT set here. Render injects it, and defaultAddr() in main.go
+    # reads it. Pinning it would just be a second source of truth that can disagree.
+    #
+    # ⚠️ Free plan: the service sleeps after ~15 minutes idle and the next request pays a
+    # ~30-60s cold start. Sleep TERMINATES the process, so the cache is wiped — the cluster
+    # simply re-seeds on boot. That is why the dashboard shows a "waking the cluster" state
+    # instead of an error (see API_BASE in frontend/src/api.ts).

@@ -71,6 +71,15 @@ export interface State {
   events: ClusterEvent[]
 }
 
+// Where the cluster lives. Empty in dev: Vite proxies /api to :8080, so it is same-origin
+// and a relative path is right. In production the dashboard is on a static CDN and the
+// cluster is in a container on another origin entirely, so VITE_API_URL points at it — and
+// the backend's permissive CORS stops being decoration and starts being load-bearing.
+//
+// ⚠️ Vite inlines import.meta.env at BUILD time, not run time. Change VITE_API_URL and you
+// must rebuild; there is no runtime config to edit on the CDN.
+export const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
+
 // fetch() rejects only on a network failure: a 500 resolves as success, so res.ok must be
 // checked here or the UI carries on as though the action landed. Prefer the server's
 // {"error": ...}, else the raw body — truncated, so a proxy's HTML 502 can't dump markup.
@@ -88,7 +97,7 @@ async function ok(res: Response, what: string): Promise<Response> {
 }
 
 export async function getState(): Promise<State> {
-  const res = await ok(await fetch('/api/state'), 'state')
+  const res = await ok(await fetch(API_BASE + '/api/state'), 'state')
   const s = await res.json()
   // Go marshals a nil slice as null, so default every array or the UI blanks.
   return {
@@ -102,7 +111,7 @@ export async function getState(): Promise<State> {
 
 async function post<T>(path: string, body: unknown, what: string): Promise<T> {
   const res = await ok(
-    await fetch(path, {
+    await fetch(API_BASE + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -129,7 +138,7 @@ export const deleteKey = (key: string) =>
 export const clearKeys = () => post<{ keys: number }>('/api/clear', {}, 'delete all keys')
 
 export async function getKey(key: string): Promise<ReadResult> {
-  const res = await ok(await fetch('/api/get?key=' + encodeURIComponent(key)), `read ${key}`)
+  const res = await ok(await fetch(API_BASE + '/api/get?key=' + encodeURIComponent(key)), `read ${key}`)
   return res.json()
 }
 

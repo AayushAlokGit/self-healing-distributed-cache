@@ -28,8 +28,18 @@ func main() {
 	}
 }
 
+// defaultAddr honours $PORT. Container hosts pick the port themselves and inject it —
+// bind anything else and the platform's health check never gets an answer, so the deploy
+// is marked failed. Locally $PORT is unset and this is just :8080.
+func defaultAddr() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return ":8080"
+}
+
 func run() error {
-	addr := flag.String("addr", ":8080", "API listen address")
+	addr := flag.String("addr", defaultAddr(), "API listen address ($PORT wins by default)")
 	grace := flag.Duration("grace", 2*time.Second, "heal grace period (wait before re-replicating a suspected death)")
 	seed := flag.Int("seed", 12, "keys to seed at startup (kept small so the ring stays legible)")
 	logFile := flag.String("log-file", "logs/server.log", "JSON log file; empty disables file logging (console still logs)")

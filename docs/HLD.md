@@ -315,6 +315,31 @@ collapses.**
 
 ---
 
+## 8.5 Deployment — **as shipped**
+
+Dashboard (static, on a CDN) + cluster (one long-running container). `render.yaml` and `Dockerfile` are
+in the repo; the frontend takes the API origin from `VITE_API_URL`, ⚠️ **inlined at build time**.
+
+⚠️ **The backend cannot be serverless, and this is a property of the design, not a preference.** Liveness
+here is defined as *"did I hear from you in the last 500 ms"* — so the heartbeat goroutines must actually
+run. A platform that freezes the process between requests stops those beats, and on the next request
+**every node convicts every other node**: the failure detector fires on the *platform's* idleness rather
+than on any real failure. Concretely, Google Cloud Run's **default request-based billing** allocates CPU
+only during a request and is therefore disqualified; only *instance-based* billing (`CPU always
+allocated`) + `min-instances=1` works, which overruns its free tier. *A system whose liveness is "did I
+hear from you recently" cannot live somewhere that stops time when nobody is looking.*
+
+Chosen: **Render free** — no card, sleeps after ~15 min idle, ~30–60 s cold start, and sleeping
+**terminates the process** (so the ring re-seeds on boot). Accepted, and surfaced honestly in the UI as
+*"waking the cluster…"* rather than an error. Free tiers that never sleep exist (Northflank); a GitHub
+Actions keep-alive cron does **not** — that is an explicit Acceptable Use violation.
+
+Splitting the origins also makes two previously-cosmetic things **load-bearing**: the permissive CORS
+header, and the fact that it allows `GET`/`POST` only — which is why every mutating control-API route is
+a `POST`, deletes included, while the node↔node protocol keeps real `PUT`/`DELETE` verbs.
+
+---
+
 ## 9. Explicitly out of scope (with honest caveats)
 
 - **Consensus / strong consistency** — we're AP; a production version would likely put consensus on

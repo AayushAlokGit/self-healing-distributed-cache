@@ -1,3 +1,4 @@
+import { API_BASE } from './api'
 import { ActivityLog } from './components/ActivityLog'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
@@ -22,7 +23,18 @@ export default function App() {
         {state && <Stats state={state} prev={prev} />}
       </header>
 
-      {!connected && <div className="offline-badge">⚠ backend unreachable — is `go run ./cmd/server` running?</div>}
+      {/* Two different readers. Locally, "unreachable" means you forgot to start the backend.
+          Deployed, it almost always means the free container is cold-starting — and telling a
+          stranger to run `go run` would just look broken. */}
+      {!connected &&
+        (API_BASE ? (
+          <div className="offline-badge waking">
+            ⏳ waking the cluster… the backend sleeps when idle on its free host, so the first load can
+            take up to a minute. This page will fill in on its own.
+          </div>
+        ) : (
+          <div className="offline-badge">⚠ backend unreachable — is `go run ./cmd/server` running?</div>
+        ))}
 
       {state ? (
         <div className="grid">
