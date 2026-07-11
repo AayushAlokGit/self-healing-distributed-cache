@@ -124,13 +124,16 @@ rendering bug, it *is* the distributed system. (→ PROGRESS, Next action (a): a
 
 **Q6 — Why is even-spaced node placement on the dashboard honest, and what must keep its true hash
 angle? — ⊘ (taught).**
-**A node does not have a position on the ring.** It has ~150 (`defaultReplicas = 150`), scattered by
-`hashKey(node+"#"+i)` — the scattering *is* the mechanism that took the load span from **65× to 1.4×**.
-"Where is `n2`?" has **no answer**. Drawing it at `hash("n2")` picks one arbitrary point out of 150 and
+**A node does not have a position on the ring.** It has **many**, scattered by `hashKey(node+"#"+i)` — the
+scattering *is* the mechanism that took the load span from **65× to 1.4×**. (How many depends on which ring:
+`ring.defaultReplicas = 150` in the library and the tests, but `cluster.demoRingReplicas = 8` in the demo the
+dashboard draws — 750 ticks would be hair, not a diagram. The argument below does not care about the number,
+only that it is **more than one**.)
+"Where is `n2`?" has **no answer**. Drawing it at `hash("n2")` picks one arbitrary point out of its many and
 dresses it up as *the* location: precise-looking and meaningless — and empirically it clustered n0/n3/n4 at
 the bottom, which *reads as* "those nodes are neighbors": false, and false in a way that undermines the very
 lesson the ring exists to teach. Even spacing claims nothing; it is a legend.
-Two things **must** keep their true angle: the **~150 virtual-point ticks** (they are the real load
+Two things **must** keep their true angle: the **virtual-point ticks** (they are the real load
 distribution — faking them fakes the property Phase 2 spent itself measuring) and the **key dots** (a key's
 angle *is* its identity, `sha256(key)`; the arc it lands in decides its owner, so the ownership links are
 meaningful only because the angles are real).
@@ -142,7 +145,7 @@ Today: O(primary keys) × (R−1) round-trips on **every** membership change —
 `fetchFrom` calls to discover ~50 needed copies. Check-first made it cheap in *bytes*; it did nothing for
 **chattiness**.
 The ring already knows which keys moved: when `d` dies, the only keys whose owner set changed lie in **the
-arcs `d` owned** (the ~150 arcs ending at its virtual points). Everything else maps to the same three nodes
+arcs `d` owned** (one arc ending at each of its virtual points). Everything else maps to the same three nodes
 as before, and re-checking it is pure waste. **Sketch:** (1) diff old ring vs new → the changed arcs;
 (2) scan the primary keyset **restricted to those arcs**; (3) push straight to the newcomer — **no presence
 check needed**, since a node that was not an owner cannot have the key.

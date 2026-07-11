@@ -17,8 +17,8 @@ import (
 
 // visits pushes a notification when somebody opens the live dashboard.
 //
-// The difficulty is that a visit is not a request: the dashboard polls /api/state about once
-// a second, so a push per request is a push per second per open tab. Three guards collapse
+// The difficulty is that a visit is not a request: the dashboard polls /api/state every 600ms,
+// so a push per request is ~1.7 pushes a second, per open tab. Three guards collapse
 // the poll storm back into visits — dedup on a hash of IP + user-agent; an IDLE window,
 // refreshed on every poll, so a tab left open all afternoon stays one visit; and a cap per
 // hour, because the API is public and a bot sweeping it must not become a denial-of-service

@@ -351,11 +351,15 @@ death should *trigger* re-replication — the other half of the money moment.
   independent-views lesson resurfacing as a cost.
 - ☑ **The grace period — decouple the two reactions to a death by COST and REVERSIBILITY.** Cheap + reversible
   (`ring.Remove` → re-route) fires **instantly on suspicion**. Expensive + irreversible (**copying data**) waits
-  `healGracePeriod` (1s) and then **rechecks** — a suspect that recovered inside the window leaves nothing dead,
+  `healGracePeriod` and then **rechecks** — a suspect that recovered inside the window leaves nothing dead,
   so the heal is skipped entirely. **Measured: the same false positive that cost 200 copies now costs 0.**
-  - **The price, honestly** — the universal detection tradeoff made concrete: a **genuine** death now heals in
-    **~1.55s instead of ~550ms**. Extra under-replication exposure, bought with storm-immunity. *Convict cheaply
-    on suspicion; copy only on conviction.*
+  - **The price, honestly** — the universal detection tradeoff made concrete: at the **1s** grace these numbers
+    were taken at, a **genuine** death heals in **~1.55s instead of ~550ms**. Extra under-replication exposure,
+    bought with storm-immunity. *Convict cheaply on suspicion; copy only on conviction.*
+  - ⚠️ **Two defaults, and the demo uses the slower one.** `node.defaultHealGracePeriod` is **1s**, but the
+    server's `-grace` flag defaults to **2s** (`cmd/server/main.go`) and the cluster overrides every node with
+    it — so the *deployed* demo waits 2s and a genuine death heals in ~2.55s, not the ~1.55s measured above. The
+    node default only applies to a node nobody configured, i.e. the tests.
 - ☑ **Check-first heal + recovery repopulation.** The heal now asks each owner whether it already holds a key
   (`fetchFrom` → 200/404) and copies **only what's missing**. That made the heal safe to trigger on **any**
   membership change (death *or* recovery): a flapped node still holds its data → **0 copies**, and a genuinely
@@ -401,7 +405,10 @@ death should *trigger* re-replication — the other half of the money moment.
     kill the key's remaining life kept counting **down** (15.8s → 11.3s) on its new holder instead of resetting.
 - ☑ **Serving reads during heal** — true via the Phase 3 read fallback (**available ≠ fully-replicated**): reads
   hop past the missing copy while the heal runs. Session 10 made it **visible**: a read returns
-  `X-Served-By`/`X-Primary` plus a per-owner **trace** of what each owner said. `miss` (alive, holds no copy — a
+  `X-Coordinator` (who took it) and `X-Served-By` (who answered), plus `X-Read-Path`, a per-owner **trace** of
+  what each owner said. There is no `X-Primary` — the primary is *rank 0 of the trace*, derived by the reader
+  (`ReadResult.Primary`), so who-the-owners-were has one source of truth instead of two that can drift.
+  `miss` (alive, holds no copy — a
   revived node mid-heal) is kept distinct from `unreachable` (dead): both mean "did not serve the read," only one
   means the node is **gone**.
 - ☑ **The causal heal log.** Heals live in the **same event list as the kills**, not a log of their own — the
@@ -419,20 +426,29 @@ death should *trigger* re-replication — the other half of the money moment.
   peers must still detect the death **themselves** via heartbeat; Revive brings it back on a fresh port **without**
   resetting anyone's liveness.
 - ☑ **Control API** (`cmd/server/`) — `go run ./cmd/server` → JSON on :8080
-  (`/api/state|set|get|seed|kill|revive|pause`), API-only with permissive CORS.
+  (`/api/state|set|get|seed|kill|revive|pause|delete|clear` — `delete` and `clear` arrived in S11/S13),
+  API-only with permissive CORS.
 - ☑ **React frontend** (`frontend/` — React + Vite + TypeScript) — talks to the API (Vite proxies `/api` in dev;
   builds to static files, satisfying the HLD's "static FE + one backend container"). A `useClusterState` polling
   hook keeps the previous snapshot for animation diffing.
-- ☑ **Ring viz + failure-injection controls** — a dark control-room SVG ring: per-node colours, ~150 virtual-point
-  ticks (the *real* load spread), node markers with heartbeat halos, key dots on their **true hash angles** with
+- ☑ **Ring viz + failure-injection controls** — a dark control-room SVG ring: per-node colours, virtual-point
+  ticks at their **true hash angles** (the real load spread — though see the vnode note below: the demo ring
+  carries 8 points per node, not the library's 150), node markers with heartbeat halos, key dots on their
+  **true hash angles** with
   ownership links, a **red pulse on under-replicated keys**, **packets that fly primary→newcomer on
   re-replication**, kill/revive shockwaves, and a *"re-replicating N keys…"* indicator during the heal window.
   **Verified live in a real browser:** kill → grey-out → heal (0→24 copies, **0 data lost**); reads keep serving; a
   false positive shows the indicator while grace holds copies at **0**.
   - **Node markers are placed by even spacing, not `hash(id)`** — and that is the *honest* choice, not a cheat: a
-    node has ~150 scattered ring positions, so it **has no single true position**, and faking one (which clustered
-    n0/n3/n4 at the bottom) would be faking a *value*. Keys and ticks keep their true hash angles. **Fake what has
-    no true value; never fake the mechanism.**
+    node has **many** scattered ring positions, so it **has no single true position**, and faking one (which
+    clustered n0/n3/n4 at the bottom) would be faking a *value*. Keys and ticks keep their true hash angles.
+    **Fake what has no true value; never fake the mechanism.**
+  - ⚠️ **The demo ring is NOT the measured ring: 8 vnodes per node, not 150.** `ring.defaultReplicas = 150` is the
+    library default and what Phase 2 measured (65× → 1.4× load span); `cluster.demoRingReplicas = 8` is what the
+    server actually runs, because 150 × 5 = 750 ticks is hair, not a diagram — nobody can watch a key land in an
+    arc that thin. **A legibility/balance trade, and it only costs the picture:** the mechanism is byte-identical,
+    the tests keep the default, so the *claim* stays measured even though the *rendering* shows the coarse case.
+    Worth stating out loud, because for four sessions three docs said the dashboard drew ~150 ticks. It never did.
 - ☑ **TTL + read-path controls** — TTL presets and a custom-millisecond box with a live preview; the read card shows
   the value, who coordinated, who served it, and the full read-path trace; the key table shows each key's
   **remaining** life. The dashboard is sent a **remaining duration, not a deadline** — an instant would be read
@@ -496,7 +512,7 @@ cluster. Still unpinned, and now the top code item.
 ### Session 14 — 2026-07-11 · Visit notifications, and the interface under them
 **Build only, no quiz.** An ntfy push when somebody opens the live demo. Not a distsys feature, but three of its
 traps are shapes the cache already taught. **The real problem: a visit is not a request** — the dashboard polls
-~1×/s, so push-per-request is a push per second per open tab. Guards: dedup on `sha256(IP+UA)`, an **idle** (not
+every 600 ms, so push-per-request is ~1.7 pushes a second per open tab. Guards: dedup on `sha256(IP+UA)`, an **idle** (not
 fixed) 30-min window, ≤20 pushes/hour. `notify.Notifier` is one method wide and `Nop` is the unconfigured default,
 so no call site carries a nil check. Design detail → HLD §8.6; Go traps (the request dying at handler return, its
 context cancelled at first write) → GO_NOTES.

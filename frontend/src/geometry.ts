@@ -23,8 +23,9 @@ export function xy(angleDeg: number, r: number): [number, number] {
   return [CX + r * Math.sin(a), CY - r * Math.cos(a)]
 }
 
-// Marker angles are display-only, spread evenly. A node has ~150 scattered ring points,
-// so no single angle is its real position; the ownership arcs show the true spread.
+// Marker angles are display-only, spread evenly. A node has many scattered ring points
+// (8 in the demo ring), so no single angle is its real position; the ownership arcs show
+// the true spread.
 export function markerAngles(nodes: NodeState[]): Record<string, number> {
   const m: Record<string, number> = {}
   nodes.forEach((n, i) => (m[n.id] = (i / nodes.length) * 360))

@@ -455,8 +455,8 @@ Cleaner than a raw `signal.Notify` channel, and it composes with `srv.Shutdown(c
 then stop the thing they use": `srv.Shutdown` first, then `cluster.Close()`. → `cmd/server/main`
 
 **Headers carry metadata *about* the body; the body is the value.** `PUT /kv/{key}` sends the value as
-the raw body and its deadline as `X-Expires-At`; a `GET` answers with the value plus `X-Served-By` /
-`X-Primary`. ⚠️ `w.Header().Set(k, v)` must come **before** the first write — the first write flushes
+the raw body and its deadline as `X-Expires-At`; a `GET` answers with the value plus `X-Coordinator`,
+`X-Served-By` and `X-Read-Path`. ⚠️ `w.Header().Set(k, v)` must come **before** the first write — the first write flushes
 the headers and a later `Set` is silently ignored. `r.Header.Get(k)` is case-insensitive and returns
 `""` when absent, so "no header" and "empty header" are the same thing: an optional field needs a
 value that means *absent*. → `node.storeOn`, `node.handleClientGet`

@@ -112,6 +112,12 @@ state and drives failure injection. Every node talks to peers directly; no coord
   > **ring geometry decides, stably and silently. Presence ≠ version.**
 - **The ring:** a hash space `0 … 2³²−1` wrapped into a circle. Each physical node is placed at many
   points via **virtual nodes** (vnodes) for even spread.
+  > **⇒ AS BUILT: two vnode counts, and the demo does not use the good one.** `ring.defaultReplicas = 150`
+  > is the library default and what every Phase-2 measurement was taken at (load span 65× → 1.4×). The
+  > **cluster overrides it to 8** (`cluster.demoRingReplicas`) because 150 × 5 nodes is 750 ticks of hair on
+  > the dashboard and no viewer can see a key land in an arc. So the shipped demo trades balance for
+  > legibility — the mechanism is identical, the spread is just coarser. The tests keep the default, which
+  > is why the *claim* stays honest even though the *picture* is not the balanced case.
 - **Ownership:** `hash(key)` → walk clockwise → first node = **primary**; next R−1 distinct physical
   nodes = **replicas**.
 - **Membership view:** each node holds its *own* table `nodeID → {addr, lastHeard, state}`. Views may
@@ -225,8 +231,13 @@ unavailable), which is out of scope (§9).
 ## 7. Interfaces — **as built**
 
 **Client API** (on every node; any node coordinates any key)
-- `GET /get/{key}` → value, plus `X-Served-By` / `X-Primary` — *which* owner answered, so the read
-  fallback is legible to the client instead of buried in a server log.
+- `GET /get/{key}` → value, plus three trace headers, so the read fallback is legible to the client
+  instead of buried in a server log: `X-Coordinator` (the node that took the request — any live node can,
+  since coordinating needs no local copy), `X-Served-By` (the owner the value actually came from), and
+  `X-Read-Path` (`n0:unreachable,n4:miss,n2:hit` — every owner in ring order and what each one said).
+  ⚠️ There is **no `X-Primary` header**: the primary is rank 0 of `X-Read-Path`, derived by the reader
+  (`cluster.ReadResult.Primary`). One source of truth for who the owners were, rather than two that can
+  disagree.
 - `PUT /set/{key}` body=value, `?ttl=250ms|2m0s` → fans out to all R owners, acks after W.
 - `DELETE /del/{key}` → ⚠️ fans out to **every peer, not the R owners** (see below); `X-Dropped` names the
   nodes that held it. `DELETE /del` clears the cluster.
@@ -274,7 +285,10 @@ owners, so that holds — *except* for a write a **down** owner missed, which he
 repair. So cleanup can discard a fresher copy and keep a staler one. No client can observe the difference
 (reads only ask owners), but it is **presence ≠ version** again, and only versioned values close it.
 
-The metric is on the dashboard: **copies stored vs keys × R**. Equal is healthy; the gap is cleanup's debt.
+The metric is on the dashboard: **copies stored vs copies the ring asks for**. Equal is healthy; the gap is
+cleanup's debt. The second number is `keys × min(R, alive)`, not `keys × R` (`Stats.tsx`) — below R live
+nodes a key *cannot* have R copies, and charging the cluster for copies it has nowhere to put would show a
+permanent deficit in exactly the state the demo spends most of its time in.
 
 ### Why delete broadcasts instead of addressing the owners
 
@@ -350,8 +364,8 @@ A push when somebody opens the live demo. `notify.Notifier` is the interface (*w
 `notify.Ntfy` is today's transport; `notify.Nop` is what an unconfigured server holds, so no call site
 carries a nil check. `cmd/server/visits.go` decides *what a visit is* and never learns how it is sent.
 
-⚠️ **The dashboard polls `/api/state` ~1×/s.** Notify per request and it is one push per second, per open
-tab. Three guards turn the poll storm back into visits:
+⚠️ **The dashboard polls `/api/state` every 600 ms.** Notify per request and it is ~1.7 pushes a second, per
+open tab. Three guards turn the poll storm back into visits:
 
 | Guard | Why |
 |---|---|

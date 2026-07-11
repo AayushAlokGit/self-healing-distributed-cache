@@ -19,8 +19,8 @@ keeps serving.
 
 ## Architecture
 
-- **Backend** (`cmd/server`, Go) — runs the cluster-in-a-box and exposes a JSON control API on `:8080`
-  (`/api/state`, `/kill`, `/revive`, `/pause`, `/set`, `/get`, `/seed`, `/delete`, `/clear`).
+- **Backend** (`cmd/server`, Go) — runs the cluster-in-a-box and exposes a JSON control API on `:8080`.
+  Every route lives under `/api`: `GET /api/state`, `GET /api/get`, and `POST /api/{kill,revive,pause,set,seed,delete,clear}`.
 - **Frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard. It builds to static files, so
   in production the FE deploys to a free static host and the Go API to a free container — the HLD's
   "static frontend + one backend container."
@@ -80,8 +80,8 @@ enters git), and **never** as a `VITE_*` variable — those are inlined into the
 downloads. The push names the visitor's IP, browser, and where they came from — so the topic name is
 guarding *visitor IPs*. Make it long and random.
 
-The interesting part is that **a visit is not a request**: the dashboard polls `/api/state` about once a
-second, so a naive push-per-request is a push per second per open tab. `cmd/server/visits.go` dedups on the
+The interesting part is that **a visit is not a request**: the dashboard polls `/api/state` every 600 ms, so
+a naive push-per-request is ~1.7 pushes a second, per open tab. `cmd/server/visits.go` dedups on the
 visitor, treats the 30-minute window as an *idle* timeout (a tab left open all day is one visit), and caps
 pushes at 20/hour — the API is public, and a bot sweeping it must not turn into a DoS on your own phone.
 The transport sits behind [`notify.Notifier`](notify/notify.go), so swapping ntfy for mail or Slack is a
@@ -113,8 +113,12 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
 ## How it works
 
 - **Consistent hashing** (`ring/`) — keys and nodes hash onto a 32-bit ring; a key belongs to the
-  next R distinct nodes clockwise. ~150 virtual points per node keep load balanced and spread a dead
-  node's keys across *all* survivors instead of dumping them on one neighbour.
+  next R distinct nodes clockwise. Each node holds many *virtual points* rather than one, which is what
+  keeps load balanced and spreads a dead node's keys across *all* survivors instead of dumping them on one
+  neighbour. The library default is **150 points per node** (`ring.defaultReplicas`), and that is what the
+  Phase-2 numbers were measured at; the **demo cluster deliberately drops to 8** (`cluster.demoRingReplicas`)
+  so the ring on screen is legible — fewer, bigger arcs you can actually see a key land in. Legibility
+  bought at the cost of balance: the property is real, the demo just shows a coarser version of it.
 - **Replication** (`node/`) — a write goes to all R owners and acks after a write-quorum W; a read
   tries owners in ring order and returns the first reachable copy, surviving up to R−1 deaths.
 - **Failure detection** (`node/`) — every node pings every peer's `/health`; silence past a timeout
