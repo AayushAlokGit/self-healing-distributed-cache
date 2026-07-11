@@ -1,9 +1,10 @@
 import { ActivityLog } from './components/ActivityLog'
-import { KeysPanel } from './components/KeysPanel'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
+import { ReadPanel } from './components/ReadPanel'
 import { RingViz } from './components/RingViz'
 import { Stats } from './components/Stats'
+import { WritePanel } from './components/WritePanel'
 import { useClusterState } from './hooks'
 
 export default function App() {
@@ -31,7 +32,11 @@ export default function App() {
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
-            <KeysPanel onAction={refresh} />
+            {/* SET and GET are separate cards: they ask different questions, and a
+                write's error has no business sitting above a read's result.
+                ReadPanel takes no onAction — a read changes nothing to go and fetch. */}
+            <WritePanel onAction={refresh} />
+            <ReadPanel />
             <ActivityLog events={state.events} />
           </div>
         </div>

@@ -1,13 +1,9 @@
 // Package cluster runs N cache nodes as goroutines in one process
 // (cluster-in-a-box) and gives the dashboard a god's-eye view plus the
-// failure-injection controls that drive the demo: kill a node, pause its health
-// (a GC-pause stand-in), revive it, and watch the cluster re-replicate and keep
-// serving.
+// failure-injection controls: kill a node, pause its health, revive it.
 //
-// The manager holds ground truth (which nodes it has killed); the nodes still
-// discover each other's deaths on their own via heartbeat, exactly as in the
-// tests. The gap between "killed" (instant) and "re-replicated" (a heartbeat +
-// grace period later) is the money moment made visible.
+// The manager holds ground truth about which nodes it killed; the nodes still
+// discover each other's deaths on their own, via heartbeat.
 package cluster
 
 import (
@@ -30,17 +26,13 @@ import (
 const (
 	nodeCapacity = 10000
 
-	// Activity-log entries kept, heals included. There IS a cap, deliberately: this
-	// is a hosted demo anyone can click Kill on forever, and an append-only list
-	// nothing ever trims is the Phase-1 leak wearing a new hat — reachable, growing,
-	// uncollectable. 300 is chosen to hold many kills' worth of heals so the kill
-	// that caused a heal is still on screen above it, which 40 was not.
+	// Activity-log entries kept. The cap is required: an append-only list anyone can
+	// grow by clicking Kill is an unbounded leak. 300 keeps a kill on screen above
+	// the heals it caused.
 	maxEvents = 300
 
-	// Virtual points per node, demo-only. The library default (~150) gives the
-	// smoothest load balance, but its 750 ring points render as an illegible haze.
-	// The demo trades balance for a ring whose arcs are big enough to see — the
-	// engineering rigor stays in the tests, which use the default.
+	// Virtual points per node, demo-only: fewer, larger arcs so the ring is legible.
+	// Tests use the library default (~150), which balances load better.
 	demoRingReplicas = 8
 )
 
