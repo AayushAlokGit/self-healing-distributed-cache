@@ -11,9 +11,11 @@ package node
 import (
 	"context"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +54,10 @@ const (
 	// under-replicated this much longer before it heals. Decoupling the two
 	// reactions is the point: convict cheaply on suspicion, copy only on conviction.
 	defaultHealGracePeriod = 1 * time.Second
+
+	// Heal records held before the oldest are dropped. Only matters if nothing is
+	// draining them (no dashboard attached); the log is for display, not durability.
+	maxHealLog = 64
 )
 
 // Node is a peer in the cluster: a cache (Store Engine), an HTTP server, and its
@@ -64,6 +70,15 @@ type Node struct {
 	addr      string // the real bound address, known only after Start
 	client    *http.Client
 	closeOnce sync.Once
+
+	// log is swapped in by whoever runs the node (the cluster), and discards until
+	// then: a library that owns a logger cannot be silenced, and these logs would
+	// otherwise spray heartbeat noise through every `go test` run.
+	//
+	// atomic.Pointer, not a plain field: the heartbeat and heal goroutines read this
+	// while SetLogger may still be writing it, which is a data race — and a plain
+	// mutex here would mean taking a lock on a path whose only job is to log.
+	log atomic.Pointer[slog.Logger]
 
 	replicationFactor int
 	writeQuorum       int
@@ -84,6 +99,16 @@ type Node struct {
 	// healCopies counts key copies pushed during heals, cumulative. It climbing
 	// while nothing actually died is the re-replication storm, made countable.
 	healCopies atomic.Int64
+
+	// healLog records what each heal pass actually moved, so the dashboard can show
+	// "n1 → n4: key:3, key:7" rather than just a copy count. The node keeps its own
+	// record and the manager drains it: a callback into the manager would deadlock,
+	// since Kill holds the manager's lock while Close waits for this goroutine.
+	// It is also the honest shape — a real node knows what it copied and would emit
+	// exactly this; the manager is only a collector.
+	healLogMu  sync.Mutex
+	healLog    []HealCopy
+	healCauses []string // membership changes seen since the last heal pass
 
 	// healthPaused stalls this node's /health responses without stopping the rest
 	// of it: a stand-in for a GC pause so a demo can show a live node being falsely
@@ -121,6 +146,7 @@ func New(id, addr string, capacity int) *Node {
 		done:              make(chan struct{}),
 		healTrigger:       make(chan struct{}, 1),
 	}
+	n.SetLogger(nil) // discard until someone wires a real one
 
 	mux := http.NewServeMux()
 	// Internal: node-to-node storage and liveness.
@@ -144,6 +170,19 @@ func New(id, addr string, capacity int) *Node {
 
 	return n
 }
+
+// SetLogger installs the logger this node writes to. Every record it emits is
+// tagged node=<id>, so one file holding all five nodes' logs can still be read one
+// node at a time. A nil logger discards, which is the default.
+func (n *Node) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.New(slog.DiscardHandler)
+	}
+	n.log.Store(l.With("node", n.id))
+}
+
+// logger is the current logger. Never nil — New installs a discarding one.
+func (n *Node) logger() *slog.Logger { return n.log.Load() }
 
 // SetMembership installs the set of known peers (id -> address, including self).
 // Everyone starts believed alive and on the ring; the heartbeat loop demotes the
@@ -254,6 +293,13 @@ func (n *Node) Start() error {
 	go n.srv.Serve(ln)
 	n.wg.Go(n.heartbeatLoop)
 	n.wg.Go(n.healLoop)
+
+	n.logger().Info("node started",
+		"addr", n.addr,
+		"heartbeat", n.heartbeatInterval,
+		"failure_timeout", n.failureTimeout,
+		"heal_grace", n.gracePeriod(),
+	)
 	return nil
 }
 
@@ -304,16 +350,27 @@ func (n *Node) heartbeatRound() {
 		if id == n.id {
 			continue
 		}
-		isAlive := now.Sub(n.lastSeen[id]) <= n.failureTimeout
+		silence := now.Sub(n.lastSeen[id])
+		isAlive := silence <= n.failureTimeout
 		switch {
 		case n.alive[id] && !isAlive:
 			n.alive[id] = false
 			n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
 			membershipChanged = true
+			n.noteHealCause(id + " went silent")
+			n.logger().Warn("peer went silent past the failure timeout: suspecting it dead and removing it from my ring, so reads/writes stop routing to it. Its keys are now under-replicated; a heal is scheduled after the grace period",
+				"peer", id,
+				"silent_for", silence.Round(time.Millisecond),
+				"failure_timeout", n.failureTimeout,
+			)
 		case !n.alive[id] && isAlive:
 			n.alive[id] = true
 			n.ring.Add(id) // it came back — reroute, and repopulate it (see below)
 			membershipChanged = true
+			n.noteHealCause(id + " came back")
+			n.logger().Info("peer answered health again: re-admitting it to my ring. It may have come back empty, so a heal will check and repopulate whatever it is missing",
+				"peer", id,
+			)
 		}
 	}
 
@@ -328,6 +385,8 @@ func (n *Node) heartbeatRound() {
 		select {
 		case n.healTrigger <- struct{}{}:
 		default:
+			// The trigger already held a pending signal, so a heal is coming anyway.
+			n.logger().Debug("membership changed again while a heal was already pending: coalescing into the one upcoming pass rather than queueing a second")
 		}
 	}
 }
@@ -358,53 +417,245 @@ func (n *Node) healLoop() {
 			// (a GC pause) recovers first — by the time this fires, a flapped node
 			// is back in the ring holding all its data, so the check-first heal
 			// finds nothing missing and copies nothing.
+			grace := n.gracePeriod()
+			n.logger().Info("membership changed, so ownership moved: waiting out the grace period before re-replicating, in case the peer is only briefly stalled (a GC pause) and comes back on its own",
+				"grace_period", grace,
+			)
 			select {
 			case <-n.done:
 				return
-			case <-time.After(n.gracePeriod()):
+			case <-time.After(grace):
 			}
 			n.heal()
 		}
 	}
 }
 
-// heal re-asserts the replication invariant: for every key this node is the
-// primary owner of, make sure each of that key's other current owners has a copy.
-// When a death promotes a new owner, or a recovery re-admits an empty node, this
-// is what moves the bytes so every owner actually holds the key.
+// heal re-asserts the replication invariant: for every key this node holds, make
+// sure each of that key's current owners has a copy. When a death promotes a new
+// owner, or a recovery re-admits an empty node, this is what moves the bytes.
 //
 // Check-first: before copying, it asks whether the owner already has the key and
 // skips it if so. That does two jobs at once — a node that merely flapped (still
 // holding its data) costs zero copies, and a genuinely returned node is
 // repopulated — without any special-casing of death vs. recovery.
+//
+// WHO does the pushing is the subtle part, and "the primary does it" — the rule
+// this used to have — is WRONG, in a way that strands keys forever:
+//
+//	A key can only be healed by a node that BOTH holds it AND is allowed to push.
+//	Tie the permission to being the primary, and a revived node that comes back
+//	empty and is promoted straight back to primary of its own arcs can never be
+//	repopulated: the primary has nothing to send, and the nodes that do have the
+//	key are not the primary, so they stand down. Nobody is both. The key sits
+//	under-replicated until a client happens to rewrite it.
+//
+// The fix: permission follows the DATA, not the position. The healer for a key is
+// the first owner, in ring order, that actually holds it — so exactly one node
+// pushes (no duplicate sends), and a pusher exists whenever anybody has the data.
+// A node ranked below a holder stands down; a node ranked above one, or holding a
+// key no owner has at all (a leftover from an older ring), steps up.
 func (n *Node) heal() {
-	for key, value := range n.cache.Snapshot() {
+	// Batched by target: one pass that pushes 8 keys to n4 is one record, not
+	// eight. A per-key record would flood the dashboard's log and push the kill
+	// event that caused the heal out of view.
+	moved := map[string][]string{}
+
+	start := time.Now()
+	snapshot := n.cache.Snapshot()
+	causes := n.drainHealCauses() // what my heartbeat saw that made this pass happen
+	var healerFor, deferred, alreadyPresent, unreachable, failed int
+
+	log := n.logger()
+	log.Info("heal pass starting: for every key I hold, checking whether each of its owners actually holds a copy, and pushing only the ones that are missing. I push a key only if no owner ahead of me in ring order has it — so exactly one node sends each key, and a sender always exists as long as somebody has the data",
+		"keys_held", len(snapshot),
+		"triggered_by", strings.Join(causes, "; "),
+	)
+
+	for key, value := range snapshot {
 		select {
 		case <-n.done:
+			log.Info("heal pass aborted: the node is shutting down mid-scan",
+				"copies_made_before_abort", len(moved))
 			return // stop promptly on Close rather than finish a long scan
 		default:
 		}
 
 		owners := n.ownersFor(key)
-		// Only the primary coordinates a key's heal, so co-owners don't all push
-		// the same key to the same target.
-		if len(owners) == 0 || owners[0].id != n.id {
+		if len(owners) == 0 {
+			continue // no live owner at all: nowhere to send it
+		}
+
+		// My rank among this key's owners, or last if I am not an owner — a holder
+		// left over from an older ring still has to be able to heal, or a key whose
+		// owners ALL lack it would have no sender at all.
+		rank := len(owners)
+		for i, o := range owners {
+			if o.id == n.id {
+				rank = i
+				break
+			}
+		}
+
+		// Stand down if any owner ahead of me holds the key: that node is the healer,
+		// and two senders would mean duplicate copies of every key.
+		standDown := false
+		for _, o := range owners[:min(rank, len(owners))] {
+			if _, has, err := n.fetchFrom(o.addr, key); err == nil && has {
+				standDown = true
+				break
+			}
+		}
+		if standDown {
+			deferred++
+			log.Debug("standing down on this key: an owner ahead of me in ring order holds it, so it is the healer and I would only be duplicating its work",
+				"key", key)
 			continue
 		}
-		for _, o := range owners[1:] {
-			if _, has, err := n.fetchFrom(o.addr, key); err != nil || has {
-				continue // unreachable (can't copy) or already holds it (nothing to do)
+
+		healerFor++
+		for _, o := range owners {
+			if o.id == n.id {
+				continue // I have it; that's why I'm the healer
 			}
-			n.storeOn(o.addr, key, value)
+			_, has, err := n.fetchFrom(o.addr, key)
+			switch {
+			case err != nil:
+				unreachable++ // can't copy to a node we can't reach; a later pass retries
+				log.Debug("skipping an owner that did not answer the check: cannot copy to a node I cannot reach, so this key stays under-replicated until it returns",
+					"key", key, "owner", o.id, "err", err)
+				continue
+			case has:
+				alreadyPresent++ // check-first paying off: no copy needed
+				log.Debug("owner already holds this key, so no copy is made — this is the check-first heal skipping needless work",
+					"key", key, "owner", o.id)
+				continue
+			}
+			if err := n.storeOn(o.addr, key, value); err != nil {
+				failed++
+				log.Warn("a heal copy failed to land: the owner answered the check but rejected the write, so this key is still under-replicated",
+					"key", key, "owner", o.id, "err", err)
+				continue // record only copies that actually landed
+			}
 			n.healCopies.Add(1)
+			moved[o.id] = append(moved[o.id], key)
+			log.Debug("copied a missing key to one of its owners, restoring one replica",
+				"key", key, "to", o.id)
 		}
 	}
+
+	copies := 0
+	for _, keys := range moved {
+		copies += len(keys)
+	}
+
+	// A pass that copied nothing is the healthy case (a flap, or nothing owed) and
+	// the one that copied something is the news — so they get different levels.
+	attrs := []any{
+		"copies", copies,
+		"targets", len(moved),
+		"healer_for_keys", healerFor,
+		"stood_down_on_keys", deferred,
+		"already_present", alreadyPresent,
+		"unreachable_owners", unreachable,
+		"failed_copies", failed,
+		"took", time.Since(start).Round(time.Millisecond),
+		"heal_copies_total", n.healCopies.Load(),
+	}
+	if copies == 0 {
+		log.Info("heal pass finished having copied nothing: every owner already held what it should, so the membership change cost zero replication — this is what the grace period buys on a false alarm", attrs...)
+	} else {
+		for to, keys := range moved {
+			slices.Sort(keys)
+			log.Info("heal pass re-replicated keys to a peer, restoring the replication factor for them",
+				"to", to, "count", len(keys), "keys", strings.Join(keys, ","))
+		}
+		log.Info("heal pass finished: the keys the dead node held are replicated again, so the cluster is back to full replication and keeps serving", attrs...)
+	}
+
+	n.recordHeal(moved, causes)
+}
+
+// HealCopy is one heal pass's worth of keys pushed to a single target, for the
+// dashboard: "this node sent these keys to that node, because of this."
+type HealCopy struct {
+	To    string
+	Keys  []string
+	Cause string // the membership change THIS node saw that triggered the pass
+}
+
+// recordHeal files what a heal pass moved. Bounded: a dashboard that stops
+// draining must not grow this without limit.
+func (n *Node) recordHeal(moved map[string][]string, causes []string) {
+	if len(moved) == 0 {
+		return // a heal that copied nothing (the healthy case) is not news
+	}
+	cause := strings.Join(causes, " and ")
+	targets := slices.Sorted(maps.Keys(moved)) // stable order for a stable render
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	for _, to := range targets {
+		keys := moved[to]
+		slices.Sort(keys)
+		n.healLog = append(n.healLog, HealCopy{To: to, Keys: keys, Cause: cause})
+	}
+	if over := len(n.healLog) - maxHealLog; over > 0 {
+		n.healLog = slices.Delete(n.healLog, 0, over) // drop oldest
+	}
+}
+
+// noteHealCause records a membership change this node observed, to be attached to
+// the heal pass it triggers. The node is the only one that can say this honestly:
+// the manager knows it killed n2, but what makes THIS node heal is that ITS OWN
+// heartbeat stopped hearing from n2 — and two nodes can disagree about that (a
+// false positive is exactly one node seeing a death nobody else sees). So the
+// dashboard shows each heal attributed to the observation that actually caused it.
+//
+// Caller holds n.mu (heartbeatRound does). Takes healLogMu, never the reverse, so
+// there is no lock-order inversion.
+func (n *Node) noteHealCause(cause string) {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	if !slices.Contains(n.healCauses, cause) { // a flap can report the same thing twice
+		n.healCauses = append(n.healCauses, cause)
+	}
+}
+
+// drainHealCauses takes the membership changes observed since the last heal pass.
+// Coalescing means one pass can answer several changes at once, so this returns
+// all of them.
+func (n *Node) drainHealCauses() []string {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	out := n.healCauses
+	n.healCauses = nil
+	return out
+}
+
+// DrainHealLog returns everything this node has copied since the last drain, and
+// clears it. The manager polls this to build the dashboard's heal log.
+func (n *Node) DrainHealLog() []HealCopy {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	if len(n.healLog) == 0 {
+		return nil
+	}
+	out := n.healLog
+	n.healLog = nil
+	return out
 }
 
 // PauseHealth stalls (or resumes) this node's /health responses. The node keeps
 // serving everything else — it is a live node that merely looks silent, so peers
 // with a short timeout will falsely declare it dead. For the false-positive demo.
-func (n *Node) PauseHealth(paused bool) { n.healthPaused.Store(paused) }
+func (n *Node) PauseHealth(paused bool) {
+	n.healthPaused.Store(paused)
+	if paused {
+		n.logger().Warn("health replies stalled by fault injection: this node is fully alive and still serving reads and writes, but it will stop answering health pings, so its peers will wrongly conclude it died")
+	} else {
+		n.logger().Info("health replies resumed: peers will see this node answer on their next ping and re-admit it to their rings")
+	}
+}
 
 // HealthPaused reports whether this node's health replies are currently stalled,
 // for the dashboard to show the false-positive injection state.
@@ -449,10 +700,20 @@ func (n *Node) ID() string { return n.id }
 func (n *Node) Close() error {
 	var err error
 	n.closeOnce.Do(func() {
+		log := n.logger()
+		log.Info("node stopping: it will go silent, and its peers must now notice on their own via heartbeat rather than being told",
+			"keys_held", len(n.HeldKeys()),
+			"heal_copies_total", n.healCopies.Load(),
+		)
 		close(n.done) // stop the heartbeat loop first
 		n.wg.Wait()
 		err = n.srv.Shutdown(context.Background())
 		n.cache.Close()
+		if err != nil {
+			log.Error("node's HTTP server did not shut down cleanly", "err", err)
+			return
+		}
+		log.Info("node stopped: heartbeat and heal loops are done and the HTTP server is closed")
 	})
 	return err
 }
@@ -492,8 +753,9 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log := n.logger()
 	reachedNone := true
-	for _, o := range owners {
+	for i, o := range owners {
 		var (
 			v   string
 			ok  bool
@@ -505,19 +767,30 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 			v, ok, err = n.fetchFrom(o.addr, key)
 		}
 		if err != nil {
+			log.Warn("an owner of this key could not be reached on a read, so falling back to the next owner in ring order — this is the replica fallback that keeps reads serving after a node dies",
+				"key", key, "unreachable_owner", o.id, "owner_rank", i, "of_owners", len(owners), "err", err)
 			continue // owner unreachable: fall back to the next
 		}
 		reachedNone = false
 		if ok {
+			if i > 0 {
+				log.Info("read served from a fallback replica rather than the primary, because an earlier owner was unreachable — the kill did not cost us this read",
+					"key", key, "served_by", o.id, "owner_rank", i)
+			} else {
+				log.Debug("read served by the key's primary owner", "key", key, "served_by", o.id)
+			}
 			io.WriteString(w, v)
 			return
 		}
 	}
 
 	if reachedNone {
+		log.Error("read failed: every owner of this key was unreachable, so the cluster cannot answer — this is real unavailability, not a miss",
+			"key", key, "owners", len(owners))
 		http.Error(w, "all owners unreachable", http.StatusBadGateway)
 		return
 	}
+	log.Debug("read is an honest miss: an owner answered but does not hold this key", "key", key)
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
@@ -538,22 +811,32 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acks := 0
+	log := n.logger()
+	acks, ownerIDs := 0, make([]string, 0, len(owners))
 	for _, o := range owners {
+		ownerIDs = append(ownerIDs, o.id)
 		if o.id == n.id {
 			n.cache.Set(key, value, 0)
 			acks++
 			continue
 		}
-		if err := n.storeOn(o.addr, key, value); err == nil {
-			acks++
+		if err := n.storeOn(o.addr, key, value); err != nil {
+			log.Warn("a write to one of this key's owners failed, so that replica is missing the value — the write can still succeed if enough other owners ack, and a later heal will repair this copy",
+				"key", key, "owner", o.id, "err", err)
+			continue
 		}
+		acks++
 	}
 
-	if acks < n.writeQuorum {
+	quorum := n.writeQuorum
+	if acks < quorum {
+		log.Error("write rejected: fewer owners acknowledged than the write quorum requires, so we refuse rather than claim a durability we do not have",
+			"key", key, "acks", acks, "write_quorum", quorum, "owners", strings.Join(ownerIDs, ","))
 		http.Error(w, "write quorum not met", http.StatusBadGateway)
 		return
 	}
+	log.Debug("write accepted: enough owners acknowledged to meet the write quorum",
+		"key", key, "acks", acks, "write_quorum", quorum, "owners", strings.Join(ownerIDs, ","))
 	w.WriteHeader(http.StatusNoContent)
 }
 

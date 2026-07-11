@@ -1,11 +1,22 @@
-import { killNode, pauseNode, reviveNode, type NodeState } from '../api'
+import { useState } from 'react'
+import { errMsg, killNode, pauseNode, reviveNode, type NodeState } from '../api'
 import { colorFor } from '../geometry'
 
 export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: () => void }) {
+  const [err, setErr] = useState<string | null>(null)
+
   const act = async (fn: () => Promise<void>) => {
-    await fn()
-    onAction() // force an immediate refresh so the UI reacts at once
+    setErr(null)
+    try {
+      await fn()
+    } catch (e) {
+      // Say so out loud. A kill that quietly failed is indistinguishable from a
+      // cluster that ignored the kill — and this panel exists to be trusted.
+      setErr(errMsg(e))
+    }
+    onAction() // refresh either way: on failure it re-syncs the UI with the truth
   }
+
   return (
     <div className="card">
       <h2>Failure injection</h2>
@@ -41,6 +52,7 @@ export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: (
           </div>
         ))}
       </div>
+      {err && <div className="api-err">⚠ {err}</div>}
     </div>
   )
 }

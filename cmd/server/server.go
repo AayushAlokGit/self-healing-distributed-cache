@@ -2,14 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
 )
 
 // routes wires the control API. The UI is the React app in frontend/, served
 // separately (Vite in dev, a static host in prod) and talking to this API.
-func routes(c *cluster.Cluster) http.Handler {
+func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) {
@@ -89,7 +91,68 @@ func routes(c *cluster.Cluster) http.Handler {
 
 	// CORS so the React app (a different origin in dev via Vite's proxy, or a
 	// separate static host in prod) can call the API.
-	return withCORS(mux)
+	return withLogging(withCORS(mux), log)
+}
+
+// noisyPaths are polled by the dashboard several times a second. Logging them at
+// Info would bury every interesting line — a kill, a heal — under thousands of
+// identical polls, which is the usual way an access log becomes useless. They log
+// at Debug instead: still there when you go looking, never in the way.
+var noisyPaths = map[string]bool{"/api/state": true}
+
+// withLogging records every HTTP request the frontend makes: what it asked for,
+// what it got, and how long it took. This is the outermost layer, so the duration
+// includes everything inside it (CORS, handler, the cluster's network round trips
+// to the nodes).
+func withLogging(h http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		h.ServeHTTP(rec, r)
+
+		level := slog.LevelInfo
+		switch {
+		case noisyPaths[r.URL.Path]:
+			level = slog.LevelDebug
+		case rec.status >= 500:
+			level = slog.LevelError
+		case rec.status >= 400:
+			level = slog.LevelWarn
+		}
+
+		log.Log(r.Context(), level, "handled an API request from the dashboard",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"query", r.URL.RawQuery,
+			"status", rec.status,
+			"bytes", rec.written,
+			"took", time.Since(start).Round(time.Millisecond),
+			"client", r.RemoteAddr,
+		)
+	})
+}
+
+// statusRecorder wraps a ResponseWriter to remember the status code and byte count
+// the handler wrote. An http.ResponseWriter will not tell you what it sent — the
+// only way to log a response's status is to intercept the call that sets it.
+type statusRecorder struct {
+	http.ResponseWriter
+	status  int
+	written int
+}
+
+// WriteHeader records the status on the way through. Note the handler may never
+// call it: a bare Write implies 200, which is why status is seeded to 200 above.
+func (s *statusRecorder) WriteHeader(status int) {
+	s.status = status
+	s.ResponseWriter.WriteHeader(status)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(b)
+	s.written += n
+	return n, err
 }
 
 // withCORS allows any origin to call the control API — fine for a demo whose

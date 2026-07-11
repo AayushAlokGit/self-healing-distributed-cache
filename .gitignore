@@ -11,6 +11,10 @@
 *.out
 coverage.*
 
+# Server logs (the log file is a run artifact, not source)
+/logs/
+*.log
+
 # Go workspace file
 go.work
 go.work.sum

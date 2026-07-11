@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
@@ -15,7 +16,7 @@ type State struct {
 	RF              int         `json:"rf"`
 	AliveCount      int         `json:"aliveCount"`
 	TotalHealCopies int64       `json:"totalHealCopies"`
-	Events          []Event     `json:"events"`
+	Events          []Event     `json:"events"` // kills, writes AND heals, in order
 }
 
 // NodeState is one physical node's status and ring position.
@@ -73,6 +74,22 @@ func (c *Cluster) State() State {
 		totalHeal += n.HealCopies()
 		for _, k := range n.HeldKeys() {
 			holdersByKey[k] = append(holdersByKey[k], id)
+		}
+		// Collect what this node re-replicated since the last poll and file it in the
+		// SAME activity log as the kills. The node is the only one that knows what it
+		// copied, and only IT can say why (its own heartbeat saw the peer go silent) —
+		// the manager just appends. Because the append happens now, and the kill's
+		// append happened earlier, the heal lands after its cause with no ordering
+		// logic anywhere: the list IS the causality.
+		for _, hc := range n.DrainHealLog() {
+			c.appendEvent(Event{
+				Kind:  "heal",
+				Msg:   fmt.Sprintf("%s → %s: re-replicated %d key%s", id, hc.To, len(hc.Keys), plural(len(hc.Keys))),
+				From:  id,
+				To:    hc.To,
+				Keys:  hc.Keys,
+				Cause: hc.Cause,
+			})
 		}
 	}
 

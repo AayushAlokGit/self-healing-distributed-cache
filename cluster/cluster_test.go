@@ -1,6 +1,9 @@
 package cluster
 
 import (
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,6 +134,175 @@ func TestSeedAppendsRatherThanRewrites(t *testing.T) {
 	if _, ok := keyState(st, "key:19"); !ok {
 		t.Errorf("key:19 missing: the second Seed(8) did not continue past the first batch")
 	}
+}
+
+// The dashboard's heal log must name what actually moved: which keys, from which
+// node, to which node. The copy *counter* can only say "24 copies happened"; this
+// is the evidence behind that number, and it is the money moment made legible.
+func TestHealLogNamesTheKeysThatMoved(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(12); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Nothing has died, so nothing should have moved: a healthy cluster logs no heals.
+	// (A heal that copies nothing must not file a record.)
+	if h := healEvents(c.State()); len(h) != 0 {
+		t.Fatalf("no death yet, want no heal events, got %v", h)
+	}
+
+	killID := lastEventID(c.State()) // everything after this is a consequence of...
+	if err := c.Kill("n2"); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	// Detection (~500ms) + grace (500ms) + the copies themselves. State() is what
+	// drains the nodes' records, so polling it is also what builds the log.
+	waitUntil(t, 5*time.Second, "a heal event to be logged", func() bool {
+		return len(healEvents(c.State())) > 0
+	})
+
+	st := c.State()
+	live := map[string]bool{"n0": true, "n1": true, "n3": true, "n4": true}
+	seen := map[string]bool{}
+	for _, h := range healEvents(st) {
+		// Ordering is the whole point of merging heals into the activity log: a heal
+		// must be logged AFTER the kill that caused it, so a viewer reading top-down
+		// sees cause then effect without the UI having to reconstruct anything.
+		if h.ID <= killID {
+			t.Errorf("heal %d was logged before the kill (id %d) that caused it — the log's order is not causal", h.ID, killID)
+		}
+		if !live[h.From] || !live[h.To] {
+			t.Errorf("heal %d: %s -> %s, but the dead node cannot send or receive", h.ID, h.From, h.To)
+		}
+		if h.From == h.To {
+			t.Errorf("heal %d: node %s copied to itself", h.ID, h.From)
+		}
+		if len(h.Keys) == 0 {
+			t.Errorf("heal %d: %s -> %s recorded with no keys", h.ID, h.From, h.To)
+		}
+		// The sender must say what IT saw that made it heal — not what the manager
+		// did. Those are different facts, and only the node can report the first.
+		if !strings.Contains(h.Cause, "n2") {
+			t.Errorf("heal %d: cause is %q, want it to name the peer (n2) whose silence the sender observed", h.ID, h.Cause)
+		}
+		for _, k := range h.Keys {
+			seen[k] = true
+			// The receiver must actually hold what the log claims it was sent.
+			ks, ok := keyState(st, k)
+			if !ok {
+				t.Errorf("heal %d names key %q, which is not in the cluster", h.ID, k)
+				continue
+			}
+			if !slices.Contains(ks.Holders, h.To) {
+				t.Errorf("heal %d claims %s got %q, but its holders are %v", h.ID, h.To, k, ks.Holders)
+			}
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("heal log recorded no keys at all")
+	}
+	t.Logf("heal log: %d events covering %d distinct keys", len(healEvents(st)), len(seen))
+}
+
+// healEvents pulls just the heal entries out of the unified activity log.
+func healEvents(st State) []Event {
+	var out []Event
+	for _, e := range st.Events {
+		if e.Kind == "heal" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// lastEventID is the newest event id, so a test can assert that later events came
+// after it.
+func lastEventID(st State) uint64 {
+	if len(st.Events) == 0 {
+		return 0
+	}
+	return st.Events[len(st.Events)-1].ID
+}
+
+// underReplicated names every key that does not have as many holders as it should.
+func underReplicated(st State) []string {
+	var out []string
+	for _, k := range st.Keys {
+		if k.UnderReplicated {
+			out = append(out, k.Key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// THE STRANDED-KEY BUG. The heal used to say "only the PRIMARY of a key pushes it,"
+// which quietly requires one node to be both the primary AND a holder. Kill enough
+// nodes that the survivors end up holding keys they do not own, then revive
+// everything: the revived nodes are promoted straight back to primary of their own
+// arcs while holding NOTHING. The primary then has nothing to send, and the nodes
+// that do have the key are not the primary, so they stand down. Nobody is both, and
+// the key stays under-replicated forever — no further membership change is coming
+// to retrigger anything.
+//
+// The fix ties the right to push to the DATA rather than to the ring position: the
+// healer is the first owner, in ring order, that actually holds the key. Exactly one
+// sender (no duplicate copies) and a sender always exists (nothing is stranded).
+func TestReviveRestoresFullReplication(t *testing.T) {
+	c := New(3, 1, 300*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(20); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Down to two nodes: with R=3 and 2 alive, the survivors end up holding every
+	// key, including many they are not owners of once the others return.
+	for _, victim := range []string{"n1", "n2", "n3"} {
+		if err := c.Kill(victim); err != nil {
+			t.Fatalf("kill %s: %v", victim, err)
+		}
+		time.Sleep(1200 * time.Millisecond) // let detection + grace + heal settle
+	}
+	if got := c.State().AliveCount; got != 2 {
+		t.Fatalf("want 2 nodes alive, got %d", got)
+	}
+
+	for _, id := range []string{"n1", "n2", "n3"} {
+		if err := c.Revive(id); err != nil {
+			t.Fatalf("revive %s: %v", id, err)
+		}
+	}
+
+	// Every key must get back to R=3 with NO client writes — the heal alone.
+	waitUntil(t, 15*time.Second, "every key to return to full replication after the revives", func() bool {
+		return len(underReplicated(c.State())) == 0
+	})
+
+	st := c.State()
+	if got := st.AliveCount; got != 5 {
+		t.Fatalf("want 5 nodes alive, got %d", got)
+	}
+	for _, k := range st.Keys {
+		if len(k.Holders) < 3 {
+			t.Errorf("key %q: %d holders %v, want 3 (owners %v)", k.Key, len(k.Holders), k.Holders, k.Owners)
+		}
+		// And the owners must be the holders: a key parked on two leftover nodes that
+		// do not own it is "replicated" only by accident, and the next kill loses it.
+		for _, o := range k.Owners {
+			if !slices.Contains(k.Holders, o) {
+				t.Errorf("key %q: owner %s does not hold it (holders %v) — stranded", k.Key, o, k.Holders)
+			}
+		}
+	}
+	t.Logf("all %d keys back to R=3 on their true owners, by heal alone", len(st.Keys))
 }
 
 // nodeKeyCount reads a node's key count from a snapshot.
