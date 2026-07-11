@@ -10,6 +10,130 @@ Question text + model answers, so quizzes can be re-asked cold weeks later. Scor
 
 ---
 
+## Session 9 — 2026-07-11 · Phase 5 + Phase 6 MILESTONE QUIZ
+
+The per-phase review the ritual owed. 8 Q. **2 ✅ · 3 ⚠️ · 3 ⊘.**
+
+**The through-line across the three ⚠️:** Aayush can state *what the code does* and stops one step short
+of *the principle it instances*. "Cheap vs expensive" but not "reversible vs irreversible"; "ownership is
+deterministic" but not "the ring promotes the next clockwise node with nobody deciding"; "LWW or vector
+clocks" but not "the heal skips the conflict and preserves it forever." Machinery solid, framing thin.
+The one genuine *gap* (not vocabulary): **presence ≠ version.**
+
+**Q0 (cold re-ask, Session 7's ⚠️) — Why must `Snapshot()` not update recency? — ✅.**
+Named the failure mode this time ("same problem as a sequential scan; keys lose the recency they earned
+from real access"). **Sharpened:** keys don't *lose* recency, they all *gain* it at once — identical
+outcome, because a recency ordering is information held in the **differences** between entries. Promote
+everything and the LRU tail becomes whatever the heal's map iteration touched first, so the next eviction
+picks its victim from the heal's traversal order rather than user behavior. Worse than a client scan: a
+heal touches **every** primary key, on **every** membership change — the cache polluted by its own
+maintenance, exactly when it most needs to be healthy. **The rule:** an internal bulk scan must never be
+indistinguishable from user access; maintenance paths (heal, snapshot, sweeper) read *around* the policy,
+not through it. That is why `Snapshot()` exists instead of a loop over `Get()`.
+**Carried-forward debt from Session 7 is now CLOSED.**
+
+**Q1 — Who heals; and who repopulates `k` when `k`'s primary dies, with no election? — ⚠️.**
+Got primary-only and its cost correctly: without it, all R owners push to the other R−1, so each key is
+copied R×(R−1) instead of R−1 — converges anyway (idempotent overwrite), at 3× the bandwidth.
+**Missed the promotion mechanism.** `ownersFor()` is computed against the **alive ring**. Remove `n2` and
+`GetClockwiseN(k,3)` returns a *different list*: the old replica #1 is now at index 0 — **it is the
+primary**, it already holds a copy (R=3 put one there), and its next `heal()` sees `owners[0].id == n.id`
+and pushes to the new owner set. **Nobody assigned the role. Removing a node from a sorted ring promotes
+the next clockwise node by construction** — the promotion is a side effect of the data structure, not a
+decision. That is what "no coordinator, no election" cashes out to in code.
+**Also sharpened:** his "eventually all nodes agree on membership" is doing too much work — there is **no
+consensus**; a partitioned node can disagree *forever*. What saves us is that disagreement is **safe**:
+two nodes both believing they're primary both push, and the pushes are idempotent. We *tolerate* divergent
+views rather than prevent them. AP being AP.
+
+**Q2 — State the rule that decides which reaction fires instantly and which waits. Name the price. — ⚠️.**
+Gave one of the two properties ("cheap vs expensive," "more evidence to pay a big cost"). **Missed
+reversibility**, which is the load-bearing half. `ring.Remove` is cheap **and undoable** — `ring.Add` puts
+it back and *nothing happened*. Re-replication is expensive **and unrecoverable** — you cannot un-send a
+copy; the bandwidth is spent whether or not the premise was true.
+> **React to a suspicion immediately with anything cheap and reversible. Make anything expensive or
+> irreversible wait for confirmation.** The evidence threshold is set by the cost of being *wrong*, not
+> by the cost of the action.
+
+**Did not name the price:** a *genuine* death now heals in **~1.55s vs ~550ms**. Storm-immunity bought
+with ~1s of extra under-replication exposure — Session 7's Q6 made concrete: *every mitigation that delays
+a wrong conviction delays a correct one by exactly as much, because a slow node and a dead node are the
+same silence.*
+
+**Q3 — Check-first should make a false positive cost 0 copies. It cost ~49. Why? — ✅.**
+The hardest question on the page, answered cleanly from the mechanism, unprompted. Removing the paused
+node from the ring **shifts the owner set**: `GetClockwiseN(k,3)` now returns a node that was *not*
+previously an owner. That **newcomer genuinely does not have the key**, so check-first gets a genuine 404
+and does genuinely-necessary work. The copies are not redundant — they are **correct given a false
+premise.** Hence the two mitigations are not substitutes:
+- **check-first** eliminates work that is *redundant* (the copy already exists);
+- **the grace period** eliminates work that is *correct but predicated on a lie*.
+
+**Q4 — A revived node holds a *different* value for `k`. Trace the heal, the client read, and the fix. — ⚠️.**
+Named LWW / vector clocks (correct fix vocabulary) but did not run the mechanism, and the mechanism is
+uglier than he assumed. `node.go:395` — `if _, has, err := n.fetchFrom(...); err != nil || has { continue }`
+— **`has` is presence, not version.** The revived node answers *"200, I have it"* → the heal **skips it**.
+The heal neither creates nor resolves the divergence: it **silently preserves it forever**, and no
+anti-entropy pass ever revisits that key.
+And the read is not "the primary serves stale" — `handleClientGet` (`node.go:496`) returns **the first
+reachable hit in ring order**, so which of the two conflicting values a client sees is decided by **ring
+geometry**, an accident of where `sha256(key)` landed. Worse than random because it's *stable*: the
+cluster will confidently serve one value forever while a different one sits on another node, unnoticed.
+**Fix = three parts, he named one:** (1) version every value (LWW timestamp, or a vector clock if you want
+to *detect* concurrency rather than silently pick); (2) heal compares **versions, not presence** — that is
+what turns the heal into a real **anti-entropy** pass; (3) **read-repair**, or the cluster only converges
+on membership *changes* and a stable cluster never converges at all.
+**GAP (the only real one this quiz): presence ≠ version.** `has == true` means "somebody has *a* value,"
+not "somebody has *the* value." The entire AP staleness story lives in that gap.
+
+**Q5 — Why is `Cluster.State()`'s god's-eye view impossible in a real deployment? — ⊘ (taught).**
+It reaches into every node's cache and ring **from one process at one instant** — possible only because the
+nodes are goroutines sharing an address space. Really distributed, **there is no such instant**: five
+machines means five messages and five replies describing five *different moments*, each a fact about the
+past by the time it lands. No observer stands outside the system.
+Recall Phase 4: **each node's `alive` view is its own, and views legitimately disagree.** So a real
+dashboard cannot show "the ring" — **there is no such object**. It must poll each node for *its own view*
+and render N of them, and during the ~500ms detection window it would show them **contradicting each
+other**: `n0` says `n2` is dead and has re-routed; `n2` says it is fine and is still serving; `n3` hasn't
+timed out yet and still routes to `n2`. **All three are correct.** There is no fact of the matter about
+whether `n2` is dead — ***dead* is not a property of a node, it is a belief held by an observer.**
+The honest dashboard shows a **union of beliefs**; the flickering disagreement during a failure is not a
+rendering bug, it *is* the distributed system. → **Belongs in the writeup next to the cluster-in-a-box
+caveat: same honesty, one layer up.**
+
+**Q6 — Why is even-spaced node placement honest, and what must keep its true hash angle? — ⊘ (taught).**
+**A node does not have a position on the ring.** It has ~150 (`defaultReplicas = 150`), scattered by
+`hashKey(node+"#"+i)` — the scattering *is* the mechanism that took the load span from **65× to 1.4×**.
+"Where is `n2`?" has **no answer**. Drawing it at `hash("n2")` picks one arbitrary point out of 150 and
+dresses it up as *the* location: precise-looking and meaningless. (Empirically it also clustered n0/n3/n4
+at the bottom, which reads as "those nodes are neighbors" — false, and false in a way that undermines the
+lesson the ring exists to teach.) Even spacing claims nothing; it is a legend.
+Two things **must** keep their true angle: the **~150 virtual-point ticks** (they are the real load
+distribution — faking them fakes the property Phase 2 spent itself measuring) and the **key dots** (a key's
+angle *is* its identity, `sha256(key)`; the arc it lands in decides its owner, so the ownership links are
+meaningful only because the angles are real).
+> **Fake the thing that has no true value; never fake the thing whose value is the mechanism.**
+
+**Q7 — How would you make the heal O(under-replicated keys)? What must you track, and what does it cost? — ⊘ (taught).**
+Today: O(primary keys) × (R−1) round-trips on **every** membership change — 10k keys at R=3 is 20,000
+`fetchFrom` calls to discover ~50 needed copies. Check-first made it cheap in *bytes*; it did nothing for
+**chattiness**.
+The ring already knows which keys moved: when `d` dies, the only keys whose owner set changed lie in **the
+arcs `d` owned** (the ~150 arcs ending at its virtual points). Everything else maps to the same three nodes
+as before, and re-checking it is pure waste. **Sketch:** (1) diff old ring vs new → the changed arcs;
+(2) scan the primary keyset **restricted to those arcs**; (3) push straight to the newcomer — **no presence
+check needed**, since a node that was not an owner cannot have the key.
+**What you'd have to track:** the cache is `map[string]*node` — no hash order, so "keys in arc [a,b)" is
+unanswerable without a full scan. You need a **hash-ordered index**, maintained on every `Set` and every
+eviction.
+**The tradeoff (this is the actual answer):** you make the **rare** path (a death) cheaper by taxing the
+**hot** path (every `Set`, forever) with an ordered-index insert — plus a second structure that can drift
+out of sync with `data`, a bug class that already cost us `TestExpiringIndexStaysConsistent`. **Deaths are
+rare; `Set`s are not.** By this project's own rules: **don't build it until a measured heal is too slow.**
+Same verdict as segmented LRU, reached the same way.
+
+---
+
 ## Session 7 — 2026-07-10 · Phase 5 quick-checks (self-heal)
 
 Asked after teaching each design piece, before/around the build. Running tally below.
@@ -392,6 +516,16 @@ deletes, so it couldn't take an `RLock` anyway.)
 ---
 
 ## Carried forward — re-ask cold
+
+**Open (from the Session 9 milestone quiz, 2026-07-11):**
+1. **Presence ≠ version** (S9 Q4) — the only genuine knowledge gap on the board. Re-ask cold: *"A revived
+   node answers `200, I have it` for key `k`, but its value differs from the primary's. What does
+   `heal()` do, and what does a client read return?"* Looking for: the heal **skips** it (`has` is
+   presence, not version) and thus **preserves the conflict forever**; the read returns the **first
+   reachable owner in ring order**, so ring geometry decides — stably, silently.
+2. **Reversibility, not just cost** (S9 Q2) — re-ask: *"State the rule for which reaction to a suspected
+   death fires instantly and which waits. Two properties."* He reliably produces "cheap/expensive" and
+   drops "reversible/irreversible."
 
 **Retired 2026-07-10 at Aayush's request — do not re-ask.** The Phase 1 carry-forward list
 (check-then-act, compare-don't-remember, starvation mechanism, happens-before, resource semantics,

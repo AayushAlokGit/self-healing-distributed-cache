@@ -17,15 +17,33 @@ session and after each milestone. Newest entries at the top of the log.
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **The core project and demo are COMPLETE (Phases 0–6).** `go run ./cmd/server`.
-  **Candidate next steps (all optional polish):** (a) **milestone quizzes** for Phase 5 and Phase 6
-  (the per-phase review the ritual calls for — not yet taken); (b) optimize the naive heal to copy
-  only *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner);
+- **Session 9 (2026-07-11): Phase 5 + Phase 6 MILESTONE QUIZ taken — 2 ✅ · 3 ⚠️ · 3 ⊘.** Full text in
+  `docs/QUIZZES.md`. **Q0 (the carried-forward Snapshot-recency ⚠️) re-asked cold → ✅; that debt is
+  CLOSED.** Q3 (why check-first *still* costs ~49 copies on a false positive — the ring shifts the owner
+  set, so a *newcomer* genuinely lacks the key; the work is correct given a false premise) was the
+  hardest question and was answered cleanly, unprompted. **The through-line across the three ⚠️:** he
+  states *what the code does* and stops one step short of *the principle it instances*. **The one real
+  gap: presence ≠ version** (S9 Q4) — `has == true` means "somebody has *a* value," not "*the* value," so
+  the heal **skips** a conflicting key and preserves the divergence forever, and a client read returns
+  the **first reachable owner in ring order** (ring geometry decides, stably and silently). Q5 (the
+  dashboard's god's-eye view is impossible in a real deployment — *dead* is a belief, not a property, so
+  an honest dashboard shows N disagreeing views), Q6 (a node has ~150 ring positions, so it has none —
+  fake what has no true value, never fake the mechanism), and Q7 (heal by ring-arc diff; the tradeoff is
+  taxing the hot `Set` path to speed up the rare death path) were **taught, not attempted**.
+- **Next action:** **The core project and demo are COMPLETE (Phases 0–6), and the milestone quizzes are
+  now done.** `go run ./cmd/server`. **Candidate next steps (all optional polish):**
+  (a) ~~milestone quizzes for Phase 5/6~~ **DONE (Session 9)**; (b) optimize the naive heal to copy
+  only *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner) —
+  **S9 Q7 sketched the design and argued *against* building it**: it taxes every `Set` forever to speed
+  up a rare death, so don't build it until a measured heal is too slow;
   (c) ~~the genuine-recovery repopulation gap~~ **DONE (Session 8: check-first heal repopulates)**;
-  (d) deploy the demo to
-  a free host + writeup; (e) hinted handoff / read-repair for the AP staleness gaps. Pick per Aayush's
-  interest. **Carried-forward to re-ask cold:** the Snapshot-recency ⚠️ (it's the Phase-1
-  sequential-scan LRU pollution) from Session 7. **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
+  (d) **deploy the demo to a free host + writeup** ← *recommended next*; the writeup should carry S9
+  Q5's honesty (no god's-eye view exists) alongside the cluster-in-a-box caveat;
+  (e) **versioned values + read-repair** for the AP staleness gaps — this is now the highest-value
+  *code* change, since S9 Q4 showed the heal silently preserves conflicts forever. Pick per Aayush's
+  interest. **Carried-forward to re-ask cold (new, from S9):** (1) **presence ≠ version**;
+  (2) **reversibility, not just cost**, as the rule splitting the instant reaction from the delayed one.
+  **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
   now **✅** — sharpened that the data loss happens at *reconciliation* (LWW silently drops the older
   acked write), not at the conflict itself. Q6 (false-positive mitigations + the universal tradeoff)
   **taught, not attempted — third blank**; the tradeoff (every mitigation delays correct convictions
