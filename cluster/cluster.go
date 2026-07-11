@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -281,7 +280,10 @@ func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 
 	url := "http://" + coord + "/set/" + key
 	if ttl > 0 {
-		url += "?ttl=" + strconv.FormatFloat(ttl.Seconds(), 'f', -1, 64)
+		// The duration itself ("250ms", "2m0s"), not a float of seconds: exact at any
+		// scale, and legible in a log. parseTTL still accepts bare seconds for anyone
+		// driving the node API by hand.
+		url += "?ttl=" + ttl.String()
 	}
 	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader([]byte(value)))
 	if err != nil {
@@ -310,15 +312,42 @@ func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 	return nil
 }
 
+// ReadHop is what happened at one of a key's owners during a read, in ring order:
+// Rank 0 is the primary, the rest are replicas. Outcome is one of node.OutcomeHit,
+// OutcomeMiss, OutcomeUnreachable or OutcomeSkipped.
+type ReadHop struct {
+	Node    string `json:"node"`
+	Rank    int    `json:"rank"`
+	Role    string `json:"role"`    // primary | replica
+	Outcome string `json:"outcome"` // hit | miss | unreachable | skipped
+}
+
 // ReadResult is what a read reveals about the cluster, not just about the key.
-// ServedBy is the node that actually answered; Primary is the node the ring says
-// should have. When they differ, a replica covered for the primary — which is the
-// read fallback, and the whole point of having replicated the key at all.
+//
+// Coordinator is the node that took the request; ServedBy is the node the value
+// actually came from. They are usually different, and that is not a bug — any live
+// node can coordinate a read, because coordinating is just hashing the key and
+// asking its owners.
+//
+// Path is every owner of the key and what it said. It is the read fallback made
+// legible: without it, "servedBy n4" tells you a node answered but not that the two
+// owners ahead of it were asked and could not.
 type ReadResult struct {
-	Value    string `json:"value"`
-	Found    bool   `json:"found"`
-	ServedBy string `json:"servedBy,omitempty"`
-	Primary  string `json:"primary,omitempty"`
+	Value       string    `json:"value"`
+	Found       bool      `json:"found"`
+	Coordinator string    `json:"coordinator,omitempty"`
+	ServedBy    string    `json:"servedBy,omitempty"`
+	Path        []ReadHop `json:"path,omitempty"`
+}
+
+// Primary is the node the ring says should hold this key: the first owner clockwise.
+// Derived from the path rather than stored, so there is exactly one source of truth
+// for who the owners were.
+func (r ReadResult) Primary() string {
+	if len(r.Path) == 0 {
+		return ""
+	}
+	return r.Path[0].Node
 }
 
 // Fallback reports whether a replica answered because the primary could not.
@@ -329,8 +358,33 @@ type ReadResult struct {
 // exactly the state a revived node is in, since it comes back empty and the ring
 // promotes it straight back to primary of its own arcs before the heal has refilled
 // it. Both look identical to the client, and in both the replica saves the read.
+// Path is what tells them apart.
 func (r ReadResult) Fallback() bool {
-	return r.Found && r.ServedBy != "" && r.Primary != "" && r.ServedBy != r.Primary
+	p := r.Primary()
+	return r.Found && r.ServedBy != "" && p != "" && r.ServedBy != p
+}
+
+// parseReadPath decodes the trace the coordinator stamped on the response — see
+// node.FormatReadPath. A malformed hop is dropped rather than guessed at: this is a
+// display aid, and a read that succeeded must not be reported as failed because its
+// annotation was garbled.
+func parseReadPath(s string) []ReadHop {
+	if s == "" {
+		return nil
+	}
+	var hops []ReadHop
+	for i, hop := range strings.Split(s, ",") {
+		id, outcome, ok := strings.Cut(hop, ":")
+		if !ok || id == "" {
+			continue
+		}
+		role := "replica"
+		if i == 0 {
+			role = "primary" // first owner clockwise; the rest are its replicas
+		}
+		hops = append(hops, ReadHop{Node: id, Rank: i, Role: role, Outcome: outcome})
+	}
+	return hops
 }
 
 // Get reads a key through a live node. Found is false on a clean miss; err is set
@@ -354,22 +408,28 @@ func (c *Cluster) Get(key string) (ReadResult, error) {
 	body, _ := io.ReadAll(resp.Body)
 	took := time.Since(start).Round(time.Millisecond)
 
+	res := ReadResult{
+		Coordinator: resp.Header.Get(node.CoordinatorHeader),
+		ServedBy:    resp.Header.Get(node.ServedByHeader),
+		Path:        parseReadPath(resp.Header.Get(node.ReadPathHeader)),
+	}
+
 	switch resp.StatusCode {
 	case http.StatusOK:
-		res := ReadResult{
-			Value:    string(body),
-			Found:    true,
-			ServedBy: resp.Header.Get("X-Served-By"),
-			Primary:  resp.Header.Get("X-Primary"),
-		}
+		res.Value, res.Found = string(body), true
 		if res.Fallback() {
-			c.logf("read", "read %q from %s — its primary %s could not serve it, so a replica did", key, res.ServedBy, res.Primary)
+			c.mu.Lock()
+			c.logf("read", "read %q from %s — its primary %s could not serve it, so a replica did", key, res.ServedBy, res.Primary())
+			c.mu.Unlock()
 		}
-		c.logger().Debug("read hit", "key", key, "served_by", res.ServedBy, "fallback", res.Fallback(), "took", took)
+		c.logger().Debug("read hit", "key", key, "coordinator", res.Coordinator,
+			"served_by", res.ServedBy, "fallback", res.Fallback(), "took", took)
 		return res, nil
 	case http.StatusNotFound:
+		// A miss still carries the path: every owner answered and none had the key,
+		// which is a fact about the cluster and not merely about the key.
 		c.logger().Debug("read miss", "key", key, "took", took)
-		return ReadResult{}, nil
+		return res, nil
 	default:
 		c.logger().Error("read failed: all owners unreachable",
 			"key", key, "coordinator", coord, "status", resp.StatusCode, "took", took)

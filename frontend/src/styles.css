@@ -138,13 +138,45 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .ttl-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-right: 2px; }
 .ttl-opt { padding: 4px 9px; font-size: 11px; }
 .ttl-opt.on { --btn: var(--cyan); background: rgb(var(--btn) / 0.3); color: #8be9fd; }
+.ttl-custom { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
+.ttl-custom input { flex: 0 1 130px; padding: 6px 9px; font-size: 12.5px; }
+.ttl-custom .unit { font-size: 11px; color: var(--muted); }
+/* Echo the TTL back in the same words the key panel will count it down in, so a typo
+   is caught before the write rather than after the key has quietly vanished. */
+.ttl-preview { margin-left: auto; font-size: 11px; color: #8be9fd; font-variant-numeric: tabular-nums; }
 
 .result { font-size: 12px; color: var(--muted); min-height: 16px; margin-top: 6px; line-height: 1.7; }
 .result b { color: rgb(var(--ok)); }
 .result.miss b { color: rgb(var(--danger)); }
-/* The read fallback: a replica answered because the primary was gone. */
-.fallback-note { margin-top: 4px; font-size: 11px; color: var(--ok-ink); }
-.fallback-note b { color: var(--ok-ink); font-weight: 700; }
+.result .headline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+/* What the answering node was to this key. A replica answering IS the fallback — the
+   thing this whole cluster exists to do — so it is the one that gets the colour. */
+.served-role { font-size: 10.5px; color: var(--muted); }
+.served-role.fallback { color: var(--ok-ink); font-weight: 600; }
+
+/* The coordinator took the request but owns nothing here: it is greyed and set apart
+   from the trace below, because it is not one of the owners the read walked. */
+.coord { margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: 10.5px; color: var(--muted); opacity: 0.8; }
+
+/* The read path: one row per owner, in ring order. The left rule carries the verdict,
+   so the shape of a fallback is legible before a word of it is read — a red bar, then
+   an amber bar, then a green one. */
+.read-path { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.read-path .hop { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; background: var(--well); border-left: 2px solid rgb(var(--steel) / 0.35); }
+.read-path .role { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.read-path .outcome { margin-left: auto; font-size: 10.5px; color: var(--muted); }
+
+.read-path .hop.hit { border-left-color: rgb(var(--ok)); background: rgb(var(--ok) / 0.08); }
+.read-path .hop.hit .outcome { color: var(--ok-ink); font-weight: 600; }
+.read-path .hop.unreachable { border-left-color: rgb(var(--danger)); }
+.read-path .hop.unreachable .outcome { color: var(--danger-ink); }
+/* Alive but empty. Amber, not red, and the distinction is the point: this node is fine,
+   it simply has no copy yet — exactly where a revived node sits before the heal lands. */
+.read-path .hop.miss { border-left-color: rgb(var(--warn)); }
+.read-path .hop.miss .outcome { color: rgb(var(--warn)); }
+/* Never asked, because someone ahead of it already answered: R=3 is how many COPIES
+   exist, not how many nodes a read touches. Faded, because nothing happened here. */
+.read-path .hop.skipped { opacity: 0.42; }
 /* A request that failed outright — distinct from a cache miss, which is a real answer
    about the cluster rather than a broken call. */
 .api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }

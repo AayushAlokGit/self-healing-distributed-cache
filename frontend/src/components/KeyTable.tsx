@@ -1,14 +1,6 @@
 import type { KeyState } from '../api'
+import { ttlText } from '../format'
 import { colorFor } from '../geometry'
-
-// ttlText renders a key's remaining life. The value is the server's own remainder, so
-// no clock comparison happens here; the dashboard re-polls several times a second and
-// simply re-reads it, which is what makes the countdown tick.
-function ttlText(ms: number): string {
-  const s = Math.ceil(ms / 1000)
-  if (s >= 60) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
-  return `${s}s`
-}
 
 // KeyTable shows the precise key -> owner-nodes mapping, keeping that detail off
 // the ring (which now shows only nodes, ownership arcs, and key movement).

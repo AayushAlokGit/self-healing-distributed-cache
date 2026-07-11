@@ -34,6 +34,11 @@ export function useClusterState(intervalMs = 600) {
 // quietly did nothing is indistinguishable from a cluster that ignored the kill.
 // run() reports whether the call succeeded, so a caller can decide what to do next
 // (clear the inputs, or leave them alone so the user can retry).
+//
+// fail() reports a failure we found ourselves, before any request went out — bad
+// input, say. It shares the error line rather than inventing a second one: to the
+// user, "that TTL isn't a number" and "the server rejected the write" are the same
+// event, namely "my write did not happen and here is why".
 export function useApiError() {
   const [err, setErr] = useState<string | null>(null)
 
@@ -48,5 +53,7 @@ export function useApiError() {
     }
   }, [])
 
-  return { err, run }
+  const fail = useCallback((msg: string) => setErr(msg), [])
+
+  return { err, run, fail }
 }

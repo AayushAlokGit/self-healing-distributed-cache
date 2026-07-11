@@ -21,16 +21,41 @@ export interface KeyState {
   ttlMs: number
 }
 
-// What a read reveals about the cluster, not just about the key. servedBy is the node
-// that answered; primary is the node the ring says should have. When they differ, a
-// replica covered for a primary that was down — which is the read fallback, and the
-// entire reason for replicating.
+// What happened at one of a key's owners during a read. Rank 0 is the primary (the
+// first node clockwise of the key's hash); the rest are its replicas.
+//
+//   hit         answered, and had the key — this is the node the value came from
+//   miss        answered, and had no copy  — alive, just empty (a revived node)
+//   unreachable never answered             — dead, or too slow
+//   skipped     never asked                — an owner ahead of it already served it
+//
+// miss vs unreachable is the distinction worth keeping: both mean "did not serve the
+// read", but only one of them means the node is gone.
+export interface ReadHop {
+  node: string
+  rank: number
+  role: 'primary' | 'replica'
+  outcome: 'hit' | 'miss' | 'unreachable' | 'skipped'
+}
+
+// What a read reveals about the cluster, not just about the key.
+//
+// coordinator is the node that took the request; servedBy is the node the value came
+// from. They are usually DIFFERENT, and that is not a bug — any live node can
+// coordinate a read, because coordinating is just hashing the key and asking its
+// owners, which needs no local copy of anything.
+//
+// path is every owner and what it said, which is what makes the fallback legible:
+// "servedBy n4" alone tells you a node answered, not that the two owners ahead of it
+// were asked and could not.
 export interface ReadResult {
   found: boolean
   value: string
+  coordinator?: string
   servedBy?: string
   primary?: string
   fallback?: boolean
+  path?: ReadHop[]
 }
 
 export interface VNode {
@@ -113,9 +138,11 @@ export const killNode = (id: string) => post('/api/kill', { id }, `kill ${id}`)
 export const reviveNode = (id: string) => post('/api/revive', { id }, `revive ${id}`)
 export const pauseNode = (id: string, paused: boolean) =>
   post('/api/pause', { id, paused }, `${paused ? 'pause' : 'resume'} ${id}`)
-// ttlSeconds <= 0 means the key never expires.
-export const setKey = (key: string, value: string, ttlSeconds: number) =>
-  post('/api/set', { key, value, ttlSeconds }, `write ${key}`)
+// ttlMs <= 0 means the key never expires. Milliseconds in both directions: the same
+// unit KeyState.ttlMs counts down in, so a lifetime read off the dashboard can be
+// typed straight back into it.
+export const setKey = (key: string, value: string, ttlMs: number) =>
+  post('/api/set', { key, value, ttlMs }, `write ${key}`)
 export const seedKeys = (n: number) => post('/api/seed', { n }, `seed ${n} keys`)
 
 export async function getKey(key: string): Promise<ReadResult> {

@@ -31,6 +31,114 @@ func keyState(st State, key string) (KeyState, bool) {
 	return KeyState{}, false
 }
 
+// outcomes reads a read path back as "n0:hit,n4:skipped,n2:skipped" for a failure
+// message you can actually diagnose from.
+func outcomes(res ReadResult) string {
+	var b []string
+	for _, h := range res.Path {
+		b = append(b, h.Node+":"+h.Outcome)
+	}
+	return strings.Join(b, ",")
+}
+
+// A read reports not just WHICH node answered but what that node was to the key and
+// what every other owner said. The three facts the trace has to get right:
+//
+//  1. A healthy read stops at the primary. The other owners are never asked — R=3 is
+//     how many copies exist, not how many nodes a read touches.
+//  2. A dead owner is UNREACHABLE. Never "miss": that would say the node answered.
+//  3. A key nobody ever wrote is a miss at EVERY owner — all alive, none holding it.
+//     Told apart from (2) only by the trace; the value is absent either way.
+func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(6); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const key = "key:3"
+
+	// (1) Healthy: the primary hits, and the two replicas are never asked.
+	res, err := c.Get(key)
+	if err != nil || !res.Found {
+		t.Fatalf("get %q on a healthy cluster: (%+v, %v)", key, res, err)
+	}
+	if res.Coordinator == "" {
+		t.Fatalf("get %q did not report which node coordinated it: %+v", key, res)
+	}
+	if len(res.Path) != 3 {
+		t.Fatalf("get %q should trace all R=3 owners, traced %d: %s", key, len(res.Path), outcomes(res))
+	}
+	if res.Path[0].Role != "primary" || res.Path[0].Outcome != "hit" || res.ServedBy != res.Path[0].Node {
+		t.Fatalf("get %q on a healthy cluster should be served by its primary, got servedBy=%s path=%s",
+			key, res.ServedBy, outcomes(res))
+	}
+	for _, h := range res.Path[1:] {
+		if h.Role != "replica" || h.Outcome != "skipped" {
+			t.Fatalf("get %q: the primary answered, so replica %s should never have been asked; path=%s",
+				key, h.Node, outcomes(res))
+		}
+	}
+
+	// (2) A key nobody wrote: every owner is alive and says so, and none has it. This is
+	// the case the value alone cannot distinguish from "everyone is dead".
+	//
+	// Checked BEFORE the kill, deliberately: afterwards, an owner of THIS key may happen
+	// to be the node we killed, and it would report unreachable rather than miss. The
+	// assertion would then fail or pass on which key the ring handed us — a test whose
+	// result depends on a hash is a test that will flake on somebody else's machine.
+	miss, err := c.Get("key:never-written")
+	if err != nil {
+		t.Fatalf("get on a missing key should be a clean miss, not an error: %v", err)
+	}
+	if miss.Found || len(miss.Path) == 0 {
+		t.Fatalf("a miss should still trace its owners, got found=%v path=%s", miss.Found, outcomes(miss))
+	}
+	for _, h := range miss.Path {
+		if h.Outcome != "miss" {
+			t.Fatalf("every live owner of an unwritten key should MISS (answered, no copy), %s said %q; path=%s",
+				h.Node, h.Outcome, outcomes(miss))
+		}
+	}
+
+	// (3) Kill the primary. It must now show as unreachable — the read walks past it to
+	// a replica, and the trace is what proves the walk happened rather than merely that
+	// a value came back.
+	primary := res.Path[0].Node
+	if err := c.Kill(primary); err != nil {
+		t.Fatalf("kill %s: %v", primary, err)
+	}
+	res, err = c.Get(key)
+	if err != nil || !res.Found {
+		t.Fatalf("get %q after killing its primary should still serve: (%+v, %v)", key, res, err)
+	}
+	// The coordinator's ring drops a silent peer within a heartbeat or so, after which
+	// the dead node stops being an owner at all and leaves the path entirely. Both
+	// states are correct, so assert what is true in EITHER: a dead node never answers.
+	// Pinning "path[0] is unreachable" would be pinning a race.
+	for _, h := range res.Path {
+		if h.Node == primary && h.Outcome != "unreachable" {
+			t.Fatalf("killed node %s reported %q — a dead node cannot answer; path=%s",
+				primary, h.Outcome, outcomes(res))
+		}
+	}
+	hit := 0
+	for _, h := range res.Path {
+		if h.Outcome == "hit" {
+			hit++
+			if h.Node != res.ServedBy {
+				t.Fatalf("path says %s hit but servedBy says %s; path=%s", h.Node, res.ServedBy, outcomes(res))
+			}
+		}
+	}
+	if hit != 1 {
+		t.Fatalf("a found read must hit exactly one owner, got %d; path=%s", hit, outcomes(res))
+	}
+}
+
 // The whole demo loop through the manager: seed keys, snapshot god's-eye state,
 // kill an owner, watch the key drop to under-replicated then heal back to R, all
 // while reads keep serving.

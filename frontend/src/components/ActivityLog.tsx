@@ -1,5 +1,5 @@
 import type { ClusterEvent } from '../api'
-import { colorFor } from '../geometry'
+import { NodeChip } from './NodeChip'
 
 // Faults are the events that move ownership, so they are the ones a heal can be a
 // consequence of. Everything else (a write, a seed) just sits in the timeline.
@@ -24,14 +24,6 @@ function group(events: ClusterEvent[]): Block[] {
     }
   }
   return blocks
-}
-
-function NodeChip({ id }: { id: string }) {
-  return (
-    <span className="node-chip" style={{ color: colorFor(id), borderColor: colorFor(id) }}>
-      {id}
-    </span>
-  )
 }
 
 function HealRow({ e }: { e: ClusterEvent }) {

@@ -19,10 +19,12 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 	})
 
 	mux.HandleFunc("POST /api/set", func(w http.ResponseWriter, r *http.Request) {
-		// TTLSeconds <= 0 (or absent) means the key never expires.
+		// Milliseconds, to match the ttlMs that KeyState reports back: one unit for a
+		// key's lifetime in both directions, so a value read off the dashboard can be
+		// typed straight back into it. <= 0 (or absent) means the key never expires.
 		var body struct {
 			Key, Value string
-			TTLSeconds float64 `json:"ttlSeconds"`
+			TTLMs      int64 `json:"ttlMs"`
 		}
 		if !readJSON(w, r, &body) {
 			return
@@ -32,8 +34,8 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 			return
 		}
 		var ttl time.Duration
-		if body.TTLSeconds > 0 {
-			ttl = time.Duration(body.TTLSeconds * float64(time.Second))
+		if body.TTLMs > 0 {
+			ttl = time.Duration(body.TTLMs) * time.Millisecond
 		}
 		if err := c.Set(body.Key, body.Value, ttl); err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
@@ -54,11 +56,13 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"found":    res.Found,
-			"value":    res.Value,
-			"servedBy": res.ServedBy,
-			"primary":  res.Primary,
-			"fallback": res.Fallback(),
+			"found":       res.Found,
+			"value":       res.Value,
+			"coordinator": res.Coordinator,
+			"servedBy":    res.ServedBy,
+			"primary":     res.Primary(),
+			"fallback":    res.Fallback(),
+			"path":        res.Path,
 		})
 	})
 

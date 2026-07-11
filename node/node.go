@@ -731,12 +731,51 @@ func (n *Node) handleGet(w http.ResponseWriter, r *http.Request) {
 // and let it outlive the original. See cache.SetAt.
 const expiresHeader = "X-Expires-At"
 
-// Which node actually answered a client read, and which one the ring says should
-// have. When they differ, a replica covered for a dead primary.
+// What a client read reveals about the cluster, carried back to the caller.
+//
+// CoordinatorHeader is the node that took the request. It is almost never the node
+// that has the data: any live node can coordinate, because coordinating means
+// hashing the key and asking the owners, which needs no local copy of anything.
+//
+// ReadPathHeader is what happened at each of the key's R owners, in ring order —
+// see FormatReadPath. Until now only the server log ever saw this, and it is the
+// whole self-healing story in one line.
 const (
-	servedByHeader = "X-Served-By"
-	primaryHeader  = "X-Primary"
+	ServedByHeader    = "X-Served-By"
+	CoordinatorHeader = "X-Coordinator"
+	ReadPathHeader    = "X-Read-Path"
 )
+
+// What happened at one owner during a read.
+//
+// Miss and Unreachable both mean "this owner did not serve the read", and the
+// difference between them is the thing worth seeing: a node that is UNREACHABLE is
+// gone, while a node that MISSES answered promptly and simply has no copy — which
+// is precisely the state a revived node is in, since it comes back empty and the
+// ring promotes it straight back to primary before the heal has refilled it. Both
+// look identical to a client that is only told the value.
+const (
+	OutcomeHit         = "hit"         // answered, and had the key
+	OutcomeMiss        = "miss"        // answered, and did not have the key
+	OutcomeUnreachable = "unreachable" // did not answer
+	OutcomeSkipped     = "skipped"     // never asked: an earlier owner already served it
+)
+
+// FormatReadPath encodes one outcome per owner as "n0:unreachable,n4:miss,n2:hit",
+// ordered by rank, so index 0 is the primary. Safe as a header value because node
+// ids are cluster-assigned (n0..nN) and contain neither ':' nor ','.
+//
+// Every owner appears, including the ones never asked — that absence is itself the
+// point. R=3 is about how many COPIES exist, not how many nodes a read consults:
+// the coordinator stops at the first owner that answers with the value, so a
+// healthy read touches exactly one node and the other two show up as skipped.
+func FormatReadPath(ids, outcomes []string) string {
+	hops := make([]string, len(ids))
+	for i, id := range ids {
+		hops[i] = id + ":" + outcomes[i]
+	}
+	return strings.Join(hops, ",")
+}
 
 func putExpires(h http.Header, expires time.Time) {
 	if expires.IsZero() {
@@ -770,6 +809,10 @@ func (n *Node) handlePut(w http.ResponseWriter, r *http.Request) {
 // return the first reachable hit. An unreachable owner is skipped — that is the
 // fallback that keeps reads serving after a node dies. Only when every owner is
 // unreachable do we 502; a reachable miss is an honest 404.
+//
+// Any node can do this. Coordinating means hashing the key and asking the owners,
+// which needs no local copy — so the node the client talked to is usually NOT the
+// node that had the data, and both are reported (see ReadPathHeader).
 func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	owners := n.ownersFor(key)
@@ -778,8 +821,22 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One outcome per owner, in ring order. Owners we never ask — because someone
+	// earlier already served the read — stay "skipped" rather than being left out:
+	// the read stopping early is a fact about the read, not a gap in the record.
+	ids := make([]string, len(owners))
+	outcomes := make([]string, len(owners))
+	for i, o := range owners {
+		ids[i] = o.id
+		outcomes[i] = OutcomeSkipped
+	}
+
 	log := n.logger()
-	reachedNone := true
+	var (
+		value       string
+		servedBy    string
+		reachedNone = true
+	)
 	for i, o := range owners {
 		var (
 			v   string
@@ -791,36 +848,51 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		} else {
 			v, ok, err = n.fetchFrom(o.addr, key)
 		}
-		if err != nil {
+		switch {
+		case err != nil:
+			outcomes[i] = OutcomeUnreachable
 			log.Warn("read: owner unreachable, falling back to next owner",
 				"key", key, "owner", o.id, "rank", i, "of", len(owners), "err", err)
 			continue // owner unreachable: fall back to the next
+		case !ok:
+			outcomes[i] = OutcomeMiss
+			reachedNone = false
+			continue // owner answered, and has no copy: fall back to the next
 		}
+
+		outcomes[i] = OutcomeHit
 		reachedNone = false
-		if ok {
-			if i > 0 {
-				// The fallback earning its keep: the primary is gone, a replica served.
-				log.Info("read served by fallback replica", "key", key, "served_by", o.id, "rank", i)
-			} else {
-				log.Debug("read hit", "key", key, "served_by", o.id)
-			}
-			// Tell the caller WHERE the value came from, not just what it was. When the
-			// primary is down and rank>0 answered, that single fact is the whole
-			// self-healing story — and until now only the server log ever saw it.
-			w.Header().Set(servedByHeader, o.id)
-			w.Header().Set(primaryHeader, owners[0].id)
-			io.WriteString(w, v)
-			return
+		value, servedBy = v, o.id
+		if i > 0 {
+			// The fallback earning its keep: the primary could not, a replica did.
+			log.Info("read served by fallback replica", "key", key, "served_by", o.id, "rank", i)
+		} else {
+			log.Debug("read hit", "key", key, "served_by", o.id)
 		}
+		break // stop at the first hit — hence the skipped owners behind it
 	}
 
-	if reachedNone {
+	// Headers before the body, always: the first Write flushes the header block, and
+	// http.Error writes one itself, so anything set after either goes nowhere.
+	//
+	// The trace is set on EVERY exit, not just the happy one. A 404 whose owners all
+	// say "miss" (they answered; nobody has the key) is a completely different fact
+	// from a 502 where they all say "unreachable" (nobody answered at all), and the
+	// value — which in both cases is no value — cannot tell you which happened.
+	w.Header().Set(CoordinatorHeader, n.id)
+	w.Header().Set(ReadPathHeader, FormatReadPath(ids, outcomes))
+
+	switch {
+	case servedBy != "":
+		w.Header().Set(ServedByHeader, servedBy)
+		io.WriteString(w, value)
+	case reachedNone:
 		log.Error("read failed: all owners unreachable", "key", key, "owners", len(owners))
 		http.Error(w, "all owners unreachable", http.StatusBadGateway)
-		return
+	default:
+		log.Debug("read miss", "key", key)
+		http.Error(w, "not found", http.StatusNotFound)
 	}
-	log.Debug("read miss", "key", key)
-	http.Error(w, "not found", http.StatusNotFound)
 }
 
 // handleClientSet writes to all R owners and acks once writeQuorum of them
