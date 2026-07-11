@@ -761,3 +761,243 @@ func TestAKeyThatDiesBetweenTwoPollsStillReportsItsExpiry(t *testing.T) {
 		t.Fatalf("the expire event should name the key that died, got keys=%v", exp[0].Keys)
 	}
 }
+
+// A delete must take every copy, and it must STAY taken: the heal that repairs a kill
+// must not read a deleted key as a key that lost its replicas.
+func TestDeleteRemovesEveryCopyAndStaysDeleted(t *testing.T) {
+	c := New(3, 1, 300*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(12); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const key = "key:5"
+	ks, ok := keyState(c.State(), key)
+	if !ok || len(ks.Holders) != 3 {
+		t.Fatalf("precondition: %q should be on 3 holders, got %v", key, ks.Holders)
+	}
+
+	dropped, err := c.Delete(key)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	sort.Strings(dropped)
+	if !slices.Equal(dropped, ks.Holders) {
+		t.Errorf("delete should report every node that held %q: holders %v, dropped %v", key, ks.Holders, dropped)
+	}
+
+	if _, still := keyState(c.State(), key); still {
+		t.Fatalf("%q is still on the ring right after the delete", key)
+	}
+	if res, err := c.Get(key); err != nil || res.Found {
+		t.Fatalf("a deleted key must not be readable: (%+v, %v)", res, err)
+	}
+
+	// The other 11 are untouched: a delete is not a clear.
+	if st := c.State(); len(st.Keys) != 11 {
+		t.Errorf("deleting 1 of 12 keys should leave 11, got %d", len(st.Keys))
+	}
+
+	// And it does not come back. Give heal a kill to react to, so this is not just an idle
+	// cluster sitting still: the survivors re-replicate, and the deleted key must not be
+	// among what they copy.
+	if err := c.Kill(ks.Holders[0]); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitUntil(t, 6*time.Second, "the heal to run after the kill", func() bool {
+		return c.State().TotalHealCopies > 0
+	})
+	if k, back := keyState(c.State(), key); back {
+		t.Fatalf("the heal resurrected deleted key %q onto %v", key, k.Holders)
+	}
+
+	// Deleting what is not there is a no-op, not an error: the caller asked for the key to
+	// be gone, and it is.
+	again, err := c.Delete(key)
+	if err != nil {
+		t.Fatalf("re-deleting an absent key should not error: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("re-deleting an absent key should report no holders, got %v", again)
+	}
+}
+
+// The dashboard-reachable half of the same bug, using only Kill and Revive.
+//
+// Nothing in this system ever deletes a surplus copy. Kill a node and the heal re-replicates
+// its keys onto whoever is an owner *now*; revive it and the ring snaps back, but the copies
+// made in the meantime stay exactly where they are — on nodes that are no longer owners of
+// those keys. So "the R nodes the ring names" is a strict subset of "the nodes actually
+// holding this key", and a delete aimed at the owners leaves the leftovers behind: the key
+// keeps its holders, and so it never even leaves the dashboard.
+func TestDeleteFindsCopiesTheRingNoLongerNames(t *testing.T) {
+	c := New(3, 1, 200*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(12); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Kill, let the heal scatter copies, revive, let the ring snap back.
+	if err := c.Kill("n2"); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitUntil(t, 6*time.Second, "the heal to re-replicate n2's keys", func() bool {
+		return c.State().TotalHealCopies > 0
+	})
+	if err := c.Revive("n2"); err != nil {
+		t.Fatalf("revive: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "every key back on all of its owners", func() bool {
+		return len(notOnItsOwners(c.State())) == 0
+	})
+
+	// Find a key now held by more nodes than own it: those extra holders are the leftovers,
+	// and they are invisible to a delete that asks the ring who owns the key.
+	var victim KeyState
+	for _, k := range c.State().Keys {
+		if len(k.Holders) > len(k.Owners) {
+			victim = k
+			break
+		}
+	}
+	if victim.Key == "" {
+		t.Skip("no key ended up with a leftover copy this run; nothing to prove here")
+	}
+	t.Logf("%q is owned by %v but held by %v — %d leftover copies the ring does not name",
+		victim.Key, victim.Owners, victim.Holders, len(victim.Holders)-len(victim.Owners))
+
+	dropped, err := c.Delete(victim.Key)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	sort.Strings(dropped)
+	if !slices.Equal(dropped, victim.Holders) {
+		t.Errorf("delete should reach every holder of %q, not just its owners: holders %v, dropped %v",
+			victim.Key, victim.Holders, dropped)
+	}
+	if k, still := keyState(c.State(), victim.Key); still {
+		t.Fatalf("%q survived its delete on %v — those are holders the ring does not name as owners",
+			victim.Key, k.Holders)
+	}
+}
+
+// Guards the delete-resurrection bug, and it is the entire reason a delete is broadcast to
+// every peer instead of to the key's R owners.
+//
+// Pause is no longer wired to a dashboard button, but the API keeps it, and this is the
+// sharpest form of the hazard: not just a copy the delete misses, but one that actively
+// pushes the key back afterwards.
+//
+// A health-paused node is alive and still holding its keys, but its peers have convicted it
+// and dropped it from THEIR ring — so ownersFor no longer names it. An owners-only delete
+// therefore never reaches it, and it keeps its copy. Resume it: heal fires, the node sees a
+// key that no owner holds, appoints itself the healer (heal follows the data, not the ring)
+// and pushes the key back across the cluster. The delete undoes itself, disguised as a heal.
+//
+// This test fails against a delete that asks the ring who owns the key.
+func TestDeleteIsNotUndoneByAPausedHolderComingBack(t *testing.T) {
+	const grace = 200 * time.Millisecond
+	c := New(3, 1, grace, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(6); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const key = "key:3"
+	ks, ok := keyState(c.State(), key)
+	if !ok || len(ks.Holders) == 0 {
+		t.Fatalf("precondition: %q should be held by someone, got %v", key, ks.Holders)
+	}
+	victim := ks.Holders[0]
+
+	// Pause a holder and wait past the failure timeout (500ms) plus the grace, so its peers
+	// have convicted it, dropped it from their ring, and healed around it. It is now a live
+	// node, holding the key, that the ring does not consider an owner of it.
+	if err := c.Pause(victim, true); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	if k, ok := keyState(c.State(), key); !ok || !slices.Contains(k.Holders, victim) {
+		t.Fatalf("precondition: paused %s should still be holding %q (holders %v) — "+
+			"without that there is no hazard to test", victim, key, k.Holders)
+	}
+
+	dropped, err := c.Delete(key)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if !slices.Contains(dropped, victim) {
+		t.Fatalf("the delete never reached paused holder %s (dropped %v): it is out of the ring, "+
+			"so only a broadcast finds it — it will resurrect %q the moment it resumes", victim, dropped, key)
+	}
+	if _, still := keyState(c.State(), key); still {
+		t.Fatalf("%q still on the ring right after the delete", key)
+	}
+
+	// Resume: the node rejoins, heal fires, and must find nothing to push back.
+	if err := c.Pause(victim, false); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second) // well past detection + grace + heal
+	for time.Now().Before(deadline) {
+		if k, back := keyState(c.State(), key); back {
+			t.Fatalf("%q came back after %s resumed, now held by %v — the heal undid the delete",
+				key, victim, k.Holders)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("%q stayed deleted through %s's resume and the heal that followed", key, victim)
+}
+
+// Clear empties every node, and the demo key numbering restarts so that "clear, then seed"
+// lands on the same ring twice.
+func TestClearEmptiesEveryNodeAndResetsSeeding(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(12); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	gone, err := c.Clear()
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	// Keys, not copies: 12 keys at R=3 is 36 copies, and reporting 36 would just be leaking
+	// the replication factor into the UI.
+	if gone != 12 {
+		t.Fatalf("clear should report 12 distinct keys dropped, got %d", gone)
+	}
+
+	st := c.State()
+	if len(st.Keys) != 0 {
+		t.Fatalf("cleared cluster should hold no keys, holds %d", len(st.Keys))
+	}
+	for _, n := range st.Nodes {
+		if n.KeyCount != 0 {
+			t.Errorf("node %s still holds %d keys after a clear", n.ID, n.KeyCount)
+		}
+	}
+
+	// Seeding after a clear starts at key:0 again — nothing is left for it to overwrite.
+	if err := c.Seed(3); err != nil {
+		t.Fatalf("seed after clear: %v", err)
+	}
+	for _, want := range []string{"key:0", "key:1", "key:2"} {
+		if _, ok := keyState(c.State(), want); !ok {
+			t.Errorf("after a clear, seeding should restart the numbering at key:0 — %q missing", want)
+		}
+	}
+}

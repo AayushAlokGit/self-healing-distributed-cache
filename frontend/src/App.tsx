@@ -28,7 +28,7 @@ export default function App() {
         <div className="grid">
           <div className="left">
             <RingViz state={state} prev={prev} />
-            <KeyTable keys={state.keys} />
+            <KeyTable keys={state.keys} onAction={refresh} />
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />

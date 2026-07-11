@@ -15,7 +15,8 @@ keeps serving.
 ## Architecture
 
 - **Backend** (`cmd/server`, Go) — runs the cluster-in-a-box and exposes a JSON control API on
-  `:8080` (`/api/state`, `/api/kill`, `/api/revive`, `/api/pause`, `/api/set`, `/api/get`, `/api/seed`).
+  `:8080` (`/api/state`, `/api/kill`, `/api/revive`, `/api/pause`, `/api/set`, `/api/get`, `/api/seed`,
+  `/api/delete`, `/api/clear`).
 - **Frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard, talking to the API. It builds
   to static files, so in production the FE deploys to a free static host and the Go API to a free
   container — the HLD's "static frontend + one backend container."
@@ -43,9 +44,14 @@ Open **http://localhost:5173** (Vite proxies `/api` to the Go backend on `:8080`
 2. A grace period later the cluster **restores R=3 on its own** — the heal-copies counter climbs and
    every key is back to three holders. No data lost, no client involved.
 3. **Read a key** any time to confirm it still serves.
-4. **Pause a node's health** to inject a *false positive* (a GC-pause stand-in): peers suspect it,
-   but the grace period withholds the expensive re-replication — resume it in time and nothing is
-   copied. That's the difference between a cheap reversible reroute and an expensive irreversible copy.
+4. **Delete a key** (the ✕ on its chip), or **Delete all**. A delete goes to *every* node, not the
+   three the ring names — otherwise a heal quietly puts the key back. See
+   [the HLD](docs/HLD.md#why-delete-broadcasts-instead-of-addressing-the-owners).
+
+`POST /api/pause` injects a *false positive* (a GC-pause stand-in): peers suspect a live node, but the
+grace period withholds the expensive re-replication — resume it in time and nothing is copied. That is
+the difference between a cheap reversible reroute and an expensive irreversible copy. It is API-only;
+the dashboard button was dropped.
 
 Backend flags: `-addr :8080`, `-grace 2s` (heal grace period), `-seed 12` (keys to preload).
 

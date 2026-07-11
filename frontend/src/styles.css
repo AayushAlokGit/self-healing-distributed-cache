@@ -81,6 +81,11 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 }
 .oid, .node-chip { border: 1px solid; }
 
+/* A card whose heading carries an action. The h2's own margin has to go, or it pushes the
+   button off the heading's baseline. */
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.card-head h2 { margin: 0; }
+
 .keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; max-height: 300px; overflow-y: auto; }
 .keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
 .keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
@@ -92,6 +97,15 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .keychip .ttl { margin-left: auto; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .keychip .ttl.soon { color: var(--danger-ink); font-weight: 700; }
 .keychip .owners { flex-shrink: 0; }
+
+/* Dim until the row is hovered or the button is keyboard-focused — visible enough to find,
+   quiet enough that 40 of them do not read as 40 warnings. Never fully hidden: on a touch
+   screen there is no hover, and a control you cannot reveal is a control that is not there. */
+.key-del { --btn: var(--danger); color: var(--danger-ink); background: none; padding: 0 4px; font-size: 12px; line-height: 1.5; border-radius: 6px; opacity: 0.4; flex-shrink: 0; }
+.keychip:hover .key-del, .key-del:focus-visible { opacity: 1; background: rgb(var(--btn) / 0.22); }
+.key-del:disabled { opacity: 0.2; cursor: default; transform: none; }
+button.clear-all { --btn: var(--danger); color: var(--danger-ink); padding: 4px 9px; font-size: 11px; white-space: nowrap; }
+button.clear-all.armed { background: rgb(var(--btn) / 0.45); color: #fff; }
 
 /* The cluster is fixed at five nodes, so this list never needs to scroll. */
 .nodes-ctl { display: flex; flex-direction: column; gap: 5px; }
@@ -177,6 +191,9 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .tag.revive { --tag: var(--ok); --tag-ink: var(--ok-ink); }
 .tag.pause, .tag.resume { --tag: var(--warn); --tag-ink: #ffe08a; }
 .tag.set, .tag.seed { --tag: var(--cyan); --tag-ink: #8be9fd; }
+/* A delete is a destructive act someone asked for, so it borrows the kill colour — unlike
+   expire, which is the clock acting on its own. */
+.tag.delete, .tag.clear { --tag: var(--danger); --tag-ink: var(--danger-ink); }
 /* expire is a fact about the data, reclaim is a fact about memory. Expire gets the
    louder colour: it is the one a client can actually observe. */
 .tag.expire { --tag: var(--warn); --tag-ink: #ffd280; }

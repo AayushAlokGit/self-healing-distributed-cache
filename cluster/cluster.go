@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,7 +68,7 @@ type Cluster struct {
 // From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
-	Kind string `json:"kind"` // kill | revive | pause | resume | set | seed | info | heal | expire | reclaim
+	Kind string `json:"kind"` // kill | revive | pause | resume | set | read | seed | delete | clear | info | heal | expire | reclaim
 	Msg  string `json:"msg"`
 
 	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim: the node that freed the memory
@@ -445,6 +446,122 @@ func (c *Cluster) Seed(n int) error {
 		"took", time.Since(start).Round(time.Millisecond),
 	)
 	return nil
+}
+
+// Delete removes a key and returns the ids of the nodes that were holding a copy. Empty is
+// not an error: the caller asked for the key to be gone, and it is.
+//
+// The coordinator broadcasts it to every peer rather than to the key's owners — see
+// node.handleClientDelete, which is where that matters.
+func (c *Cluster) Delete(key string) ([]string, error) {
+	start := time.Now()
+	c.mu.Lock()
+	coord := c.anyLiveAddrLocked()
+	c.mu.Unlock()
+	if coord == "" {
+		c.logger().Error("delete dropped: no live node to coordinate it", "key", key)
+		return nil, fmt.Errorf("no live node to coordinate the delete")
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, "http://"+coord+"/del/"+key, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.logger().Error("delete failed: coordinator unreachable", "key", key, "coordinator", coord, "err", err)
+		return nil, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 300 {
+		c.logger().Error("delete rejected by coordinator", "key", key, "coordinator", coord, "status", resp.StatusCode)
+		return nil, fmt.Errorf("delete %s: status %d", key, resp.StatusCode)
+	}
+
+	// Non-nil: a nil slice marshals to JSON null, and the API's contract is a list.
+	dropped := []string{}
+	if h := resp.Header.Get(node.DroppedHeader); h != "" {
+		dropped = strings.Split(h, ",")
+	}
+
+	c.mu.Lock()
+	// Forget the deadline, or noteExpiries reports a deleted key whose TTL had just run
+	// out as an expiry: it tells "expired" from "lost" by the deadline it remembers.
+	delete(c.deadlines, key)
+	if len(dropped) == 0 {
+		c.logf("delete", "deleted %q — no node was holding it", key)
+	} else {
+		c.logf("delete", "deleted %q from %s — every peer was asked, not just the owners", key, strings.Join(dropped, ", "))
+	}
+	c.mu.Unlock()
+
+	c.logger().Info("key deleted",
+		"key", key,
+		"coordinator", coord,
+		"dropped_by", strings.Join(dropped, ","),
+		"took", time.Since(start).Round(time.Millisecond),
+	)
+	return dropped, nil
+}
+
+// Clear removes every key from every node and returns how many distinct keys it dropped.
+// The count is keys, not copies: one key on three replicas counts once.
+func (c *Cluster) Clear() (int, error) {
+	start := time.Now()
+
+	c.mu.Lock()
+	coord := c.anyLiveAddrLocked()
+	// Count distinct keys here: the nodes can only report copies, and "cleared 36 keys" for
+	// a 12-key ring at R=3 is just the replication factor leaking into the UI.
+	before := make(map[string]struct{})
+	for _, n := range c.nodes {
+		for _, k := range n.HeldKeys() {
+			before[k] = struct{}{}
+		}
+	}
+	c.mu.Unlock()
+
+	if coord == "" {
+		c.logger().Error("clear dropped: no live node to coordinate it")
+		return 0, fmt.Errorf("no live node to coordinate the clear")
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, "http://"+coord+"/del", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		c.logger().Error("clear failed: coordinator unreachable", "coordinator", coord, "err", err)
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode >= 300 {
+		c.logger().Error("clear rejected by coordinator", "coordinator", coord, "status", resp.StatusCode)
+		return 0, fmt.Errorf("clear: status %d", resp.StatusCode)
+	}
+	copies, _ := strconv.Atoi(resp.Header.Get(node.DroppedHeader))
+
+	c.mu.Lock()
+	clear(c.deadlines) // same reason as Delete: nothing survives to expire
+
+	// Seed's counter exists so a second Seed appends instead of rewriting key:0..key:n-1.
+	// Nothing is left to rewrite, so restart it: otherwise the next seed opens at key:37 and
+	// "clear, then seed" never lands on the same ring twice.
+	c.seeded = 0
+
+	c.logf("clear", "deleted all %d key%s — every peer was asked, not just the owners", len(before), plural(len(before)))
+	c.mu.Unlock()
+
+	c.logger().Info("cluster cleared",
+		"keys", len(before),
+		"copies_dropped", copies,
+		"coordinator", coord,
+		"took", time.Since(start).Round(time.Millisecond),
+	)
+	return len(before), nil
 }
 
 // Close stops every live node.

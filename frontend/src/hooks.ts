@@ -33,7 +33,7 @@ export function useClusterState(intervalMs = 600) {
 export function useApiError() {
   const [err, setErr] = useState<string | null>(null)
 
-  const run = useCallback(async (fn: () => Promise<void>): Promise<boolean> => {
+  const run = useCallback(async (fn: () => Promise<unknown>): Promise<boolean> => {
     setErr(null)
     try {
       await fn()

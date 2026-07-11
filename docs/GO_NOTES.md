@@ -265,6 +265,11 @@ all-time peak. Measured: sweeping 200k entries to `Len()==0` left **16.5 MB** al
 `c.data` with a fresh map dropped it to 0.5 MB. Only reallocation releases it. Redis rehashes into a
 smaller table; Go doesn't.
 
+**`clear(m)` (Go 1.21) empties a map in place** — and, per the note above, keeps the bucket array. So
+`clear` when you want to reuse the map, `m = make(...)` when you want the memory back. `Cache.Clear`
+reallocates for exactly that reason; `cluster.Clear` uses `clear(c.deadlines)`, which is small and
+refills immediately. → `Cache.Clear`
+
 The residue scales with the *entry struct*, not the payload: adding one `uint64` to `entry`
 (40 B → 48 B) moved it from **16.5 MB → 25.2 MB**. A test asserting on a *fraction* of the peak heap
 is therefore asserting on `sizeof(entry)`. Assert on the payload you expect back instead.
@@ -396,7 +401,14 @@ want another. `http.Error(w, msg, code)` does both.
 
 **`ServeMux` with method+path patterns (Go 1.22+).** `mux.HandleFunc("GET /kv/{key}", h)` — the method
 is part of the pattern, and `{key}` is a wildcard read back with `r.PathValue("key")`. Before 1.22 you
-parsed the method and path yourself.
+parsed the method and path yourself. `"DELETE /kv"` and `"DELETE /kv/{key}"` are two different patterns:
+the first matches `/kv` exactly and does **not** swallow `/kv/foo`. That is how one verb serves both
+"delete this key" and "wipe everything". → `node.New`
+
+⚠️ **A `nil` slice marshals to JSON `null`, not `[]`.** `var xs []string` → `null`; `xs := []string{}`
+→ `[]`. So a Go API that "returns a list" hands JS a `null` the moment the list is empty, and the first
+`.map`/`.filter` on the other side throws. Return the empty literal on every path that can be empty.
+→ `cluster.Delete`, `cluster.State`
 
 **The server blocks, so launch it with `go`.** `srv.Serve(ln)` runs until shutdown. Bind the listener
 separately (`net.Listen("tcp", ":0")`) so the OS picks a free port and you can read the real one back

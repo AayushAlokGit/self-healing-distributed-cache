@@ -341,6 +341,41 @@ func (c *Cache) SetAt(key, value string, expires time.Time) {
 	}
 }
 
+// Delete removes key and reports whether a live entry was there to remove. An expired
+// corpse the sweeper has not reached counts as absent: no reader could still see it.
+//
+// Through removeLocked, never reclaimLocked — an explicit delete is not an expiry, and the
+// reclaim log would tell the dashboard the key died of old age.
+func (c *Cache) Delete(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n, ok := c.data[key]
+	if !ok {
+		return false
+	}
+	live := !n.expired(time.Now())
+	c.removeLocked(n)
+	return live
+}
+
+// Clear removes every entry and returns how many it physically held, corpses included.
+// Like Delete it leaves the reclaim log alone: nothing here expired.
+func (c *Cache) Clear() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	held := len(c.data)
+	c.data = make(map[string]*node)
+	c.expiring = make(map[string]*node)
+	// Re-point the sentinels rather than unlinking node by node. Miss this and the list
+	// still refers to the dropped chain — which nothing notices until the next eviction
+	// walks off a stale tail. See TestClearLeavesTheCacheUsable.
+	c.head.next = c.tail
+	c.tail.prev = c.head
+	return held
+}
+
 // Entry is a live entry as seen from outside the cache: its value and the instant
 // it dies. A zero Expires means it never does.
 type Entry struct {

@@ -100,8 +100,8 @@ export async function getState(): Promise<State> {
   }
 }
 
-async function post(path: string, body: unknown, what: string): Promise<void> {
-  await ok(
+async function post<T>(path: string, body: unknown, what: string): Promise<T> {
+  const res = await ok(
     await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -109,14 +109,24 @@ async function post(path: string, body: unknown, what: string): Promise<void> {
     }),
     what,
   )
+  return res.json()
 }
 
-export const killNode = (id: string) => post('/api/kill', { id }, `kill ${id}`)
-export const reviveNode = (id: string) => post('/api/revive', { id }, `revive ${id}`)
+export const killNode = (id: string) => post<void>('/api/kill', { id }, `kill ${id}`)
+export const reviveNode = (id: string) => post<void>('/api/revive', { id }, `revive ${id}`)
 // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs.
 export const setKey = (key: string, value: string, ttlMs: number) =>
-  post('/api/set', { key, value, ttlMs }, `write ${key}`)
-export const seedKeys = (n: number) => post('/api/seed', { n }, `seed ${n} keys`)
+  post<void>('/api/set', { key, value, ttlMs }, `write ${key}`)
+export const seedKeys = (n: number) => post<void>('/api/seed', { n }, `seed ${n} keys`)
+
+// POST, not DELETE: the control API allows GET/POST only, so a DELETE fails the browser's
+// preflight. dropped is the nodes that held the key — empty means nobody did, which is a
+// successful delete, not an error.
+export const deleteKey = (key: string) =>
+  post<{ dropped: string[] }>('/api/delete', { key }, `delete ${key}`)
+
+// keys, not copies: one key on three replicas counts once.
+export const clearKeys = () => post<{ keys: number }>('/api/clear', {}, 'delete all keys')
 
 export async function getKey(key: string): Promise<ReadResult> {
   const res = await ok(await fetch('/api/get?key=' + encodeURIComponent(key)), `read ${key}`)

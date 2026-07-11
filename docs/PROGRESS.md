@@ -48,6 +48,9 @@ money moment) and must stay static-hostable and free; (6) **R=3**, configurable.
    holding nothing; under 'only the primary heals,' who repopulates it?"* (Answer: **nobody, ever.**)
 4. **The deadline's frame of reference** (S10, never asked) — *"what deadline does a healed copy
    carry, and what breaks if the TTL travels as a duration rather than an instant?"*
+5. **Why a delete cannot address the owners** (S11, never asked) — *"a delete goes to the R nodes the
+   ring names for the key. Name two ways the key survives it. What would a real system add?"*
+   (Answer: leftovers from an old ring; a paused holder that heals it back. A **tombstone**.)
 
 ### Deferred on purpose, with reasons
 - **`sync.RWMutex`** — measured: the *uncontended* mutex is **40% of a 67 ns `Get`** (26.9 ns), with
@@ -470,6 +473,32 @@ re-replicate.
 
 ## Session log
 What happened, in order. The detail lives in the checklist above; this is the narrative and the surprises.
+
+### Session 11 — 2026-07-11 · Delete, and the ring that cannot tell you where the data is
+**Build only, no quiz.** Seeding took a key count; then **delete** — one key (the ✕ on its chip) and
+delete-all. The naive delete is "ask the ring who owns the key, tell those R nodes to drop it," and it
+is **wrong twice**, because *nothing in this system ever removes a surplus copy*, so **where a copy is**
+and **where the ring says it should be** drift apart permanently:
+
+- **Leftovers.** A heal re-replicates a dead node's keys onto whoever owns them *now*; revive it and
+  the ring snaps back, but the copies stay on nodes that no longer own them. Reproduced with **Kill +
+  Revive alone**: `key:0` owned by `[n2 n1 n0]`, *held* by `[n0 n1 n2 n4]`. An owners-only delete drops
+  three of four copies and the key **never leaves the dashboard**.
+- **Resurrection.** A health-paused node is alive and serving `/kv`, but its peers convicted it and
+  dropped it from their ring, so the delete never reaches it. Resume it → heal finds a key **no owner
+  holds**, appoints it the healer (heal follows the *data*, not the ring), and pushes the key **back**.
+  The delete undoes itself, wearing a heal's clothes.
+
+Fix: **the delete broadcasts to every peer, not to the owners.** Real systems need a **tombstone** here
+(a "deleted at T" marker that replicates like a value, so heal reads DELETED instead of MISSING). We get
+away without one *only* because a dead node is destroyed and revives empty — unreachable means nothing
+left to resurrect. **Add durable per-node storage and that argument collapses.** Both failures are
+guarded by tests that were confirmed to fail against the naive version before the fix went in.
+
+Smaller: an explicit delete is **not an expiry** — it must not reach the reclaim log or the dashboard
+reports keys the user deleted as having died of old age. `Cache.Clear` re-points the LRU sentinels
+(getting that wrong is invisible until the *next* eviction walks off a stale tail). Deleting a key must
+also drop its remembered deadline, or `noteExpiries` invents an `expire` event for it.
 
 ### Session 10 — 2026-07-11 · TTL end to end, and the heal that defeated it
 **Build only, no quiz.** Wiring TTL through the wire exposed the session's real find: **the heal was

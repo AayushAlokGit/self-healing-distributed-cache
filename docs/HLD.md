@@ -265,20 +265,43 @@ side unavailable), which is out of scope (§9).
 - `GET /get/{key}` → value, plus `X-Served-By` / `X-Primary` — *which* owner answered, so the read
   fallback is legible to the client instead of buried in a server log.
 - `PUT /set/{key}` body=value, `?ttl=250ms|2m0s` → fans out to all R owners, acks after W.
+- `DELETE /del/{key}` → ⚠️ fans out to **every peer, not the R owners**; `X-Dropped` names the nodes
+  that held it. `DELETE /del` clears the cluster.
 
 **Internal API** (node↔node — the same HTTP, one hop down)
 - `GET /kv/{key}` → the raw stored value. Also the heal's *"do you have this?"* probe — ⚠️ which means
   the probe **downloads the whole value**; a `HEAD` would make it free (PROGRESS, Next action (c)).
 - `PUT /kv/{key}` body=value, header `X-Expires-At` — the **absolute deadline**, carried, never re-based.
+- `DELETE /kv/{key}` → 204 if this node held it, 404 if not · `DELETE /kv` → wipe, count in `X-Dropped`.
 - `GET /health` → liveness. Silence past the timeout is what convicts a peer.
 
 **Dashboard API** (`cmd/server`, over the cluster manager)
 - `GET /api/state` — the god's-eye view: ring, nodes, keys, intended owners vs actual holders.
-- `POST /api/kill|revive|pause` — failure injection · `POST /api/set|seed`, `GET /api/get`.
+- `POST /api/kill|revive|pause` — failure injection · `POST /api/set|seed|delete|clear`, `GET /api/get`.
+- ⚠️ All `POST`, including the deletes: CORS here allows GET/POST only, so a real `DELETE` verb would
+  fail the browser's preflight. The **node↔node** protocol does use real `DELETE`.
 
-> No `DELETE`, no gossip digest, no `transferKeys` bulk move (the heal copies key-by-key), and no
-> `/admin/partition`. Pause-health is the injected failure that matters: it is a **live** node that
-> merely *looks* silent, which is the only way to manufacture a false positive on demand.
+### Why delete broadcasts instead of addressing the owners
+
+The ring says where a copy *should* be; a delete must erase it wherever one *is*, and nothing in this
+system ever removes a surplus copy. So the two drift apart, and an owners-only delete leaks two ways:
+
+- **Leftovers.** A heal re-replicates a dead node's keys onto whoever owns them *now*; revive it and
+  the ring snaps back, but those copies stay on nodes that no longer own them. Kill + Revive alone
+  produce this (`TestDeleteFindsCopiesTheRingNoLongerNames`).
+- **Resurrection.** A health-paused node is alive and serving `/kv`, but its peers convicted it and
+  dropped it from their ring, so it never gets the delete. Resume it: heal finds a key no owner holds,
+  appoints it the healer, and pushes the key *back*. The delete reverts, wearing a heal's clothes.
+
+Real systems need a **tombstone** here — a "deleted at T" marker that replicates like a value, so heal
+sees DELETED rather than MISSING. We skip it only because a dead node is destroyed and revives empty:
+unreachable means nothing left to resurrect. **Give the nodes durable storage and that argument
+collapses.**
+
+> No gossip digest, no `transferKeys` bulk move (the heal copies key-by-key), and no `/admin/partition`.
+> Pause-health is the injected failure that matters: it is a **live** node that merely *looks* silent,
+> which is the only way to manufacture a false positive on demand. It is no longer wired to a dashboard
+> button, but the API keeps it — and the delete broadcast is the reason it still earns its keep.
 
 ---
 

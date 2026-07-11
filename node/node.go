@@ -1,6 +1,10 @@
 // Package node is a cluster peer: a cache behind an HTTP server that also holds its
 // own view of the ring and routes requests. There is no central coordinator; every
-// node accepts any client key on /get and /set and forwards to the owners' /kv.
+// node accepts any client key on /get, /set and /del, and forwards to its peers' /kv.
+//
+// /get and /set address the key's owners — the R nodes the ring names. /del addresses
+// every known peer instead, owner or not; see handleClientDelete for why the difference
+// is load-bearing.
 package node
 
 import (
@@ -133,6 +137,8 @@ func New(id, addr string, capacity int) *Node {
 	// Internal: node-to-node storage and liveness.
 	mux.HandleFunc("GET /kv/{key}", n.handleGet)
 	mux.HandleFunc("PUT /kv/{key}", n.handlePut)
+	mux.HandleFunc("DELETE /kv/{key}", n.handleDelete)
+	mux.HandleFunc("DELETE /kv", n.handleClear)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		if n.healthPaused.Load() {
 			// Stall past any pinger's timeout so the ping fails, but wake on Close
@@ -147,6 +153,8 @@ func New(id, addr string, capacity int) *Node {
 	// Client-facing: any node coordinates.
 	mux.HandleFunc("GET /get/{key}", n.handleClientGet)
 	mux.HandleFunc("PUT /set/{key}", n.handleClientSet)
+	mux.HandleFunc("DELETE /del/{key}", n.handleClientDelete)
+	mux.HandleFunc("DELETE /del", n.handleClientClear)
 	n.srv = &http.Server{Handler: mux}
 
 	return n
@@ -254,6 +262,24 @@ func (n *Node) ownersFor(key string) []owner {
 		owners[i] = owner{id: id, addr: n.peers[id]}
 	}
 	return owners
+}
+
+// allPeers returns every node this one has ever heard of, itself included, sorted by id.
+//
+// The counterpart to ownersFor, and the difference is the point: the ring holds only the
+// nodes currently believed alive, so ownersFor cannot name a node this view has convicted
+// — even though a convicted node may be perfectly alive and still holding keys. A delete
+// has to reach those, so it addresses peers, not owners.
+func (n *Node) allPeers() []owner {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	peers := make([]owner, 0, len(n.peers))
+	for id, addr := range n.peers {
+		peers = append(peers, owner{id: id, addr: addr})
+	}
+	slices.SortFunc(peers, func(a, b owner) int { return strings.Compare(a.id, b.id) })
+	return peers
 }
 
 // Start binds the port and serves in the background. Split from New so the port is
@@ -685,6 +711,11 @@ const (
 	ReadPathHeader    = "X-Read-Path"
 )
 
+// DroppedHeader carries what a delete actually removed: from /del/{key}, the comma-
+// separated ids of the nodes that were holding the key ("n0,n2,n4" — empty if none were);
+// from /del, the number of entries dropped cluster-wide.
+const DroppedHeader = "X-Dropped"
+
 // What happened at one owner during a read. Miss (answered, has no copy) and
 // Unreachable (never answered) are different facts and must not be conflated: a
 // revived node comes back empty, so it misses while being perfectly alive.
@@ -731,6 +762,23 @@ func (n *Node) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.cache.SetAt(r.PathValue("key"), string(body), readExpires(r.Header))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDelete drops {key} from this node's cache. The internal replica delete. 204 if
+// this node was holding it, 404 if it was not — the sender counts the 204s to report
+// which nodes actually had a copy.
+func (n *Node) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if !n.cache.Delete(r.PathValue("key")) {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClear empties this node's cache, reporting how many entries it dropped.
+func (n *Node) handleClear(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set(DroppedHeader, strconv.Itoa(n.cache.Clear()))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -870,6 +918,80 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleClientDelete removes a key from EVERY known node, not just the R owners the ring
+// names, and reports the ids that were holding a copy in DroppedHeader.
+//
+// The broadcast is the correctness argument. The ring names where a copy SHOULD be; a
+// delete must erase it wherever one IS, and the two drift apart because nothing here ever
+// removes a surplus copy. Two ways an owners-only delete leaks:
+//
+//   - Leftovers. A heal re-replicates a dead node's keys onto whoever owns them now; revive
+//     it and the ring snaps back, but those copies stay on nodes that no longer own them. A
+//     delete aimed at the owners walks past them and the key never leaves the dashboard.
+//     Kill and Revive alone produce this — see TestDeleteFindsCopiesTheRingNoLongerNames.
+//   - Resurrection. A health-paused node is alive and still serving /kv, but its peers have
+//     convicted it and dropped it from their ring, so it is not an owner and never gets the
+//     delete. Resume it: heal finds a key no owner holds, appoints it the healer (heal
+//     follows the data, not the ring), and pushes the key back. The delete reverts, wearing
+//     a heal's clothes.
+//
+// Real systems need a tombstone here — a "deleted at T" marker that replicates like a value,
+// so heal sees DELETED rather than MISSING. We can skip it only because a dead node is
+// destroyed and revives empty (cluster.Revive): unreachable means nothing left to resurrect.
+// Give the nodes durable storage and that argument collapses.
+func (n *Node) handleClientDelete(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	log := n.logger()
+
+	dropped := make([]string, 0, 4)
+	for _, p := range n.allPeers() {
+		if p.id == n.id {
+			if n.cache.Delete(key) {
+				dropped = append(dropped, p.id)
+			}
+			continue
+		}
+		had, err := n.deleteOn(p.addr, key)
+		if err != nil {
+			// Not a failed delete: unreachable means down, and a node revives empty.
+			log.Warn("delete: peer unreachable, assuming it holds nothing", "key", key, "peer", p.id, "err", err)
+			continue
+		}
+		if had {
+			dropped = append(dropped, p.id)
+		}
+	}
+
+	log.Debug("delete ok", "key", key, "dropped_by", strings.Join(dropped, ","))
+	w.Header().Set(DroppedHeader, strings.Join(dropped, ","))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleClientClear empties every node this one knows of, and reports the total number of
+// entries dropped — copies, not distinct keys, so a key held by 3 nodes counts 3 times.
+// Broadcast for the same reason as handleClientDelete.
+func (n *Node) handleClientClear(w http.ResponseWriter, _ *http.Request) {
+	log := n.logger()
+
+	total := 0
+	for _, p := range n.allPeers() {
+		if p.id == n.id {
+			total += n.cache.Clear()
+			continue
+		}
+		dropped, err := n.clearOn(p.addr)
+		if err != nil {
+			log.Warn("clear: peer unreachable, assuming it holds nothing", "peer", p.id, "err", err)
+			continue
+		}
+		total += dropped
+	}
+
+	log.Debug("clear ok", "copies_dropped", total)
+	w.Header().Set(DroppedHeader, strconv.Itoa(total))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // fetchFrom GETs key from another node's internal /kv endpoint. ok is false on a
 // clean 404 (miss); err is non-nil only when the node could not be reached.
 func (n *Node) fetchFrom(addr, key string) (value string, ok bool, err error) {
@@ -903,6 +1025,40 @@ func (n *Node) storeOn(addr, key, value string, expires time.Time) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// deleteOn DELETEs key on another node's internal /kv endpoint. had reports whether that
+// node was holding it; err is non-nil only when the node could not be reached.
+func (n *Node) deleteOn(addr, key string) (had bool, err error) {
+	req, err := http.NewRequest(http.MethodDelete, "http://"+addr+"/kv/"+key, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusNoContent, nil
+}
+
+// clearOn empties another node's cache and returns how many entries it dropped.
+func (n *Node) clearOn(addr string) (dropped int, err error) {
+	req, err := http.NewRequest(http.MethodDelete, "http://"+addr+"/kv", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	// A peer that answers without the header dropped nothing we can prove; count 0
+	// rather than guessing.
+	dropped, _ = strconv.Atoi(resp.Header.Get(DroppedHeader))
+	return dropped, nil
 }
 
 // parseTTL reads the client's ttl query parameter: a Go duration ("30s", "5m") or a

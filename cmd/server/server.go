@@ -93,6 +93,37 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// POST, not DELETE, to match every other mutation here — and because withCORS below
+	// allows GET/POST/OPTIONS only, so a DELETE would fail the browser's preflight. The
+	// node-to-node protocol does use real DELETE verbs; this is just the control API.
+	mux.HandleFunc("POST /api/delete", func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Key string }
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if body.Key == "" {
+			writeErr(w, http.StatusBadRequest, "key is required")
+			return
+		}
+		dropped, err := c.Delete(body.Key)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		// dropped may be empty: no node held the key. That is a successful delete, not a
+		// 404 — the caller asked for the key to be gone, and it is.
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dropped": dropped})
+	})
+
+	mux.HandleFunc("POST /api/clear", func(w http.ResponseWriter, _ *http.Request) {
+		keys, err := c.Clear()
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": keys})
+	})
+
 	mux.HandleFunc("POST /api/kill", nodeAction(c.Kill))
 	mux.HandleFunc("POST /api/revive", nodeAction(c.Revive))
 
