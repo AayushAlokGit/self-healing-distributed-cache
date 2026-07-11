@@ -107,8 +107,18 @@
   .nodeg .label{font-size:14px;font-weight:800;fill:var(--ink);text-anchor:middle;dominant-baseline:middle}
   .nodeg .sub{font-size:9px;fill:var(--muted);text-anchor:middle}
   .packet{filter:drop-shadow(0 0 6px currentColor)}
+  .shock{fill:none;stroke-width:3}
   .center-badge{fill:var(--ink);font-weight:800;text-anchor:middle}
   .center-sub{fill:var(--muted);text-anchor:middle;font-size:11px}
+
+  .heal-pill{position:absolute;left:50%;top:16px;transform:translateX(-50%);display:none;
+    align-items:center;gap:8px;background:rgba(255,84,112,.14);border:1px solid rgba(255,84,112,.42);
+    color:#ff9db0;padding:7px 15px;border-radius:999px;font-size:12.5px;font-weight:600;
+    backdrop-filter:blur(6px);animation:healpulse 1.15s ease-in-out infinite;z-index:5}
+  .heal-pill.show{display:inline-flex}
+  .heal-pill .spin{display:inline-block;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes healpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,84,112,.32)}50%{box-shadow:0 0 20px 3px rgba(255,84,112,.22)}}
 </style>
 </head>
 <body>
@@ -138,6 +148,7 @@
         <text class="center-badge" x="360" y="352" font-size="30" id="centerNum">5</text>
         <text class="center-sub" x="360" y="378" id="centerLbl">nodes alive</text>
       </svg>
+      <div class="heal-pill" id="healPill"><span class="spin">⟳</span><span id="healPillTxt"></span></div>
       <div class="legend" id="legend"></div>
       <div class="caption">Each node scatters ~150 <b>virtual points</b> (ticks) around the ring so load spreads evenly. A key belongs to the next 3 distinct nodes clockwise. Kill one and watch its keys re-replicate.</div>
     </div>
@@ -207,8 +218,34 @@ function render(st){
   renderKeys(st);
   renderCtl(st);
   renderLog(st);
+  renderHealBanner(st);
   detectHeals(prev, st);
+  detectTransitions(prev, st);
   prev=st;
+}
+
+function renderHealBanner(st){
+  const ur=st.keys.filter(k=>k.underReplicated).length;
+  const pill=S('healPill');
+  if(ur>0){ pill.classList.add('show'); S('healPillTxt').textContent=`re-replicating ${ur} key${ur>1?'s':''}…`; }
+  else pill.classList.remove('show');
+}
+
+// A node dying gets a red shockwave; a node returning gets a green one.
+function detectTransitions(prevSt, st){
+  if(!prevSt) return;
+  const was={}; prevSt.nodes.forEach(n=>was[n.id]=n.alive);
+  for(const n of st.nodes){
+    if(n.id in was && was[n.id] && !n.alive) shockwave(n.mAngle,'#ff5470');
+    if(n.id in was && !was[n.id] && n.alive) shockwave(n.mAngle,'#34d399');
+  }
+}
+function shockwave(angle,color){
+  const [x,y]=xy(angle,NODE_R);
+  const c=el('circle',{cx:x,cy:y,r:20,class:'shock',stroke:color});
+  S('packets').appendChild(c);
+  c.animate([{r:20,opacity:.9,strokeWidth:4},{r:96,opacity:0,strokeWidth:1}],
+    {duration:720,easing:'ease-out'}).onfinish=()=>c.remove();
 }
 
 function renderStats(st){

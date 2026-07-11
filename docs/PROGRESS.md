@@ -4,26 +4,26 @@ Living log of where we are, what's been taught, and quiz results. Update at the 
 session and after each milestone. Newest entries at the top of the log.
 
 ## Current status
-- **Phase:** **Phases 0–4 COMPLETE. Phase 5 (self-heal) re-replication core DONE (steps 1–3).** Go
-  1.26.5 installed; HLD APPROVED, all 6 §10 decisions LOCKED (2026-07-08). Phase 4 (failure detection)
-  closed 2026-07-10. **Session 7 (2026-07-10):** re-asked carried-forward Q4 ✅ / Q6 taught; taught
-  Phase 5 design Q's 1–3; **built the full self-heal arc — naive re-replication (kill owner → 2→3
-  copies, no client) → storm demo (a false positive costs 200 needless copies) → grace period (same
-  false positive now costs 0, at the price of a real death healing in ~1.55s vs ~550ms).** The
-  "kill a node, watch it re-replicate" half of the money moment is now real. See the Phase 5 checklist.
+- **Phase:** **Phases 0–6 COMPLETE — the demo is built, working, and browser-verified.** Go 1.26.5;
+  HLD APPROVED, all 6 §10 decisions LOCKED. **Session 7 (2026-07-10):** re-asked Q4 ✅ / Q6 taught;
+  built the full self-heal arc (Phase 5: naive re-replication → storm demo → grace-period fix); then
+  **built Phase 6 — the dashboard** (`cluster/` cluster-in-a-box manager, `cmd/democache/` control API
+  + embedded flashy SVG ring UI). `go run ./cmd/democache` → http://localhost:8080. Both halves of the
+  money moment (kill → reroute *and* re-replicate) are visible and interactive; verified live in a
+  real browser. See the Phase 5 and Phase 6 checklists.
 - **Locked decisions:** (1) nodes = goroutines in one process, real HTTP over localhost ports;
   (2) primary-only write ack to start, W-ack knob added in Phase 3; (3) all-to-all heartbeats;
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **Phase 5 re-replication core (steps 1–3) is DONE** — detected death → primary
-  re-replicates to restore R; storm demonstrated (200 copies on a false positive); grace period fixes
-  it (0 copies). **Candidate next steps:** (a) make "serving reads during heal" explicit in a Phase-5
-  test (behavior already there via read fallback); (b) optimize the naive heal to copy only
-  *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner) — cuts
-  even a legitimate heal's copies; (c) the genuine-recovery repopulation gap; (d) **Phase 6 —
-  dashboard** (ring viz + failure-injection buttons; the recruiter-facing money moment now has both
-  halves to show: kill → reroute *and* re-replicate). Pick per Aayush's interest. **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
+- **Next action:** **The core project and demo are COMPLETE (Phases 0–6).** `go run ./cmd/democache`.
+  **Candidate next steps (all optional polish):** (a) **milestone quizzes** for Phase 5 and Phase 6
+  (the per-phase review the ritual calls for — not yet taken); (b) optimize the naive heal to copy
+  only *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner);
+  (c) the genuine-recovery repopulation gap (a revived node comes back empty); (d) deploy the demo to
+  a free host + writeup; (e) hinted handoff / read-repair for the AP staleness gaps. Pick per Aayush's
+  interest. **Carried-forward to re-ask cold:** the Snapshot-recency ⚠️ (it's the Phase-1
+  sequential-scan LRU pollution) from Session 7. **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
   now **✅** — sharpened that the data loss happens at *reconciliation* (LWW silently drops the older
   acked write), not at the conflict itself. Q6 (false-positive mitigations + the universal tradeoff)
   **taught, not attempted — third blank**; the tradeoff (every mitigation delays correct convictions
@@ -133,7 +133,26 @@ Mark ☑ when taught AND the quick-check quiz was passed.
   Phase-5 test; light follow-up.
 
 ### Phase 6 — Dashboard
-- ☐ Ring viz + failure-injection controls
+- ☑ Cluster-in-a-box manager (`cluster/`) — runs the 5 nodes as goroutines in one process;
+  Start/Kill/Revive/Pause/Set/Get/Seed + a god's-eye `State()` that diffs intended owners (alive
+  ring) vs actual holders (node caches) — the gap *is* the heal in flight. Kill just `Close()`s a
+  node so peers still detect via heartbeat; Revive brings it back on a fresh port via
+  `node.SetPeerAddr` (no liveness reset). Proven under `-race` (`cluster_test.go`): seed → kill
+  primary → reads keep serving → heal restores R=3; grace absorbs a false positive.
+- ☑ Control API + static dashboard (`cmd/democache/`) — `go run ./cmd/democache` → one binary, HTTP
+  API (`/api/state|set|get|seed|kill|revive|pause`) + embedded single-page UI (`go:embed web/`).
+- ☑ Ring viz + failure-injection controls — dark control-room SVG ring: per-node neon colors, ~150
+  virtual-point ticks (the real load spread), evenly-spaced node markers with heartbeat halos, key
+  dots on true hash angles with ownership links, **red pulse on under-replicated keys**, **packets
+  that fly primary→newcomer on re-replication**, **kill/revive shockwaves**, and a
+  **"re-replicating N keys…" indicator** during the heal window. Per-node kill/revive/pause, write/
+  read, seed, live activity log. **Verified live in a real browser** (Claude-in-Chrome): kill → grey
+  out + heal (0→24 copies) + 0 data lost; read still serves; false-positive shows the indicator while
+  grace holds copies at 0, then heals after grace; revive returns the node. No console errors.
+
+**Phase 6 COMPLETE. Both halves of the money moment are now visible and interactive.** Node markers
+placed by even spacing (not `hash(id)`, which clustered n0/n3/n4 at the bottom) — honest, since a
+node has ~150 scattered points and no single true position; keys/ticks keep their true hash angles.
 
 ---
 

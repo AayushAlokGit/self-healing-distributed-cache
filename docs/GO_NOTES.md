@@ -337,6 +337,21 @@ resource-not-value lesson as the cache sweeper: an `http.Server` owns a goroutin
 ⚠️ **Always `resp.Body.Close()`** on a client response, even if you ignore the body — the connection
 leaks otherwise. `defer resp.Body.Close()` right after the error check.
 
+**`//go:embed` bakes files into the binary.** A magic comment directly above a package-level var:
+```go
+//go:embed web
+var webFS embed.FS
+```
+The directive must touch the var (no blank line), and the path is relative to the `.go` file — you
+can't reach `../`. `fs.Sub(webFS, "web")` strips the prefix so `http.FileServer(http.FS(sub))` serves
+`web/index.html` at `/`. Result: one self-contained binary, no external asset directory to ship — but
+**editing the embedded file means rebuilding**, which is the iteration cost. → `cmd/democache`
+
+**`signal.NotifyContext`** turns Ctrl-C into a cancelled `context`: `ctx, stop := signal.NotifyContext(
+ctx, os.Interrupt)`, then `<-ctx.Done()` blocks until the signal. Cleaner than a raw `signal.Notify`
+channel, and the ctx composes with `srv.Shutdown(ctx)`. "Stop the users, then stop the thing they
+use": `srv.Shutdown` first, then `cluster.Close()`. → `cmd/democache/main`
+
 ---
 
 ## Pointers and data structures

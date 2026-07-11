@@ -1,30 +1,81 @@
 # Self-Healing Distributed Cache
 
-A distributed in-memory cache built in Go, hand-rolling the core distributed-systems
-algorithms — **consistent hashing, replication, failure detection, and self-healing** —
-rather than importing them.
+A distributed, replicated in-memory cache built in Go, hand-rolling the core distributed-systems
+algorithms — **consistent hashing, replication, failure detection, and self-healing** — rather than
+importing them. It ships with a live dashboard so you can *see it heal*.
 
-**The money moment:** kill a node and watch its keys re-replicate onto the survivors while
-the cache keeps serving.
+**The money moment:** kill a node and watch its keys re-replicate onto the survivors while the cache
+keeps serving.
 
-> **Topology note (honest by design):** this is a *cluster-in-a-box* — the N nodes run as
-> separate processes/goroutines with **real message passing, real failure detection, and real
-> replication**, but collapsed onto a single container so it's free to host. The protocol is
-> real; only the physical spread is collapsed.
+> **Topology note (honest by design):** this is a *cluster-in-a-box* — the N nodes run as goroutines
+> in one process with **real HTTP message passing, real per-node failure detection, and real
+> replication**, collapsed onto a single container so it's free to host. The protocol is real; only
+> the physical spread is collapsed.
 
-## Status
+## Run the demo
 
-Early development. Built as a learning project, phase by phase:
+```
+go run ./cmd/democache
+```
+
+Open **http://localhost:8080** and:
+
+1. **Kill a node.** It greys out; its keys drop to two copies (the dashboard flags them
+   *re-replicating…*) and reads keep serving from the survivors via fallback.
+2. A grace period later the cluster **restores R=3 on its own** — the heal-copies counter climbs and
+   every key is back to three holders. No data lost, no client involved.
+3. **Read a key** any time to confirm it still serves.
+4. **Pause a node's health** to inject a *false positive* (a GC-pause stand-in): peers suspect it,
+   but the grace period withholds the expensive re-replication — resume it in time and nothing is
+   copied. That's the difference between a cheap reversible reroute and an expensive irreversible copy.
+
+Flags: `-addr :8080`, `-grace 2s` (heal grace period), `-seed 12` (keys to preload).
+
+## Status — complete
+
+Built as a learning project, phase by phase. The reasoning behind each decision, the measurements
+that drove it, and what breaks without it are written up in [`docs/`](docs/).
 
 | Phase | Focus | State |
 |---|---|---|
 | 0 | Foundations (cache basics, CAP/AP, cluster-in-a-box) | ✅ done |
-| 1 | Naive single-node cache (map + TTL + LRU, thread-safe) | 🔨 in progress |
-| 2 | Consistent hashing (the ring, virtual nodes) | ⏳ |
-| 3 | Replication (factor R, primary + replicas) | ⏳ |
-| 4 | Failure detection (heartbeats, false positives) | ⏳ |
-| 5 | Self-heal (re-replication on membership change) | ⏳ |
-| 6 | Dashboard (ring viz + failure-injection controls) | ⏳ |
+| 1 | Single-node cache (map + TTL sweeper + O(1) LRU, thread-safe) | ✅ done |
+| 2 | Consistent hashing (the ring, virtual nodes) | ✅ done |
+| 3 | Replication (factor R, primary + replicas, read fallback) | ✅ done |
+| 4 | Failure detection (heartbeats, false positives) | ✅ done |
+| 5 | Self-heal (re-replication on death, grace period) | ✅ done |
+| 6 | Dashboard (ring viz + failure-injection controls) | ✅ done |
+
+## How it works
+
+- **Consistent hashing** (`ring/`) — keys and nodes hash onto a 32-bit ring; a key belongs to the
+  next R distinct nodes clockwise. ~150 virtual points per node keep load balanced and spread a dead
+  node's keys across *all* survivors instead of dumping them on one neighbour.
+- **Replication** (`node/`) — a write goes to all R owners and acks after a write-quorum W; a read
+  tries owners in ring order and returns the first reachable copy, surviving up to R−1 deaths.
+- **Failure detection** (`node/`) — every node pings every peer's `/health`; silence past a timeout
+  drops the peer from that node's ring. Each node's view is its own — no central coordinator.
+- **Self-heal** (`node/`) — a detected death triggers the range's primary to copy under-replicated
+  keys onto the newly-promoted owner, restoring R. A grace period gates this against false positives:
+  a brief GC pause recovers inside the window and no needless copying happens.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `cache/` | Single-node store: mutex-guarded map, TTL + sampling sweeper, O(1) LRU eviction |
+| `ring/` | Consistent-hashing ring with virtual nodes |
+| `node/` | A cache behind HTTP: coordinating role, replication, heartbeats, self-heal |
+| `cluster/` | Cluster-in-a-box manager + god's-eye state and failure-injection controls |
+| `cmd/democache/` | The dashboard: control API + embedded single-page UI |
+| `docs/` | Roadmap, high-level design, progress log, quizzes, Go notes |
+
+## Tests
+
+```
+go vet ./...            # copied mutexes, bad Printf verbs, …
+go test -race ./...     # data races + the full suite
+```
 
 ## Docs
 
