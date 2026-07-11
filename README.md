@@ -73,9 +73,12 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
   tries owners in ring order and returns the first reachable copy, surviving up to R−1 deaths.
 - **Failure detection** (`node/`) — every node pings every peer's `/health`; silence past a timeout
   drops the peer from that node's ring. Each node's view is its own — no central coordinator.
-- **Self-heal** (`node/`) — a detected death triggers the range's primary to copy under-replicated
-  keys onto the newly-promoted owner, restoring R. A grace period gates this against false positives:
-  a brief GC pause recovers inside the window and no needless copying happens.
+- **Self-heal** (`node/`) — a membership change makes each node re-check the keys it holds and copy
+  the missing ones onto their current owners, restoring R. Exactly one node sends each key: **the first
+  owner, in ring order, that actually holds it** — permission follows the *data*, not the ring
+  position, so a node promoted back to primary while holding nothing can still be repopulated. A grace
+  period gates the copying against false positives: a brief GC pause recovers inside the window and
+  nothing is copied. Deadlines travel with the data, so a healed copy expires when the original would.
 
 ## Layout
 
@@ -86,6 +89,7 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
 | `node/` | A cache behind HTTP: coordinating role, replication, heartbeats, self-heal |
 | `cluster/` | Cluster-in-a-box manager + god's-eye state and failure-injection controls |
 | `cmd/server/` | Backend: the JSON control API over the cluster |
+| `logging/` | Structured logs: human-readable text on the console, JSON on disk |
 | `frontend/` | React + Vite + TypeScript dashboard (the animated hash-ring UI) |
 | `docs/` | Roadmap, high-level design, progress log, quizzes, Go notes |
 

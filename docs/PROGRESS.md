@@ -1,948 +1,640 @@
 # Progress Tracker
 
-Living log of where we are, what's been taught, and quiz results. Update at the end of every
-session and after each milestone. Newest entries at the top of the log.
+Where we are, what's been taught, and what each thing earned. Update at the end of every session.
+
+**One fact, one home** — so this file stays readable:
+
+| Doc | Owns |
+|---|---|
+| **PROGRESS.md** (this file) | What we built, the **number** it earned, the **lesson** it taught. The concept checklist is the canonical record; the session log is the dated narrative. |
+| `QUIZZES.md` | Quiz questions, model answers, and the **named gap** behind every ⚠️/❌. |
+| `GO_NOTES.md` | Go idioms and traps (⚠️ = compiles fine, fails at runtime). |
+| `HLD.md` | Architecture, the failure-mode catalog (§6.2), the locked decisions (§10). |
+| `ROADMAP.md` | The phase plan. |
+
+---
 
 ## Current status
-- **Phase:** **Phases 0–6 COMPLETE — the demo is built, working, and browser-verified.** Go 1.26.5;
-  HLD APPROVED, all 6 §10 decisions LOCKED. **Session 7 (2026-07-10):** re-asked Q4 ✅ / Q6 taught;
-  built the full self-heal arc (Phase 5: naive re-replication → storm demo → grace-period fix); then
-  **built Phase 6 — the dashboard**: `cluster/` cluster-in-a-box manager, `cmd/server/` Go control
-  API, and a **React + Vite + TypeScript frontend** (`frontend/`) with an animated SVG hash ring.
-  Backend `go run ./cmd/server` (:8080); frontend `cd frontend && npm run dev` (:5173, proxies
-  `/api`). Both halves of the money moment (kill → reroute *and* re-replicate) are visible and
-  interactive; verified live in a real browser. See the Phase 5 and Phase 6 checklists.
-- **Locked decisions:** (1) nodes = goroutines in one process, real HTTP over localhost ports;
-  (2) primary-only write ack to start, W-ack knob added in Phase 3; (3) all-to-all heartbeats;
-  (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
-  framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
-  configurable.
-- **Session 9 (2026-07-11): Phase 5 + Phase 6 MILESTONE QUIZ taken — 2 ✅ · 3 ⚠️ · 3 ⊘.** Full text in
-  `docs/QUIZZES.md`. **Q0 (the carried-forward Snapshot-recency ⚠️) re-asked cold → ✅; that debt is
-  CLOSED.** Q3 (why check-first *still* costs ~49 copies on a false positive — the ring shifts the owner
-  set, so a *newcomer* genuinely lacks the key; the work is correct given a false premise) was the
-  hardest question and was answered cleanly, unprompted. **The through-line across the three ⚠️:** he
-  states *what the code does* and stops one step short of *the principle it instances*. **The one real
-  gap: presence ≠ version** (S9 Q4) — `has == true` means "somebody has *a* value," not "*the* value," so
-  the heal **skips** a conflicting key and preserves the divergence forever, and a client read returns
-  the **first reachable owner in ring order** (ring geometry decides, stably and silently). Q5 (the
-  dashboard's god's-eye view is impossible in a real deployment — *dead* is a belief, not a property, so
-  an honest dashboard shows N disagreeing views), Q6 (a node has ~150 ring positions, so it has none —
-  fake what has no true value, never fake the mechanism), and Q7 (heal by ring-arc diff; the tradeoff is
-  taxing the hot `Set` path to speed up the rare death path) were **taught, not attempted**.
-- **Session 9 (cont.) — the quiz paid for itself: it found a REAL BUG.** Building the quiz-motivated
-  heal log surfaced, within minutes, that the heal **stranded keys below R forever** whenever a revived
-  node was promoted back to primary of an arc while holding nothing — *the exact inverse of Q1*. Fixed:
-  **the healer is the first owner, in ring order, that actually holds the key** (permission follows the
-  data, not the ring position). Also **merged the heal log into the activity log** so order *is*
-  causality, with each heal reporting the cause **its sender observed**. Both shipped, tested under
-  `-race`, and pushed (`04efdf1`). See the Phase 5 checklist.
-- **Next action:** **The core project and demo are COMPLETE (Phases 0–6), the milestone quizzes are
-  done, and the stranded-key bug is fixed.** `go run ./cmd/server` + `cd frontend && npm run dev`.
-  **Candidate next steps:**
-  (a) ~~milestone quizzes for Phase 5/6~~ **DONE (Session 9)**; (b) optimize the heal to touch only the
-  ring arcs that actually changed owner — **S9 Q7 sketched it and argued *against* building it**: it
-  taxes every `Set` forever to speed up a rare death, so wait for a measured need. (A cheaper, real win
-  is sitting right there though: **`fetchFrom` is a `GET`, so every "do you have this key?" check
-  downloads the whole value.** A `HEAD /kv/{key}` would make the check free and roughly halve heal
-  traffic.);
-  (c) ~~the genuine-recovery repopulation gap~~ **DONE (Session 8, and *actually* done in Session 9 —
-  see the stranded-key bug: Session 8's version only repopulated the keys a revived node was a
-  *replica* of)**;
-  (d) **deploy the demo to a free host + writeup** ← *recommended next*; the writeup should carry S9
-  Q5's honesty (no god's-eye view exists) alongside the cluster-in-a-box caveat;
-  (e) **versioned values + read-repair** for the AP staleness gaps — the highest-value *code* change,
-  since S9 Q4 showed the heal silently preserves conflicts forever. Pick per Aayush's
-  interest. **Carried-forward to re-ask cold (new, from S9):** (1) **presence ≠ version**;
-  (2) **reversibility, not just cost**, as the rule splitting the instant reaction from the delayed one;
-  (3) **the stranded-key case** — *"a revived node is promoted back to primary of an arc while holding
-  nothing; under 'only the primary heals,' who repopulates it?"* (Answer: **nobody, ever.**)
-- **Not yet done:** the rewritten `ActivityLog` component + its CSS are typechecked but **not yet
-  eyeballed in a browser** (the running backend still had the old binary). Restart and look.
-  **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
-  now **✅** — sharpened that the data loss happens at *reconciliation* (LWW silently drops the older
-  acked write), not at the conflict itself. Q6 (false-positive mitigations + the universal tradeoff)
-  **taught, not attempted — third blank**; the tradeoff (every mitigation delays correct convictions
-  as much as wrong ones — a slow node and a dead node are the same silence) feeds directly into the
-  Phase 5 re-replication-storm question.
-- **The finding that closed Phase 1:** we asserted for four sessions that *"a sequential scan
-  collapses LRU's hit rate."* Measured, that is **false for realistic traffic and dramatically true
-  for a flat working set.** A Zipf workload loses only 12.6 points to a batch job issuing as many
-  requests as every user combined (78.2% → 65.6%), because a power law's working set is tiny: the hot
-  keys never drift near the tail, and the scan's keys sink there and **evict each other**. A flat
-  working set of 900 in a 1000-entry cache goes **100% → 47.5%** under the same job. And a *cyclic*
-  loop over `capacity+100` keys scores **exactly 0%** where `capacity-100` scores 100% — LRU does not
-  degrade, it falls off a cliff.
-- **Deferred, on purpose:** (a) `sync.RWMutex` — measured: the *uncontended* mutex is **40% of a 67 ns
-  `Get`** (26.9 ns), with only ~22 ns of real work to overlap, and an `RLock` costs more than a
-  `Lock`. Not an obvious win; also `Get` *deletes*, so it can't take an `RLock` as written.
-  (b) `SetIfAbsent` — the caller-side check-then-act gap; (c) **Go maps never shrink** — 16.5 MB of
-  bucket array survives sweeping 200k entries to `Len()==0`; only replacing the map frees it. Known
-  limit, not fixed. (d) injectable clock — the test suite spends ~4 s sleeping.
-  (e) `sampleSize`/`expiredThreshold` (20 / 25%) are Redis's constants, unmeasured by us.
-- **Flagged (learning):** **"compare, don't remember"** has now been missed **twice** (S4 Q2,
-  S4c Q1) — a value read before releasing a lock is a rumor after it. Re-teach on sight.
-- **Flagged for review:** two spots needed correction during the failure-mode quiz and were
-  re-taught (appear solid now, worth a light re-check before Phase 4/5):
-  (a) **available ≠ fully-replicated** — reads can be served while the cluster is still one copy
-  short during the heal window; (b) **frozen ≠ partitioned** — a fully GC-frozen node yields only
-  staleness, whereas an *alive-but-unreachable* node yields genuine conflicting writes.
-- **Teaching mode reminder:** Aayush is a COMPLETE BEGINNER in distsys — **default to a simple
-  explanation + concrete example, analogies only when a concept is genuinely hard or on request**
-  (updated 2026-07-08), define every term, small steps. (See CLAUDE.md.)
+
+**Phases 0–6 COMPLETE.** The demo is built, tested under `-race`, and browser-verified. Go 1.26.5;
+HLD **APPROVED**, all six §10 decisions locked. Run it: `go run ./cmd/server` (:8080) and
+`cd frontend && npm run dev` (:5173).
+
+**Locked decisions** (HLD §10): (1) nodes are goroutines in one process, talking **real HTTP** over
+localhost ports; (2) primary-only write ack, with a W knob added in Phase 3; (3) all-to-all
+heartbeats; (4) HTTP/JSON transport; (5) dashboard polish is a **priority** (it is the recruiter-facing
+money moment) and must stay static-hostable and free; (6) **R=3**, configurable.
+
+### Next action — pick one
+- **(a) Deploy to a free host + writeup** ← *recommended*. The writeup should carry two honesty
+  caveats: **cluster-in-a-box** (only the *topology* is collapsed — the protocol is real) and S9 Q5's
+  **no god's-eye view exists** (the dashboard's omniscient state is impossible in a real deployment,
+  because *dead* is a **belief**, not a property; an honest dashboard would show N disagreeing views).
+- **(b) Versioned values + read-repair** — the highest-value *code* change. S9 Q4 named why:
+  **presence ≠ version.** The heal asks *"do you have key k?"* and a `200` means "somebody has **a**
+  value," not "**the** value" — so a divergent key is **skipped and the conflict preserved forever.**
+- **(c) `HEAD /kv/{key}`** — a cheap, real win. `fetchFrom` is a `GET`, so every *"do you have this
+  key?"* probe **downloads the whole value**. A `HEAD` makes the check free and roughly halves heal
+  traffic.
+- **(d) NOT the arc-diff heal** (touch only the ring arcs that changed owner). S9 Q7 sketched it and
+  argued **against** building it: it taxes every `Set` forever to speed up a rare death. Wait for a
+  measured need.
+
+### Carried forward — re-ask cold (full text in `QUIZZES.md`)
+1. **Presence ≠ version** (S9) — the only genuine knowledge gap on the board.
+2. **Reversibility, not just cost** (S9) — the rule splitting the instant reaction from the delayed
+   one. He reliably produces "cheap/expensive" and drops "reversible/irreversible."
+3. **The stranded-key case** (S9) — *"a revived node is promoted back to primary of an arc while
+   holding nothing; under 'only the primary heals,' who repopulates it?"* (Answer: **nobody, ever.**)
+4. **The deadline's frame of reference** (S10, never asked) — *"what deadline does a healed copy
+   carry, and what breaks if the TTL travels as a duration rather than an instant?"*
+
+### Deferred on purpose, with reasons
+- **`sync.RWMutex`** — measured: the *uncontended* mutex is **40% of a 67 ns `Get`** (26.9 ns), with
+  only ~22 ns of real work to overlap, and an `RLock` costs *more* than a `Lock`. Also `Get`
+  **deletes**, so it cannot take an `RLock` as written.
+- **`SetIfAbsent`** — the caller-side check-then-act gap. A *correctness* fix, so it needs a real
+  caller, never a benchmark.
+- **Go maps never shrink** — 16.5 MB of bucket array survives sweeping 200k entries to `Len()==0`;
+  only replacing the map frees it. Redis rehashes into a smaller table; Go doesn't. Known limit, not
+  fixed.
+- **Injectable clock** — the test suite spends ~4 s sleeping.
+- **`sampleSize` / `expiredThreshold`** (20 / 25%) are **Redis's** constants, unmeasured by us.
+- **Scan resistance** (segmented LRU, W-TinyLFU) — see the Phase 1 checklist: ~12 points at a 1:1 scan
+  ratio against skewed traffic does not pay for the complexity.
+- **Gossip / SWIM** — see the Phase 4 checklist: all-to-all is O(N²) and at N=5 we never hit the wall.
+
+### Flagged (learning)
+- **"Compare, don't remember"** has been missed **twice** (S4 Q2, S4c Q1) — a value read before
+  releasing a lock is a **rumor** after it. Re-teach on sight.
+- Two spots needed correction during the failure-mode quiz and were re-taught (solid now, worth a light
+  re-check): **available ≠ fully-replicated** (reads serve while the cluster is still one copy short
+  during the heal window) and **frozen ≠ partitioned** (a GC-frozen node yields only *staleness*; an
+  *alive-but-unreachable* one yields genuine **conflicting writes**).
+- **Teaching mode:** Aayush is a complete beginner in distsys — plain explanation + concrete example
+  first, analogies only when a concept is genuinely hard or on request. See `CLAUDE.md`.
+
+---
 
 ## Concept checklist
-Mark ☑ when taught AND the quick-check quiz was passed.
+The canonical record. ☑ = taught **and** the quick-check passed · ◐ = partial · ☐ = not yet.
 
 ### Phase 0 — Foundations
-- ☑ What a cache is (key→value, TTL, eviction) and why distribute one
-- ☑ CAP / why this system is AP
-- ☑ Cluster-in-a-box (what's real vs collapsed)
-- ☐ Go basics as needed (packages, structs, interfaces, goroutines, channels, context)
+- ☑ **What a cache is** — key→value, hit/miss, TTL, eviction, and the **bounded-staleness bargain**
+  (you accept stale answers in exchange for speed; TTL is what *bounds* the staleness).
+- ☑ **Why distribute one** — the single-node walls: capacity, throughput, availability (a SPOF whose
+  death causes a thundering herd on the DB). The fix, in three steps that became this project: **split**
+  (capacity/throughput) → **replicate** (survive a death) → **self-heal** (survive repeated deaths).
+- ☑ **CAP / why this system is AP** — P is not optional (networks partition), so the real choice is C
+  vs A. **AP always answers but may lie; CP never lies but may refuse.** We chose AP: a cache that
+  refuses to answer has failed at its one job.
+- ☑ **Quorum, as the CP alternative we are NOT building** — a quorum is a **count**, not a hand-picked
+  set. Two distinct flavours: **membership quorum** (a majority of all N; decides which side of a
+  partition may serve) and **per-key R/W quorum** (Dynamo-style W-acks over the key's R replicas, where
+  `R+W>N` forces the read and write sets to **overlap**, so a read always sees the latest write). Prefer
+  an **odd N** (an even N risks a 2–2 split-vote where *neither* side serves). ⚠️ `W=N` destroys write
+  fault-tolerance — one replica down and every write fails. And **overlap ≠ ordering**: a quorum makes
+  the sets intersect, it does not order the writes, so a leaderless design still needs LWW or vector
+  clocks. **A coordinator does not dodge the CAP choice** — one is a SPOF, and a *replicated* one needs
+  consensus among coordinators, which is a quorum, which is CP.
+- ☑ **Cluster-in-a-box** — what's real (nodes, HTTP message-passing, failure detection, replication,
+  heal) vs what's collapsed (N goroutines in one container). Shared-fate is the honest caveat for the
+  writeup: one process dying takes all "nodes" with it.
+- ☑ **The failure-mode catalog** — lost writes, the detection window, available≠fully-replicated, false
+  positives, partition/split-brain, two-primaries conflict, correlated total loss. **→ `HLD.md` §6.2**
+  (table) and §6.1 (why node death causes staleness). Every one of these was later *built and
+  demonstrated* in Phases 3–5.
+- ☐ Go basics as needed → these are recorded in `GO_NOTES.md` as they come up, not here.
 
 ### Phase 1 — Single-node cache
-- ☑ Hash-map store (`cache/cache.go`: struct-wrapped `map[string]string`, `New`/`Set`/`Get`, comma-ok, miss-vs-empty) + tests
-- ☑ Concurrency / races — demonstrated live (`DATA RACE` + `fatal error: concurrent map writes`), then fixed: `sync.Mutex` on `Cache`, locked in `Set` **and** `Get`. Same `race_test.go` now green under `go test` and `go test -race`. Known gap (deliberate): compound read-modify-write by callers is still a race *condition* — see `SetIfAbsent` note.
-- ☑ TTL expiry — absolute deadline per entry, **lazy** expiry on read. Leak measured (200k unread keys = 40.9 MB retained through a forced GC), then fixed with a background **sweeper**. Full-scan sweep measured to stall readers **751×** → replaced with Redis-style **sampling** (`samplePass` + `expiring` index): 27ms lock hold → 7µs at 1M keys, reader cost 751× → 2.0×.
-- ☑ LRU eviction — **O(1)**. Bélády's optimal is unimplementable (needs the future); every real policy approximates it from the past. LRU = a bet on *temporal locality*, and a **sequential scan is that bet losing**. Built naive first: `capacity` + a scan for the minimum `lastUsed`, **corpse-first** (recency and expiry are independent orderings). `lastUsed` had to be a **logical clock**, not a timestamp — `time.Now()` stands still for 541µs and cannot order back-to-back `Set`s. Measured **25.6 ms per `Set`** into a full 1M cache, then replaced the scan with a hand-rolled **hash map + doubly linked list** (`map[string]*node`, sentinel head/tail): **579 ns, 44,199×**, and `lastUsed`/`clock` deleted — position *is* recency. Corpses survive the rewrite via a bounded probe of the `expiring` index, whose hit rate provably tracks corpse density.
-- ☑ Hit rate — the metric for a *policy*, as opposed to latency. Cache-aside harness + Zipf / uniform / cyclic workloads (`cache/hitrate_test.go`). **The scan-collapse hypothesis was measured and half-refuted.** Zipf traffic: 78.2% → 65.6% under a 1:1 batch job. Flat working set of 900 in a 1000 cache: **100% → 47.5%**. Cyclic loop over 1100 keys, capacity 1000: **exactly 0%** (900 keys: 100%). LRU doesn't degrade; it falls off a cliff.
-- ◐ Scan resistance — **taught, quizzed, measured, DEFERRED.** Four families: more evidence (segmented LRU / 2Q / InnoDB), frequency (LFU+decay, ARC, LIRS), **admission** (TinyLFU + Count-Min Sketch — the deep reframe: *LRU has no admission policy*), hinting (PG ring buffer, `MADV_SEQUENTIAL`). Not built: for skewed traffic the gain is ~12 points at a 1:1 scan ratio, which does not pay for the complexity. Revisit if a workload with a flat working set appears.
+- ☑ **Hash-map store** — `cache/cache.go`: a struct-wrapped `map[string]string`, `New`/`Set`/`Get`,
+  comma-ok, miss-vs-empty-value distinguished.
+- ☑ **Concurrency / races** — demonstrated **live** before fixing: plain `go test` →
+  `fatal error: concurrent map writes`; `go test -race` → `DATA RACE`, with two goroutines writing the
+  **same address** despite writing *disjoint keys* (proof the shared thing is the map's bucket array and
+  growth flag, not the value slots). Fixed with a `sync.Mutex` locked in `Set` **and** `Get`.
+  - **A data race is not a race condition.** A data race is a *mechanical* memory property (same
+    address, ≥1 write, no synchronization) → **undefined behavior**, and machine-detectable. A race
+    condition is defined relative to *intent*, so it is **not** machine-detectable: a read-modify-write
+    counter whose every access is individually locked has **zero** data races and is still wrong.
+    **The mutex protects the data, not the invariant.** → the deliberate `SetIfAbsent` gap.
+  - Details of the five failure modes and the mutex-as-publication-barrier → `GO_NOTES.md`.
+- ☑ **TTL expiry** — an **absolute deadline** per entry, **lazy** expiry on read.
+  - **Expiry is not an event to schedule, it's a comparison to make.** The naive design (a timer
+    goroutine per key) is not just wasteful, it is **silently wrong on overwrite**: `Set(k,"a",30s)` then
+    `Set(k,"b",10min)` and the first timer still fires at t=30s, deleting a value with 9.5 minutes left.
+    The timer holds a **stale belief** about what it is deleting. Nobody can observe a key as expired
+    unless they *look* at it.
+  - **The leak, measured** (`leak_test.go`): 200k short-TTL keys never read back = **40.9 MB retained,
+    200,000 corpses, 1 live key** — and this survives a *forced* `runtime.GC()`. A GC frees
+    **unreachable** memory; every corpse is reachable from `c.data`, so it is by definition live. **A
+    logical leak, which no GC in any language can fix**, because "useless" is a fact about intent, not
+    reachability. Extrapolated: 1k logins/sec ≈ **8.4 GB/day** → OOM within a day.
+  - **The sweeper, and why `Close()` is load-bearing** — a background goroutine (`time.Ticker` +
+    `select` on a `done` channel). **A running goroutine's stack is a GC root**, so the sweeper keeps the
+    whole `Cache` reachable forever: goroutine and cache hold *each other* up, and only the goroutine
+    **returning** frees either. `runtime.SetFinalizer` cannot help — a finalizer runs when an object
+    becomes unreachable, which is exactly what can't happen. **And this project is the case where it
+    matters:** every demo Kill destroys a node and its cache, so forty demo clicks would be forty leaked
+    sweeper goroutines. *The process demonstrating self-healing would slowly die of the thing it
+    demonstrates.* Ownership rule: **whoever constructs it, closes it** (`main` → `node.Close()` →
+    `cache.Close()`), and shutdown order is **stop the users, then stop the thing they use**
+    (`srv.Shutdown` before `cluster.Close`).
+  - **The full scan was worse than the leak.** `sweepAll` is O(*total* keys), not O(*expired* keys) —
+    ~24 ns/key whether it deletes anything or not. **The scan pays for looking, not for finding**, and at
+    ~24 ns/key it is already one map step + a compare, so **a full scan cannot be optimized below this;
+    you have to stop scanning.** One sweep of 1M keys holds the lock **27.5 ms** and drops reader
+    throughput **6,584,449 → 8,769** gets per 500 ms window (**751×**). Those 8,769 reads are 0.67 ms of
+    work in 500 ms — **the reader was productive 0.13% of the time.** Not "slower": an *outage* that
+    answers 8,769 requests. **The naive sweeper converts a memory problem into a tail-latency problem**,
+    which for a cache is a bad trade; tuning the interval slides along that curve without leaving it.
+  - **The sampling sweeper** (Redis's design). `samplePass` locks, walks ≤20 keys of a separate
+    `expiring` index, deletes the expired ones, unlocks; `sampleSweep` repeats immediately while >25% of
+    a sample came back expired. **Lock hold at 1M keys: 27,489,911 ns → 7,064 ns (3,891×). Reader cost:
+    751× → 2.0×** — and that residual 2.0× **isn't a stall**, it's two goroutines fairly splitting one
+    mutex in a test that runs the sampler flat out.
+    - **Dropping the lock is safe here and was fatal before** because `samplePass` is **stateless**: it
+      locks, re-reads fresh, acts, unlocks, and carries out only two ints. *Compare, don't remember*,
+      satisfied **structurally** rather than by discipline.
+    - **The rate is emergent, not tuned.** A sample that comes back 100% expired fails the threshold and
+      passes again *immediately* — 50k corpses cleared in **2 calls**, no sleep, no tick. So
+      `defaultSweepInterval` — the constant flagged as "picked by gut" — **no longer sets the sweep
+      rate**, only how often we check. *We deleted the guess rather than tuning it.*
+    - **Two bounds, two jobs.** `sampleSize` bounds the **pause** (one request's latency); the **budget**
+      bounds how long the sweeper keeps **competing** for the lock, because pass count is O(expired keys)
+      — set by the workload, not by us. Unbounded, reclaiming 500k corpses takes 25,000 passes over
+      513.9 ms of continuous lock churn = **51% of wall time in contention**, which is the very damage the
+      rewrite existed to prevent, re-entering at 20 µs granularity instead of one 27 ms lump.
+    - ⚠️ **My original justification for the budget was a rationalization** ("a 90%-corpse cache would
+      loop forever" — false; corpses are finite, the loop always terminates). **Aayush caught it.** The
+      real reason only appeared once it was measured. *A plausible-sounding rationale that was never
+      checked is exactly the habit this project exists to train out.*
+  - ☑ **Session 10 — made it end-to-end.** For five phases every layer *above* the cache passed a
+    hardcoded `ttl=0`: the cache could expire keys and nothing could **ask** it to. Now `cache.SetAt`
+    takes an **instant**, `Snapshot()` carries it, and `X-Expires-At` moves it between nodes. See Phase 5
+    for the bug this was hiding.
+- ☑ **LRU eviction — O(1).** Bélády's optimal (evict what's needed farthest in the future) is provably
+  optimal and **unimplementable** — it needs the future. **So every real policy is an approximation of
+  Bélády using only the past, and choosing one is choosing a theory about how your users behave:**
+  Random (no theory) · FIFO ("old things stop being useful") · **LRU** (temporal locality) · LFU
+  (popularity is stable, and ⚠️ naive LFU never decays, so last Tuesday's viral key is immortal).
+  - **A size limit is a second, independent bound.** TTL bounds *staleness*, not *size*: 1k sessions/sec
+    × a 30-min TTL = **1.8M live entries** in steady state, none of them stale.
+  - **Corpse-first eviction**, and Aayush found it by arguing: *"won't LRU evict the expired keys anyway
+    — aren't corpses least-recently used?"* **No — recency and expiry are independent orderings.** A
+    `Set` is an access, so 999 corpses written in the last second are all **more recently used** than a
+    live `config` key touched a minute ago: LRU evicts `config` and keeps the corpses, leaving the cache
+    **worse than empty**. Converse: a key `Set` 1 ms ago with a 1 ms TTL is the **MRU entry and already a
+    corpse**. *Recency of use ≠ freshness of value.*
+  - ⚠️ **`lastUsed` had to be a logical clock, not a timestamp.** `time.Now()` **stands still for
+    541 µs** on this box (13,397 consecutive calls returned the identical instant), so ~5,400 back-to-back
+    `Set`s share one timestamp, every comparison ties, and the victim becomes whichever key `range`
+    happens to yield first — **chosen at random**. The test failed 5 runs in 10. The code was right; the
+    **type** was wrong. **You cannot order events by asking a clock** — which is the single-node case of
+    the Lamport clock problem, arrived at because a Windows timer wasn't precise enough.
+  - **Naive → measured → rewritten:** a scan for the minimum `lastUsed` costs **25.6 ms per `Set`** into a
+    full 1M cache (it is literally `BenchmarkSweep`'s scan, moved onto the caller's goroutine). Replaced
+    with a hand-rolled **hash map + doubly linked list** (sentinel head/tail — the map has no order, the
+    list has no lookup; together both operations are O(1)):
+    ```
+                  scan for min lastUsed   unlink the tail
+        1k             22,843 ns/op          410.1 ns/op       56×
+      100k          2,010,846 ns/op          452.4 ns/op    4,445×
+        1M         25,608,480 ns/op          579.4 ns/op   44,199×
+    ```
+    The left column grows with n and the right one doesn't — that is the whole claim, and it is the reason
+    to measure at four sizes rather than one. Then `lastUsed` and the logical clock were **deleted**:
+    *position in the list **is** recency*, and you don't keep the scaffolding after the building stands.
+  - **Corpse-first survived the rewrite** via a **bounded probe** of the `expiring` index, and the reason
+    generalizes: **the probe's hit rate equals the corpse density, and the cost of a miss is inversely
+    proportional to it.** At 99% corpses it never misses — exactly the catastrophic case; at 0.1% it
+    almost always misses and wastes one slot in a thousand. *Accurate where accuracy matters, sloppy where
+    sloppiness is free.* Measured against `1-(1-d)^20`: density 0.001 → 2% hit (theory 2%); 0.01 → 16%
+    (18%); 0.1 → 88% (88%); 0.99 → 100% (100%).
+- ☑ **Hit rate** — the metric for a *policy*, as opposed to latency. (A cache that instantly evicts
+  exactly the wrong key has excellent latency.) Cache-aside harness + Zipf / uniform / cyclic workloads
+  (`hitrate_test.go`). **The scan-collapse hypothesis we had asserted for four sessions was measured and
+  half-refuted:**
+  ```
+  zipf s=1.1 over 10k keys, cap 1000      flat working set of 900, cap 1000
+    no batch job              78.2%         no batch job             100.0%
+    1 scan per 10 user        75.5%         1 scan per 10 user        89.3%
+    1 scan per  1 user        65.6%         1 scan per  1 user        47.5%
+  ```
+  A batch job issuing **as many requests as every user combined** costs Zipf traffic **12.6 points** —
+  real, but not a collapse. **A power law's working set is tiny**: the hot keys are re-requested every few
+  operations and never drift near the tail, while the scan's keys sink there immediately and **evict each
+  other.** Where LRU actually breaks is a **flat** working set, where every stolen slot is a lost hit.
+  - **And it doesn't degrade — it falls off a cliff.** A cyclic loop over **900** keys in a 1000 cache
+    scores **100%**; over **1100** keys it scores **exactly 0%** — every key is evicted one request before
+    it is wanted again. A 22% wider working set turns a perfect cache into a useless one. (Bélády would
+    score ~91% here. So would **MRU** — evict the *most* recent.)
+- ◐ **Scan resistance — taught, quizzed, measured, DEFERRED** with a number rather than a shrug. Four
+  families, three of which weaken the meaning of a single access:
+
+  | Family | The question it adds | Real systems |
+  |---|---|---|
+  | More evidence | "have you been used **twice**?" | InnoDB young/old sublists, 2Q, Linux active/inactive |
+  | Frequency | "how **often**?" | LFU + decay (Redis), ARC, LIRS (RocksDB) |
+  | **Admission** | "are you **better than whoever you'd evict**?" | **TinyLFU / W-TinyLFU** (Caffeine) |
+  | Hinting | "will the caller just **tell** us?" | PostgreSQL seq-scan ring buffer, `MADV_SEQUENTIAL` |
+
+  - **Admission is the deep reframe: LRU has no admission policy.** Every arriving key is admitted
+    unconditionally and the only question ever asked is *who leaves*. TinyLFU asks *should this key come
+    in at all* — victim `a` has frequency ~1000, scan key `x1` has frequency 1, so **reject `x1`** and
+    leave the cache untouched. The whole scan then costs nothing.
+  - Counting every key would cost more than the cache, so TinyLFU uses a **Count-Min Sketch** (a few bits
+    per key, error only ever an over-estimate) + a doorkeeper Bloom filter + periodic halving for decay.
+    **Approximate answer, bounded error, memory independent of data size** — *the same bargain as the
+    sampling sweeper, and the one Phase 4's failure detection makes.* It keeps recurring because it is how
+    you get O(1) out of problems that look O(n).
+  - **Not built:** ~12 points at a 1:1 scan ratio against skewed traffic does not pay for the complexity.
+    Revisit if a flat-working-set workload appears. *That is naive→measure→iterate being allowed to say
+    **no**.*
 
 ### Phase 2 — Consistent hashing
-- ☑ Why `hash % N` breaks on resize — the divisor N is a single global baked into every key's placement, so changing N re-rolls everyone. Counted over one period of 12: going 4→3 nodes moves **9 of 12 keys ≈ 75%**, i.e. ~(N-1)/N, not 1/N. Every moved key is a miss → **cache stampede** on the DB (whole keyspace, no hot key needed). Patch-the-mapping "fixes" fail worse: placement becomes a function of the *ordered history* of changes, so clients that learned failures in a different order disagree.
-- ☑ The ring + wraparound — `ring/ring.go`. Hash nodes and keys into the same 32-bit space; a key belongs to the first node **clockwise**, wrapping past the top. `Add`/`Remove`/`Get`, sorted points + `sort.Search`. **Measured: removing 1 of 10 nodes moved 9.2% of keys** (≈1/N) vs hash%N's ~90%.
-- ☑ Virtual nodes / balance — `ring/ring.go`, `defaultReplicas = 150`. Each physical node contributes many scattered points (`hashKey(node + "#" + i)`), so its total load is a sum of many small arcs and concentrates on the mean. Naive ring measured lumpy (**65x span**, one node 2.45x fair share); the sweep collapses it: 10 replicas → 3.8x span, 50 → 1.5x, 150 → **1.4x** (busiest 1.23x). Diminishing returns ~1/√replicas then a plateau (50→150 barely moves; residual is finite-keyspace sampling). Second win, measured: a dead node's keys spread across **all 9 survivors** (busiest absorbs 19%) vs the naive ring dumping **100% on one** → no cascade seed.
-- ☑ Hash choice — **FNV-1a was a bad call, caught by measurement.** Its weak avalanche clustered `node0..node9` into a 4% sliver so one node owned **96%** of the ring. Switched to **SHA-256 truncated to 4 bytes** (crypto avalanche → uniform). `maphash` is unusable: per-process seeded. Murmur3 (fast + good avalanche) is a hand-roll candidate if hashing shows up hot.
-- ☑ Key ownership lookup — `Ring.GetClockwiseN(key, n)` returns up to n **distinct physical** nodes: the primary (== `Get`) plus the next n-1 distinct clockwise. Distinctness is the point — consecutive points are often the same machine's virtual nodes, and replicas sharing a machine die together. Skips already-seen nodes; caps at the node count (can't keep more copies than machines); bounded to one lap. This is the bridge into Phase 3 replication.
+- ☑ **Why `hash % N` breaks on resize** — the divisor N is a single global baked into every key's
+  placement, so changing N **re-rolls everyone**. Counted over one period of 12: going 4→3 nodes moves
+  **9 of 12 keys ≈ 75%**, i.e. ~(N-1)/N, **not** 1/N. Every moved key is a miss → a **cache stampede** on
+  the DB across the *whole* keyspace (no hot key needed). And patch-the-mapping "fixes" fail *worse*:
+  placement becomes a function of the **ordered history** of changes, so two clients that learned the same
+  failures in a different order disagree about where a key lives.
+- ☑ **The ring + wraparound** — `ring/ring.go`. Hash nodes and keys into the same 32-bit space; a key
+  belongs to the first node **clockwise**, wrapping past the top (sorted points + `sort.Search`).
+  **Measured: removing 1 of 10 nodes moved 9.2% of keys** (≈1/N) vs `hash%N`'s ~90%.
+- ☑ **Virtual nodes / balance** — `defaultReplicas = 150`. Each physical node contributes many scattered
+  points, so its load is the **sum of many small arcs** and concentrates on the mean. The naive ring
+  measured lumpy (**65× span**, one node holding 2.45× its fair share); the sweep collapses it: 10
+  replicas → 3.8× span, 50 → 1.5×, 150 → **1.4×**. Diminishing returns ~1/√replicas, then a plateau.
+  **Second win, measured:** a dead node's keys spread across **all 9 survivors** (the busiest absorbs 19%)
+  where the naive ring dumped **100% on one** — i.e. virtual nodes remove the **cascade seed**.
+- ☑ **Hash choice — FNV-1a was a bad call, caught by measurement.** Its weak avalanche clustered
+  `node0..node9` into a 4% sliver of the ring, so **one node owned 96%** of it. Switched to **SHA-256
+  truncated to 4 bytes** (crypto avalanche → uniform, so any truncation is uniform too). ⚠️ `maphash` is
+  unusable for anything cross-process: it is **per-process seeded** on purpose.
+- ☑ **Key ownership lookup** — `Ring.GetClockwiseN(key, n)` returns up to n **distinct physical** nodes:
+  the primary plus the next n-1 distinct clockwise. **Distinctness is the whole point** — consecutive ring
+  points are often the *same machine's* virtual nodes, and replicas sharing a machine **die together**.
 
-**Phase 2 COMPLETE.** `hash%N` diagnosed → ring built → hash fixed (FNV→SHA-256, caught by measurement) → virtual nodes (65x→1.4x span, failures spread across survivors) → R-way ownership lookup. Next: **Phase 3, replication** — write to all R owners, read with fallback.
+**Phase 2 COMPLETE.** `hash%N` diagnosed → ring built → hash fixed (caught by measurement) → virtual
+nodes (65×→1.4× span; failures spread across survivors) → R-way ownership lookup.
 
 ### Phase 3 — Replication
-- ◐ Storage node (Store Engine layer) — `node/node.go`. A cache behind an HTTP server (`GET/PUT /kv/{key}`), the internal endpoint one node calls on another. Binds `127.0.0.1:0` (OS-chosen port, read back via `ln.Addr()`), serves in a goroutine, `Close` = `srv.Shutdown` then `cache.Close`. Real HTTP, tested under `-race`.
-- ☑ **Coordinating role (R=1), NOT a central coordinator** — `node/node.go`. Every node holds its own ring + peer map (injected via `SetMembership`; gossip in Phase 4) and exposes client-facing `/get`+`/set` alongside the internal `/kv`. Any node coordinates any key: `ring.Get(key)` → local cache if it owns it, else forward over HTTP (2s timeout so a dead owner fails fast). Tested under `-race`: any node routes any key to its owner. **Naive failure demonstrated: at R=1, killing a key's owner returns 502 from every survivor — data gone, no copy to fall back to. This earns replication.**
-- ☑ Replication factor R=3 + read fallback — `node/node.go`. A write stores to all R owners (`GetClockwiseN`) and acks after `writeQuorum` succeed (W=1 default; **a knob, not consensus** — W=1 favors availability, larger W favors durability). A read tries owners in ring order and returns the first reachable hit, skipping unreachable ones. **THE MONEY MOMENT, tested under `-race`: at R=3, reads survived 2 owner deaths (fell back down the replica list); the key was lost only when all 3 owners were dead. R copies tolerate R-1 failures.**
+- ☑ **Storage node** — `node/node.go`. A cache behind an HTTP server (`GET/PUT /kv/{key}`, the *internal*
+  endpoint one node calls on another). Binds `127.0.0.1:0` so the OS picks the port (read back via
+  `ln.Addr()`); `Close` = `srv.Shutdown` then `cache.Close`.
+- ☑ **A coordinating role, NOT a central coordinator** — every node holds its **own** ring + peer map and
+  exposes client-facing `/get`+`/set` alongside the internal `/kv`. **Any node coordinates any key**:
+  hash it, serve locally if it owns it, else forward (2s timeout, so a dead owner fails fast). A central
+  coordinator would need consensus to be fault-tolerant, and consensus is CP — we are AP.
+  - **The naive failure, demonstrated:** at **R=1**, killing a key's owner returns 502 from **every**
+    survivor. Data gone, no copy to fall back to. **This earns replication.**
+- ☑ **Replication factor R=3 + read fallback** — a write stores to all R owners and acks after
+  `writeQuorum` succeed (**W=1** default — *a knob, not consensus*: W=1 favours availability, larger W
+  trades latency for durability, and W>R is impossible). A read tries owners in ring order and returns the
+  first reachable hit.
+  - **THE MONEY MOMENT, tested under `-race`:** at R=3, reads survived **2 owner deaths** by falling down
+    the replica list; the key was lost only when **all 3** owners were dead. **R copies tolerate R-1
+    failures.**
 
-**Phase 3 core COMPLETE (naive).** Storage node → coordinating role (R=1, data lost on kill) → R=3 replication + fallback (data survives). Still naive/synchronous: writes hit all owners in-band (no async, no hinted handoff), membership is static (no gossip → a dead node stays in every ring, so the ring still *routes* to corpses and reads pay a failed hop before falling back). Known gaps for later: **write to a dead owner just doesn't ack that replica** (no retry/handoff), and **stale reads / conflicting writes** (AP cost) are unaddressed. Next: Phase 4 failure detection (heartbeats) so the ring stops routing to the dead.
-- ☐ Consistency vs availability trade-off
+**Phase 3 core COMPLETE (naive on purpose).** Still synchronous (writes hit all owners in-band — no async,
+no hinted handoff), and membership is **static**, so a dead node stays in every ring: the ring still
+*routes to corpses* and every read pays a failed hop before falling back. That earns Phase 4.
+- ☐ Consistency vs availability trade-off — the *code* consequence (versioned values, read-repair) is
+  still open. See Next action (b).
 
 ### Phase 4 — Failure detection
-- ☑ Heartbeats & timeouts — `node/node.go`. `/health` endpoint; each node's heartbeat goroutine pings every peer every `heartbeatInterval` (100ms), records `lastSeen`, and reconciles an `alive` view against `failureTimeout` (500ms). Alive→dead flips `ring.Remove` (stop routing to the corpse); dead→alive flips `ring.Add`. **The ring now holds only nodes this view believes alive**, so `peers` (all known) and the ring (alive) diverge. Each node's view is its own — no consensus. Measured under `-race`: **death detected in 600ms = timeout + 1 beat**, both peers conclude it independently, and the key reroutes off the dead node.
-- ☑ False positives (GC pause vs death) — **the core impossibility: a crash, a slow node, and a dropped packet are all just silence.** The timeout is the knob: short = fast detection + false positives (a GC pause looks dead → wrong ring recompute → asymmetric views → split-brain seed); long = fewer false positives + route to corpse longer. **Demonstrated** (`node/node.go` `PauseHealth` + `TestSlowNodeIsFalselyDeclaredDead`): a node that stalls only `/health` (a GC-pause stand-in) while serving all other traffic is declared dead by n0 after ~500ms, yet still counts *itself* alive — asymmetric views, the split-brain seed. Un-stalling it makes n0 re-admit it: a needless eviction+recovery **flap**, the pure cost of guessing too eagerly. The same 500ms timeout that `TestHeartbeatDetectsDeath` shows catching a real death fast is shown here misfiring on a slow node — you cannot have both, because both are silence.
-- ☑ Gossip / SWIM intuition — **taught, not built** (all-to-all is O(N²): N=5 → 20 msgs, N=1000 → 1M msgs/interval; HLD-locks us to it because we never hit the wall). Gossip: a node learns of a death **second-hand** — pings a few random peers, the fact spreads transitively (rumor, O(N), converges O(log N)) instead of directly pinging everyone. SWIM adds the two parts that fix *our* false positive: **indirect probing** (ask k peers to probe the suspect before convicting → routes around a single bad link) and **suspicion + incarnation numbers** (a "suspected" state the accused can *refute* → the voice n1 never had in our demo). Deferred on the same naive→measure→iterate logic as segmented LRU: name what it buys, don't build it until a measured scale need appears.
+- ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each
+  `heartbeatInterval` (100ms), records `lastSeen`, and reconciles an `alive` view against
+  `failureTimeout` (500ms). alive→dead flips `ring.Remove` (stop routing to the corpse); dead→alive flips
+  `ring.Add`. **The ring now holds only the nodes this view believes alive**, so `peers` (all known) and
+  the ring (alive) *diverge* — and **each node's view is its own. There is no consensus.** Measured:
+  **death detected in ~600ms = the timeout + one beat**, concluded independently by each peer.
+- ☑ **False positives (GC pause vs death)** — **the core impossibility: a crash, a slow node, and a
+  dropped packet are all just *silence*.** The timeout is the only knob, and it points both ways at once:
+  short = fast detection **and** false positives; long = fewer false positives **and** a ring that routes
+  to a corpse for longer.
+  - **Demonstrated** (`PauseHealth` + `TestSlowNodeIsFalselyDeclaredDead`): a node that stalls *only*
+    `/health` while serving all other traffic is convicted by n0 after ~500ms — **yet still counts itself
+    alive.** Asymmetric views: the split-brain seed. Un-stalling it makes n0 re-admit it — a needless
+    eviction+recovery **flap**, the pure cost of guessing too eagerly. **The same 500ms timeout that
+    catches a real death fast is shown here misfiring on a live node, and you cannot have both, because
+    both are silence.**
+- ☑ **Gossip / SWIM — taught, not built.** All-to-all is **O(N²)** (N=5 → 20 msgs/interval; N=1000 → 1M),
+  and the HLD locks us to it precisely because at N=5 we never hit the wall. **Gossip:** a node learns of a
+  death **second-hand** — it pings a few random peers and the fact spreads *transitively* (O(N) messages,
+  converging in O(log N) rounds) instead of everyone pinging everyone. **SWIM** adds the two parts that
+  would fix *our* false positive: **indirect probing** (ask k peers to probe the suspect before convicting,
+  routing around one bad link) and **suspicion + incarnation numbers** (a "suspected" state the accused can
+  **refute** — the voice our falsely-convicted node never had).
 
-**Phase 4 COMPLETE.** Heartbeats + timeout detection (death caught in ~490–600ms = timeout + up to one beat) → false-positive demonstrated (`PauseHealth`: a healthy-but-stalled node convicted, then flaps back — the timeout's cost made concrete) → gossip/SWIM intuition. The ring now holds only nodes a view believes alive; each view is independent (no consensus). Next: **Phase 5, self-heal** — a detected death should *trigger* re-replication to restore R, the other half of the money moment.
+**Phase 4 COMPLETE.** The ring holds only what a view believes alive; each view is independent. Next: a
+detected death should *trigger* re-replication — the other half of the money moment.
 
 ### Phase 5 — Self-heal
-- ◐ Re-replication to restore R — **step 1 (naive) built.** `node/node.go`: a coalescing
-  `healTrigger` (buffered-1 chan, non-blocking send) fires on any membership change; a separate
-  `healLoop` goroutine runs `heal()` (kept off the heartbeat loop so slow copies don't stall pinging
-  → more false deaths). The heal invariant: **for every key this node is *primary* of, push a copy to
-  that key's other current owners** (primary-only, so co-owners don't all push the same key;
-  idempotent overwrite). `cache.Snapshot()` enumerates live entries **without touching recency** — a
-  bulk heal scan must not look like user access or it re-creates the Phase-1 sequential-scan LRU
-  pollution. Measured under `-race` (`TestHealRestoresReplicationAfterDeath`): killed the primary of
-  a key at R=3, the promoted newcomer received its copy in **~550ms** (= detection ~500ms + heal),
-  two live copies healed back to three, **no client involved**. Design Q's 1–3 taught first (who
-  heals = primary, deterministically from ring, no election; which keys = local scan only, no global
-  keyset; storm = decouple cheap reversible re-routing from expensive re-replication).
-  - **Naive on purpose:** re-pushes *every* key it's primary of (not just the dead node's), and to
-    co-owners that already have the copy — both wasted sends = the re-replication **storm** step 2
-    measured on a false positive, before step 3's grace period.
-- ☑ Storm demo (step 2) — `healCopies` atomic counter + `HealCopies()`; `TestFalsePositiveTriggers-
-  HealStorm`. A `PauseHealth` false positive (node alive, looks silent) makes every observer heal:
-  **exactly `keys×(R-1)` = 200 copies for a node that never died** (proof the naive heal re-pushes
-  everything). Per-node breakdown: the *accused* node pushes **0** — the storm is driven entirely by
-  the observers (independent-views lesson from Phase 4 resurfacing).
-- ☑ Grace period fix (step 3) — **decouple the two reactions to a death by cost.** Cheap+reversible
-  (`ring.Remove` → re-route) fires instantly on *suspicion*; expensive+irreversible (re-replication)
-  waits `healGracePeriod` (default 1s), then **rechecks `hasSuspectedDead()`** — a suspect that
-  recovered inside the window leaves nothing dead, so the heal is skipped. Also: **only a death
-  triggers a heal now, not a recovery** (a flapped-back node lost no data → nothing to reconcile;
-  this removed step 2's *second* storm). Measured (`TestGracePeriodPreventsHealStorm`): the same
-  false positive that cost 200 copies now costs **0**. Price = the Q6 tradeoff made concrete: a
-  *genuine* death heals in **~1.55s vs ~550ms** (extra under-replication exposure bought
-  storm-immunity). New Go idiom recorded: coalescing signal (buffered-1 chan + non-blocking send).
-- ☑ **Check-first heal + recovery repopulation (Session 8 upgrade).** The heal now asks each owner
-  whether it already holds a key (`fetchFrom` → 200/404) and copies **only what's missing**. This let
-  us safely **trigger the heal on *any* membership change** (death *or* recovery) and delete the
-  `hasSuspectedDead` gate: a flapped node still holds its data → 0 copies (no storm), a genuinely
-  **revived node comes back empty → gets repopulated** (`TestRevivedNodeRepopulates`: a killed node,
-  revived, refills to N keys with no client writes). **The "genuine recovery doesn't repopulate" gap
-  is now CLOSED.** Side effect: the check-first heal skips redundant re-pushes, so the false-positive
-  "storm" dropped from `keys×(R-1)`≈200 to just the genuinely-needed newcomer copies (~49 for 100
-  keys); grace still makes it **0**. **Also fixed a latent data race** (`-race`, caught by the new
-  revive test): the cluster handed one shared `peers` map to every node and `SetMembership` aliased it,
-  so `SetPeerAddr` on one node raced another's heartbeat read — now each node `maps.Clone`s its own.
-  - ⚠️ **Session 8's repopulation claim was only HALF true — see the next entry.** A revived node got
-    back the keys where it was a *replica*, and **never** the keys where it was the *primary*.
-- ☑ **THE STRANDED-KEY BUG, and the heal's real invariant (Session 9).** *"Only the **primary** of a
-  key pushes it"* quietly requires one node to be **both the primary AND a holder**. A revived node
-  comes back empty and the ring promotes it straight back to primary of its own arcs — so the
-  **primary has nothing to send**, the **holders aren't the primary and stand down**, and **nobody is
-  both. The key stays under-replicated forever**, because no further membership change is coming to
-  retrigger anything. Found live in the browser (kill to 2 nodes, revive all three → **7 of 20 keys
-  never recovered**, and for some, *not one of the three owners held it* while two non-owners did).
-  `TestRevivedNodeRepopulates` had missed it for a whole session by asserting `keyCount > 0` — the
-  replica-keys alone clear that bar. **A weak assertion is a test that cannot fail in the way that
-  matters.**
-  - **The fix: permission follows the DATA, not the ring position.** The healer for a key is the
-    **first owner, in ring order, that actually holds it.** This keeps exactly what primary-only was
-    *for* (one sender ⇒ no duplicate copies) *and* guarantees a sender exists whenever anybody has the
-    data. Ranked below a holder → stand down; ranked above one, or holding a key **no owner has at
-    all** (a leftover from an older ring) → step up. `TestReviveRestoresFullReplication` kills to 2,
-    revives all, and demands every key back to R=3 **on its true owners** with no client writes —
-    **verified to fail against the old rule (15s timeout) and pass with the fix.**
-  - **Cost, honestly:** each holder now makes up to one extra probe per key to decide whether to stand
-    down ≈ **2× the heal's probe traffic**. **Not fixed:** `fetchFrom` is a `GET`, so a "do you have
-    this?" check **downloads the whole value** — a `HEAD /kv/{key}` would make the check free.
-  - **This is the exact inverse of milestone-quiz Q1.** A *dying* primary is fine — the ring promotes
-    a node that already holds a copy. A *returning* primary is the killer: promoted while holding
-    nothing. Recorded as a postscript in `QUIZZES.md`.
-- ☑ **Causal heal log (Session 9).** Heals now live in the **same event list as the kills**, not a log
-  of their own: the question a viewer has is *"which kill caused which copies,"* and that is a question
-  about **order** — so one list, one counter, appended at the moment each thing happens answers it with
-  **no ordering logic anywhere**. A test asserts a heal's id is greater than the id of the kill that
-  caused it. Each heal also carries its cause **as the sending node saw it** (`because n4 saw n2 went
-  silent`), *not* as the manager knows it: a node heals because **its own heartbeat** stopped hearing a
-  peer, and two nodes can disagree about that — a false positive is exactly one node seeing a death
-  nobody else sees. Coalescing is reported honestly too (`n1 came back and n2 came back and n3 came
-  back`). Event cap **kept**, raised 40 → 300: an append-only list anyone can grow forever by clicking
-  Kill is the **Phase-1 logical leak in a new hat**. New Go idiom recorded: **lock-order inversion** —
-  a heal→manager *callback* would deadlock (Kill holds `c.mu` while `Close` waits on the heal
-  goroutine), so the node buffers and the manager **drains**. *A lower layer must never call up into
-  the layer that owns it.*
-- ◐ Serving reads during heal — **already true via the Phase 3 read fallback** (available ≠
-  fully-replicated): reads hop past the missing copy while the heal runs. Not yet made explicit in a
-  Phase-5 test; light follow-up.
+- ☑ **Re-replication to restore R.** A coalescing `healTrigger` (buffered-1 chan + non-blocking send)
+  fires on any membership change; a separate `healLoop` goroutine runs `heal()` — kept **off** the
+  heartbeat loop, because a slow copy stalling the pings would cause *more* false deaths.
+  `cache.Snapshot()` enumerates live entries **without touching recency**: a bulk heal scan must not look
+  like user access, or it re-creates the Phase-1 sequential-scan pollution *inside our own cache*.
+  - **Who heals, which keys, and why no election:** ownership is a **pure function of (ring, alive
+    nodes)**, so promotion is automatic and needs no coordination. Each node scans **only the keys it
+    already holds** — no node knows the global keyset, and none needs to.
+  - **Measured:** killed the primary of a key at R=3 and the promoted newcomer received its copy in
+    **~550ms** (detection ~500ms + heal). Two live copies healed back to three, **with no client
+    involved.**
+- ☑ **The re-replication storm, demonstrated** — the naive heal re-pushes *every* key it is primary of,
+  to co-owners that **already have it**. A `PauseHealth` false positive (a node that is alive but looks
+  silent) therefore makes every observer heal: **exactly `keys×(R-1)` = 200 copies for a node that never
+  died.** Per-node breakdown: **the accused node pushes 0** — the storm is driven entirely by the
+  observers, which is Phase 4's independent-views lesson resurfacing as a cost.
+- ☑ **The grace period — decouple the two reactions to a death by COST and REVERSIBILITY.**
+  Cheap + reversible (`ring.Remove` → re-route) fires **instantly on suspicion**. Expensive +
+  irreversible (**copying data**) waits `healGracePeriod` (1s) and then **rechecks** — a suspect that
+  recovered inside the window leaves nothing dead, so the heal is skipped entirely. **Measured: the same
+  false positive that cost 200 copies now costs 0.**
+  - **The price, honestly** — this is the universal detection tradeoff made concrete: a **genuine** death
+    now heals in **~1.55s instead of ~550ms**. Extra under-replication exposure, bought with
+    storm-immunity. *Convict cheaply on suspicion; copy only on conviction.*
+- ☑ **Check-first heal + recovery repopulation.** The heal now asks each owner whether it already holds a
+  key (`fetchFrom` → 200/404) and copies **only what's missing**. That made the heal safe to trigger on
+  **any** membership change (death *or* recovery): a flapped node still holds its data → **0 copies**, and
+  a genuinely **revived node comes back empty → gets repopulated** with no client writes.
+  - Side effect: the false-positive "storm" fell from ~200 copies to just the genuinely-needed newcomer
+    copies (~49 for 100 keys). Grace still makes it **0**.
+  - Also fixed a latent **data race** (caught by the new revive test): the cluster handed **one shared
+    `peers` map** to every node and `SetMembership` **aliased** it, so `SetPeerAddr` on one node raced
+    another's heartbeat read. Each node now `maps.Clone`s its own.
+- ☑ **THE STRANDED-KEY BUG, and the heal's real invariant.** *"Only the **primary** of a key pushes it"*
+  sounds like a clean de-duplication rule. It quietly requires one node to be **both the primary AND a
+  holder** — and there is a case where **nobody is**:
+  - A revived node comes back **empty**; the ring **promotes it straight back to primary** of its own arcs
+    (automatic, which is exactly the property we celebrate elsewhere). So the **primary has nothing to
+    send** — the key isn't in its `Snapshot()`, it never even considers it — and the **holders stand
+    down**, because they aren't the primary. **Nobody is both, and the key stays under-replicated
+    forever**, since no further membership change is coming to retrigger anything.
+  - **Found live in the browser** (kill to 2 nodes, revive all three → **7 of 20 keys never recovered**;
+    for some, *not one of the three owners held it* while two non-owners did). **This is the exact inverse
+    of milestone-quiz Q1:** a primary that *dies* is fine, because the ring promotes a node that **already
+    holds a copy**. A primary that ***returns*** is the killer — promoted while holding **nothing**. The
+    model answer and the code shared the same blind spot.
+  - **The fix — permission follows the DATA, not the ring position:** **the healer for a key is the first
+    owner, in ring order, that actually holds it.** This keeps exactly what primary-only was *for* (one
+    sender ⇒ no duplicate copies) **and** guarantees a sender **exists** whenever anybody has the data.
+    Ranked below a holder → stand down; ranked above one, or holding a key **no owner has at all** (a
+    leftover from an older ring) → step up. `TestReviveRestoresFullReplication` was **verified to fail**
+    against the old rule and pass with the fix.
+  - **Cost, honestly:** each holder makes up to one extra probe per key to decide whether to stand down ≈
+    **2× the heal's probe traffic**. And `fetchFrom` is a `GET`, so a *"do you have this?"* check
+    **downloads the whole value** — see Next action (c).
+- ☑ **THE HEAL RESURRECTED EXPIRING KEYS** — a bug living in the **seam** between two individually correct
+  features. `Snapshot()` returned `map[string]string` — **the deadline discarded** — and `storeOn` PUT the
+  copy with no expiry. A key with a 60s TTL whose primary died at t=50s was healed onto a fresh replica **as
+  a permanent key**: at t=60s the originals expired correctly and **the healed copy served forever.** *The
+  more reliably the cluster healed, the more thoroughly it preserved what should have died.*
+  - **The principle: a deadline is absolute, decided ONCE, and carried.** A **duration** is relative to
+    whoever holds it; an **instant** is not. The client sends a duration on the **first hop only**; the
+    coordinator turns it into an instant and hands **that same instant** to every owner (so replicas cannot
+    even disagree by clock skew); and **a heal copies the deadline the key already has** rather than minting
+    a new one. Re-basing per hop would push the deadline out on **every heal** — *a frequently healed key
+    would never die.*
+  - `TestHealDoesNotResurrectAnExpiringKey` waits for the heal to place a copy **on a node that did not have
+    one** before waiting out the deadline, and was **verified to fail** against the naive version. Confirmed
+    live: after a kill the key's remaining life kept counting **down** (15.8s → 11.3s) on its new holder
+    instead of resetting.
+- ☑ **Serving reads during heal** — true via the Phase 3 read fallback (**available ≠ fully-replicated**):
+  reads hop past the missing copy while the heal runs. Session 10 made it **visible**: a read returns
+  `X-Served-By`/`X-Primary` plus a per-owner **trace** of what each owner said. `miss` (alive, holds no copy
+  — a revived node mid-heal) is kept distinct from `unreachable` (dead): both mean "did not serve the read,"
+  only one means the node is **gone**.
+- ☑ **The causal heal log.** Heals live in the **same event list as the kills**, not a log of their own —
+  the question a viewer has is *"which kill caused which copies,"* and that is a question about **order**, so
+  one list + one counter, appended as each thing happens, answers it with **no ordering logic anywhere**.
+  Each heal carries the cause **its sender observed** (`because n4 saw n2 went silent`), *not* what the
+  manager knows: a node heals because **its own heartbeat** stopped hearing a peer, and two nodes can
+  **disagree** — a false positive is precisely one node seeing a death nobody else sees. The event cap was
+  **kept** and raised 40 → 300: an append-only list anyone can grow forever by clicking Kill is **the Phase-1
+  logical leak in a new hat.**
 
 ### Phase 6 — Dashboard
-- ☑ Cluster-in-a-box manager (`cluster/`) — runs the 5 nodes as goroutines in one process;
-  Start/Kill/Revive/Pause/Set/Get/Seed + a god's-eye `State()` that diffs intended owners (alive
-  ring) vs actual holders (node caches) — the gap *is* the heal in flight. Kill just `Close()`s a
-  node so peers still detect via heartbeat; Revive brings it back on a fresh port via
-  `node.SetPeerAddr` (no liveness reset). Proven under `-race` (`cluster_test.go`): seed → kill
-  primary → reads keep serving → heal restores R=3; grace absorbs a false positive.
-- ☑ Control API (`cmd/server/`, renamed from `cmd/democache`) — `go run ./cmd/server` → JSON API on
-  :8080 (`/api/state|set|get|seed|kill|revive|pause`), now **API-only** with permissive CORS. (First
-  shipped an embedded `go:embed` vanilla dashboard; that was removed once the React app landed.)
-- ☑ **React frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard migrated out of the
-  Go binary into its own app that talks to the API (Vite proxies `/api`→:8080 in dev; builds to
-  static files for free hosting = HLD's "static FE + one backend container"). Componentized:
-  `useClusterState` polling hook (keeps prev for animation diffing), `RingViz` (declarative SVG +
-  an imperative particle layer for packets/shockwaves), `Stats`/`NodePanel`/`KeysPanel`/`ActivityLog`.
-  **Verified live in-browser**: renders identically, kill→heal (0→24 copies, 0 data lost) + activity
-  log, read serves "v0", no app console errors.
-- ☑ Ring viz + failure-injection controls — dark control-room SVG ring: per-node neon colors, ~150
-  virtual-point ticks (the real load spread), evenly-spaced node markers with heartbeat halos, key
-  dots on true hash angles with ownership links, **red pulse on under-replicated keys**, **packets
-  that fly primary→newcomer on re-replication**, **kill/revive shockwaves**, and a
-  **"re-replicating N keys…" indicator** during the heal window. Per-node kill/revive/pause, write/
-  read, seed, live activity log. **Verified live in a real browser** (Claude-in-Chrome): kill → grey
-  out + heal (0→24 copies) + 0 data lost; read still serves; false-positive shows the indicator while
-  grace holds copies at 0, then heals after grace; revive returns the node. No console errors.
+- ☑ **Cluster-in-a-box manager** (`cluster/`) — the 5 nodes as goroutines in one process;
+  Start/Kill/Revive/Pause/Set/Get/Seed, plus a god's-eye `State()` that **diffs intended owners (the alive
+  ring) against actual holders (the node caches) — and that gap *is* the heal in flight.** Kill just
+  `Close()`s a node, so peers must still detect the death **themselves** via heartbeat; Revive brings it back
+  on a fresh port **without** resetting anyone's liveness.
+- ☑ **Control API** (`cmd/server/`) — `go run ./cmd/server` → JSON on :8080
+  (`/api/state|set|get|seed|kill|revive|pause`), API-only with permissive CORS.
+- ☑ **React frontend** (`frontend/` — React + Vite + TypeScript) — talks to the API (Vite proxies `/api` in
+  dev; builds to static files, satisfying the HLD's "static FE + one backend container"). A `useClusterState`
+  polling hook keeps the previous snapshot for animation diffing.
+- ☑ **Ring viz + failure-injection controls** — a dark control-room SVG ring: per-node colours, ~150
+  virtual-point ticks (the *real* load spread), node markers with heartbeat halos, key dots on their **true
+  hash angles** with ownership links, a **red pulse on under-replicated keys**, **packets that fly
+  primary→newcomer on re-replication**, kill/revive shockwaves, and a *"re-replicating N keys…"* indicator
+  during the heal window. **Verified live in a real browser:** kill → grey-out → heal (0→24 copies, **0 data
+  lost**); reads keep serving; a false positive shows the indicator while grace holds copies at **0**.
+  - **Node markers are placed by even spacing, not `hash(id)`** — and that is the *honest* choice, not a
+    cheat: a node has ~150 scattered ring positions, so it **has no single true position**, and faking one
+    (which clustered n0/n3/n4 at the bottom) would be faking a *value*. Keys and ticks keep their true hash
+    angles. **Fake what has no true value; never fake the mechanism.**
+- ☑ **TTL + read-path controls** — TTL presets and a custom-millisecond box with a live preview; the read
+  card shows the value, who coordinated, who served it, and the full read-path trace; the key table shows each
+  key's **remaining** life. The dashboard is sent a **remaining duration, not a deadline** — an instant would
+  be read against the *browser's* clock, and a countdown that disagrees between two laptops gets blamed on the
+  cache.
+  - ⚠️ **`Number('')` is `0`, and the backend reads a TTL of 0 as "never expires."** An empty custom box would
+    have silently written a **permanent** key for someone who explicitly asked for an expiring one. Now
+    rejected, along with non-numeric, negative, and an explicit `0`.
+  - ⚠️ `ttlText` ceilinged to whole seconds, so a 1500ms preview read *"dies in 2s"* — correct for a
+    countdown, **a lie about a duration**, at exactly the scale someone reaches for milliseconds to control.
+- ☑ **Write · SET and Read · GET are separate cards.** One card was answering two different questions and the
+  seam showed: a shared error hook parked a failed write's complaint above an unrelated read result. Separate
+  cards, separate error lines, and the read card takes no `onAction` — **a read changes nothing and has
+  nothing to refresh.** The split left room to state the asymmetry out loud: **a write goes to ALL R owners; a
+  read stops at the FIRST owner that answers.**
+- ☑ **Runs on a phone.** ⚠️ The bug under the bug: `overflow-x: hidden` was **quietly clipping** a 390px
+  overflow rather than fixing it. Cause: **a `1fr` grid track is really `minmax(auto, 1fr)`, and that `auto`
+  floor is the item's min-content width** — so one unshrinkable child sizes the whole column. Plus:
+  `touch-action: manipulation` (`none` swallowed the scroll swipe on the ring — the tallest thing on a phone —
+  which reads as a *frozen page*), 16px inputs (below that, iOS Safari zooms in on focus and stays), and 44px
+  touch targets on Kill/Pause — **the buttons this entire demo turns on**.
+- ☑ **Structured logging** (`logging/`) — console **text** for a human watching the demo, **JSON on disk** for
+  `jq` afterwards, fanned out at the `slog.Handler` level. `cluster` and `node` **discard by default** and
+  accept a logger via `SetLogger`: a library that logs on its own terms is one you **cannot silence**, and
+  heartbeats at 100ms would spray through every `go test`.
 
-**Phase 6 COMPLETE. Both halves of the money moment are now visible and interactive.** Node markers
-placed by even spacing (not `hash(id)`, which clustered n0/n3/n4 at the bottom) — honest, since a
-node has ~150 scattered points and no single true position; keys/ticks keep their true hash angles.
+**Phase 6 COMPLETE. Both halves of the money moment are visible and interactive:** kill → reroute *and*
+re-replicate.
 
 ---
 
 ## Session log
+What happened, in order. The detail lives in the checklist above; this is the narrative and the surprises.
+
+### Session 10 — 2026-07-11 · TTL end to end, and the heal that defeated it
+**Build only, no quiz.** Wiring TTL through the wire exposed the session's real find: **the heal was
+resurrecting expiring keys** (Phase 5 checklist). Neither feature was wrong on its own — the bug lived in the
+**seam**, and it existed *because* the system healed.
+
+Also: **reads now name their source** and carry a per-owner trace, so the fallback that *is* the self-healing
+story is finally visible to a client instead of buried in a server log; millisecond TTLs (and the `Number('')`
+trap); the Keys panel split into SET and GET cards; a frontend simplification pass with **no behaviour change**
+(geometry out of the view, one error path, colours declared once — verified live against a running cluster, not
+by inspection); the dashboard now **works on a phone**; and `logging/` finally written up.
+
+**A new cold re-ask went on the board:** *the deadline's frame of reference.*
 
 ### Session 9 — 2026-07-11 · The milestone quiz, and the bug it found
+**Phase 5 + 6 milestone quiz: 2 ✅ · 3 ⚠️ · 3 ⊘.** The carried-forward Snapshot-recency ⚠️ was re-asked cold →
+**✅, debt closed.** The through-line across the three ⚠️: he states *what the code does* and stops one step
+short of *the principle it instances*. The one real gap: **presence ≠ version.**
 
-**Phase 5 + Phase 6 milestone quiz: 2 ✅ · 3 ⚠️ · 3 ⊘.** Questions and model answers in `QUIZZES.md`.
-The carried-forward Snapshot-recency ⚠️ was re-asked cold and is now **✅ — that debt is closed.** The
-new one, and the only real knowledge gap on the board, is **presence ≠ version**.
+**Then the quiz paid for itself.** Aayush asked for a heal log in the UI. It took an hour to build, and
+**within minutes of existing it showed the heal was broken** — the **stranded-key bug**, which five sessions of
+tests and four browser demos had never revealed.
 
-**Then the quiz paid for itself, which is the story of this session.**
+**Why the tests missed it for a whole session:** `TestRevivedNodeRepopulates` asserted `keyCount > 0`. A revived
+node *does* get back the keys where it is a non-primary **replica**, so the count leaves zero and the assertion
+passes. It never checked that the cluster returned to **full R**.
+> **A weak assertion is a test that cannot fail in the way that matters.**
 
-Aayush asked for a heal log in the UI — "which keys moved from where to where." Building it took an
-hour. **Within minutes of it existing, it showed the heal was broken**, in a way five sessions of tests
-and four browser demos had never revealed.
+**…and then the new test flaked, teaching the same lesson twice.** It **waited** on *"no key is
+under-replicated"* (`holders < R`) but **asserted** *"every owner holds its key."* Those differ **precisely
+because of the bug being fixed**: after a kill/revive cycle the survivors keep **leftover copies of keys they no
+longer own**, and those pad the holder count to 3 while a genuine owner sits empty — so the wait could exit
+*before the heal had converged.* `holders >= R` is **not** the replication invariant; **"every owner holds its
+key"** is.
+> **Three for three: a test is only as good as its weakest predicate.** *A test that cannot fail is not
+> evidence* (S5) → *a weak assertion is a test that cannot fail in the way that matters* → *a weak **wait** is
+> an assertion evaluated too early.*
 
-#### The stranded-key bug
+**Two design calls worth keeping.** Aayush wanted heals in the same list as the kills — right, and the reason is
+that *"which kill caused which copies"* is a question about **order**, so one list answers it with no ordering
+logic anywhere. He also wanted the 40-entry cap **removed**; kept it and raised it to 300 instead, because an
+append-only list anyone can grow forever by clicking Kill is **the Phase-1 logical leak in a new hat**. The cap
+wasn't the problem; *40* was.
 
-The heal's rule was *"only the **primary** of a key pushes it."* That sounds like a clean
-de-duplication rule. It quietly requires one node to be **both the primary AND a holder** — and there
-is a case where nobody is:
+**Also:** *"Seed 8 more keys" was a total no-op* — `Seed(n)` always wrote `key:0..key:n-1` and the server seeds
+12 at startup, so every click **rewrote keys that already existed. Zero new keys, ever.** Fixed by having the
+*cluster* number them; deliberately **not** tracked in the frontend, since a client remembering "I've seeded 8
+so far" is **check-then-act in a UI costume** (a reload or a second tab hands out the same numbers twice). New
+Go idiom: **lock-order inversion** — a heal→manager *callback* deadlocks, and ⚠️ `-race` cannot see it, because
+a deadlock is not a data race.
 
-- A revived node comes back **empty**.
-- The ring **promotes it straight back to primary** of its own arcs (that promotion is automatic — it
-  falls out of the sorted ring, which is exactly the property Q1 celebrates).
-- The **primary now has nothing to send.** The key isn't in its `Snapshot()`, so it never even
-  considers it.
-- The **holders won't send it.** They have it, but they're not the primary, so they stand down.
+### Session 8 — 2026-07-11 · Check-first heal, and repopulating a revived node
+Made the heal **ask before it copies** (`fetchFrom` → 200/404), which let us trigger it on *any* membership
+change and delete the `hasSuspectedDead` gate. Fixed a latent **data race** in the shared `peers` map, caught by
+the new revive test.
+> ⚠️ **The repopulation claim was only half true, and we didn't know it for a session.** A revived node got back
+> the keys where it was a *replica* — never the ones where it was the *primary*. Session 9 found the rest.
 
-**Nobody is both. The key stays under-replicated forever** — no further membership change is coming to
-retrigger anything. Reproduced live: kill down to 2 nodes, revive all three, and **7 of 20 keys never
-recovered.** For some of them, *not one of the three owners held it* while two non-owners did.
+### Session 7 — 2026-07-10 · The self-heal arc, and the dashboard
+**Cold re-ask: Q4 (self-suspicion & split-brain) → ✅** — sharpened that the data loss happens at
+**reconciliation** (LWW silently drops the older *acked* write), not at the conflict itself. **Q6 (false-positive
+mitigations) was left blank a third time** and was **taught, not attempted**; its lesson — *every mitigation
+delays correct convictions as much as wrong ones, because a slow node and a dead node are the same silence* —
+fed straight into the storm work.
 
-**This is the exact inverse of quiz Q1.** A primary that *dies* is fine — the ring promotes a node that
-**already holds a copy**. A primary that *returns* is the killer — promoted while holding **nothing**.
-The model answer and the code shared the same blind spot.
+Built the full Phase 5 arc in one session (**naive heal → storm demo → grace-period fix**), then Phase 6: the
+`cluster/` manager, the Go control API, and the React dashboard with an animated SVG hash ring. **Both halves of
+the money moment became visible and interactive.**
 
-**Why the tests missed it for a whole session.** `TestRevivedNodeRepopulates` asserted
-`nodeKeyCount(victim) > 0`. A revived node *does* get back the keys where it is a non-primary
-**replica** — those have a live primary that holds them and pushes normally. So the count leaves zero,
-and the assertion is satisfied. It never checked that the cluster returned to **full R**.
-> **A weak assertion is a test that cannot fail in the way that matters.** Sibling of Session 5's
-> *"a test that cannot fail is not evidence."*
+### Session 6 — 2026-07-10 · Phase 4 milestone quiz
+**2 ✅ · 2 ⚠️ · 2 ⊘.** The pattern was **label-not-mechanism**: he named "gossip/SWIM" without the mechanism
+(second-hand, transitive learning) and got the timeout's *conclusion* right with the *mechanism* wrong (a crashed
+node fails pings **fast** — the delay is the `lastSeen` **declaration** threshold, not a hanging connection). The
+genuinely hard questions were clean, so this is **precision, not comprehension.**
 
-**The fix — permission follows the DATA, not the ring position:**
-> **The healer for a key is the first owner, in ring order, that actually holds it.**
+### Session 5 — 2026-07-10 · Eviction: naive, measured, rewritten
+**Cold re-ask of nine carried-forward questions: 2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘.** **check-then-act is now a
+three-time miss** — given a `GetOrRefresh` where *every* map access is locked, he answered *"there is no lock for
+`c.Set()`."* The instinct is *"unsynchronized access → bug"*; the needed instinct is ***"decision made under a
+lock, acted on after the unlock → bug."*** Starvation was defined backwards, and **happens-before** was taught
+from scratch.
 
-That keeps the whole point of primary-only (**exactly one sender ⇒ no duplicate copies**) *and*
-guarantees a sender **exists** whenever anybody has the data. Ranked below a holder → stand down.
-Ranked above one, or holding a key **no owner has at all** (a leftover from an older ring) → step up.
+Built capacity + expiry-aware LRU, hit the **`time.Now()` stands still for 541µs** wall (→ logical clock), and
+then rewrote the O(n) scan into an O(1) map+list — **44,199× at 1M keys.**
 
-`TestReviveRestoresFullReplication` kills to 2 nodes, revives all three, and demands every key back to
-**R=3 on its true owners** with no client writes. **Verified to fail against the old rule** (times out
-at 15s) **and pass with the fix** (4s). Price, honestly: each holder now makes up to one extra probe
-per key to decide whether to stand down — **~2× the heal's probe traffic**. **Not fixed:** `fetchFrom`
-is a `GET`, so a *"do you have this?"* check **downloads the whole value**; a `HEAD /kv/{key}` would
-make the check free.
+**Two things got faster that nobody asked for**, and I predicted one of them backwards: `BenchmarkGet` went
+**61.31 → 52.52 ns** *because* a `*node` is addressable, so `Get` stopped rewriting the map slot — one hash and
+one store **deleted from the read path**. I had predicted the pointer deref would make it *slower*.
 
-#### …and then the new test flaked, which taught the same lesson twice
+**A test failed twice before it measured anything** — first because a 1ns TTL never ticked (the clock again),
+then because the single corpse was also the LRU tail, so the fallback would have evicted it **whether or not the
+probe found it**: *the test could not have failed.*
+> **A test that cannot fail is not evidence.**
 
-`TestReviveRestoresFullReplication` passed, then failed, then passed. **The bug was in the test, and it
-was the *same* mistake in a new place: the wait condition was weaker than the assertion.**
+**And I broke an old test honestly:** `entry` grew 40 B → 48 B and a magic-threshold assertion
+(`afterSweep <= afterWrite/2`) failed by 0.4 MB while the sweep still reclaimed everything. The real finding:
+**the never-shrinking bucket residue scales with `sizeof(entry)`, not with the payload.** A test asserting on a
+fraction of peak heap is really asserting on a struct size.
 
-It waited on *"no key is under-replicated"* (`holders < R`) but asserted *"every **owner** holds its
-key."* Those differ — and they differ **precisely because of the bug being fixed**. After a kill/revive
-cycle the survivors keep **leftover copies of keys they no longer own**, and those leftovers pad the
-holder count to 3 while a genuine owner sits empty. So the wait could exit **before the heal had
-converged**, and the assertion would then fail on a cluster that just needed another second.
-
-Fixed by waiting on the invariant the test actually checks (`notOnItsOwners`), then run **8×** to prove
-the flake is gone. `holders >= R` is *not* the replication invariant — **`every owner holds its key`**
-is. The weaker one is what let the original bug hide, and it is what made the test that caught the bug
-lie about it.
-> **Three for three now: a test is only as good as its weakest predicate.** *A test that cannot fail is
-> not evidence* (S5) → *a weak assertion is a test that cannot fail in the way that matters* (this
-> session, on `keyCount > 0`) → *a weak **wait** is an assertion evaluated too early.*
-
-#### The log: order *is* causality
-
-Aayush's design call, and it was the right one: **heals go in the same list as the kills.** The question
-a viewer has is *"which kill caused which copies,"* and that is a question about **order** — so one
-list, one counter, appended at the moment each thing happens answers it with **no ordering logic
-anywhere**. A test asserts a heal's id exceeds the id of the kill that caused it.
-
-Two amendments to his proposal:
-- **He wanted to remove the 40-entry cap. Kept it, raised to 300.** An append-only list anyone can grow
-  forever by clicking Kill is the **Phase-1 logical leak in a new hat** — reachable, growing,
-  uncollectable. The cap wasn't the problem; *40* was.
-- **Each heal now reports the cause its SENDER observed** (`because n4 saw n2 went silent`), not what
-  the manager did. A node heals because **its own heartbeat** stopped hearing a peer, and two nodes can
-  **disagree** about that — a false positive is precisely one node seeing a death nobody else sees. So
-  attribution is *causal*, not positional, and when views diverge the log will show it. Coalescing is
-  honest too: `n1 came back and n2 came back and n3 came back`.
-
-#### Also
-- **"Seed 8 more keys" was a total no-op.** `Seed(n)` always wrote `key:0..key:n-1`, and the server
-  seeds 12 at startup — so every click rewrote keys that already existed. **Zero new keys, ever.** Fixed
-  by having the *cluster* number the keys and append. Deliberately **not** tracked in the frontend: a
-  client remembering "I've seeded 8 so far" is **check-then-act** in a UI costume — a reload or a second
-  tab hands out the same numbers twice.
-- **New Go idiom: lock-order inversion.** A heal→manager *callback* to report copies **deadlocks** —
-  `Kill` holds `c.mu` while `Close` waits on the heal goroutine, and the callback would want `c.mu`.
-  `-race` cannot see it (a deadlock is not a data race). Fixed structurally: the node buffers into its
-  own log and the manager **drains** it. *A lower layer must never call up into the layer that owns it.*
-- Packet animation slowed (750ms → 1900ms) and **staggered**, so a heal reads as a stream of keys in
-  flight rather than one blurred frame.
-
----
-
-### Session 5 — 2026-07-10 · Phase 1 step 4: eviction, built
-
-**Cold re-ask of the nine carried-forward questions: 2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘.** Full text in
-`docs/QUIZZES.md`. Three things worth carrying:
-- **`check-then-act` is now a three-time miss.** Given a `GetOrRefresh` where *every* map access is
-  locked, Aayush answered "there is no lock for `c.Set()`." The instinct is *"unsynchronized access →
-  bug"*; the needed instinct is *"decision made under a lock, acted on after the unlock → bug."*
-  Re-asked a second time in-session, deferred, **still unanswered.**
-- **Starvation was defined backwards** ("blocked briefly, not indefinitely" = ordinary waiting).
-  Taught the real definition (postponed indefinitely *while the system as a whole progresses*) and
-  **starvation mode** — Go's mutex hands the lock directly to a waiter blocked >1ms. `TestSweepStalls-
-  Readers`' 8,769 gets exist only because of that mechanism.
-- **Happens-before taught from scratch** (was ⊘): compiler reordering, store buffers, memory barriers,
-  and the trap that Go's `sync/atomic` is sequentially consistent while C++'s `relaxed` is not.
-  **Atomicity and visibility are separate properties.** Prerequisite for Phase 3.
-
-**Built: capacity + expiry-aware LRU** (`cache/cache.go`, `cache/eviction_test.go`).
-- `Cache.capacity`; `noLimit = 0` means unbounded. Bounds **entries, not bytes** — a lie when values
-  vary in size (Redis bounds bytes via `maxmemory`). Noted, not fixed.
-- Eviction lives in **`Set` only**, and only when inserting a **new** key into a full cache.
-  Overwriting doesn't grow the map. (`TestOverwriteDoesNotEvict` guards the bug where a capacity-2
-  cache evicts `a` while `Set`ting `a`.)
-- `Get` **hit** refreshes recency → `Get` writes three ways now. Third nail in `RWMutex`'s coffin.
-- `evictLocked` scans for the **first corpse**, else the minimum `lastUsed`. Corpse-first is a
-  *correctness* fix: `TestEvictsCorpseBeforeLiveKey` is quiz S4d Q4 as a test.
-
-**The naive design failed, and the measurement said why.**
-`lastUsed time.Time` made `TestEvictsLeastRecentlyUsed` fail **5 runs in 10** — flaky, not broken.
-Probed it: **`time.Now()` returned the identical instant for 13,397 consecutive calls; the clock did
-not tick for 541µs.** A `Set` is ~100ns, so **~5,400 back-to-back `Set`s share one timestamp**. With
-ties everywhere, `e.lastUsed.Before(oldest)` never fires and the victim is whichever key `range`
-happens to yield first — **chosen at random.** The code was right; the *type* was wrong.
-> **You cannot order events by asking a clock.** LRU needs the order of accesses, not their times.
-
-Fixed with a **logical clock**: `Cache.clock uint64`, `tickLocked()` increments it under the lock,
-`entry.lastUsed` stores the value. Two events tie only if they *are* the same event. Ten consecutive
-runs green. This is the single-node case of the **Lamport clock** we'll need in Phase 3, where wall
-clocks on different machines disagree by milliseconds and can run backwards under NTP. Arrived at it
-because a Windows timer wasn't precise enough — which is not a coincidence, it's the same problem.
-
-**Measured (13th Gen i7-13700H, Go 1.26):**
-```
-BenchmarkSetAtCapacity/1000-20         22,843 ns/op   -> 22.8 ns/key
-BenchmarkSetAtCapacity/10000-20       223,358 ns/op   -> 22.3 ns/key
-BenchmarkSetAtCapacity/100000-20    2,010,846 ns/op   -> 20.1 ns/key
-BenchmarkSetAtCapacity/1000000-20  25,608,480 ns/op   -> 25.6 ns/key
-```
-**25.6 ms per `Set`** into a full 1M cache — Aayush predicted "~25ms" from theory last session. It is
-`BenchmarkSweep`'s 27.5 ns/key: literally the same scan. The difference is *where* it runs. `sweepAll`
-paid it once a second on a background goroutine; this pays it on the caller's goroutine on **every
-`Set`**, and a cache that isn't full has the wrong capacity. Earns step 5.
-
-**Unpredicted:** `BenchmarkGet` went **66.99ns → 61.31ns, 0 allocs** despite `Get` now performing an
-extra map *write*. Rewriting a slot the lookup just pulled into L1 costs nothing measurable. I'd have
-guessed a few ns of cost; the measurement won.
-
-**Broke an old test, honestly.** `entry` grew 40 B → 48 B, and `TestSweepReclaimsUnreadKeys` asserted
-`afterSweep <= afterWrite/2` — a magic threshold, crossed by 0.4 MB (25.2 vs 24.8). The sweep still
-reclaims everything. The real finding: **the never-shrinking bucket residue scales with `sizeof(entry)`,
-not with the payload** — 16.5 MB → 25.2 MB from one added `uint64`, across the bucket arrays of *both*
-`data` and `expiring`. A test asserting on a fraction of peak heap is asserting on `sizeof(entry)`.
-Rewrote it to assert on the ~24 MB of payload the sweep actually owes us.
-
-**Also:** compressed `docs/QUIZZES.md` 543 → 215 lines (every question, model answer, and named gap
-kept; the restatements cut).
-
----
-
-### Session 5 (cont.) — Phase 1 step 5: O(1) eviction
-
-**Quick-check before coding: 3 ✅ · 1 ⚠️** (full text in `docs/QUIZZES.md`, Session 5b).
-
-**Built: hash map + doubly linked list.** `map[string]entry` → `map[string]*node`; sentinel `head`
-and `tail`; `unlink`/`pushFront`/`removeLocked`. The map has no order, the list has no lookup;
-together both operations are O(1). `lastUsed` and `Cache.clock` **deleted** — position in the list
-*is* recency, and you don't keep scaffolding after the building stands.
-
-```
-                scan for min lastUsed   unlink the tail
-    1k               22,843 ns/op          410.1 ns/op       56x
-   10k              223,358 ns/op          489.3 ns/op      456x
-  100k            2,010,846 ns/op          452.4 ns/op    4,445x
-    1M           25,608,480 ns/op          579.4 ns/op   44,199x
-```
-
-**Two things got faster that nobody asked for.**
-- `BenchmarkGet` **61.31 → 52.52 ns**. I predicted it would get *slower* (a pointer deref is a cache
-  miss the value-map didn't have). Instead the pointer **paid for itself**: a `*node` is addressable,
-  so `Get` stopped doing `c.data[key] = e` — one hash and one store deleted from the read path.
-- `BenchmarkSamplePass` at 1M: **7,064 → 2,105 ns (3.4×)**. `expiring` became `map[string]*node`, so
-  the sweeper stopped looking each sampled key up in `data` a second time.
-
-**The design tension, and how it resolved.** The list orders by **recency**; `evictLocked` prefers
-**corpses**; those are independent orderings, so the tail says nothing about whether a corpse exists.
-Making eviction O(1) *reintroduces* the S4d Q4 bug. Three options: (a) bounded probe of `expiring`,
-(b) an exact min-heap on `expires`, (c) do nothing and let the sweeper cope.
-
-Chose **(a)**, and the reason generalizes: **the probe's hit rate equals the corpse density, and the
-cost of a miss is inversely proportional to it.** At 99% corpses it never misses — which is exactly
-the catastrophic case. At 0.1% corpses it almost always misses, and wastes one slot in a thousand.
-*Accurate where accuracy matters, sloppy where sloppiness is free* — the same self-tuning property
-that makes Redis's sampler work. (b) would buy exactness in the regime where exactness is worthless.
-Put on the record in `TestEvictionProbeTracksCorpseDensity`, measured against `1-(1-d)^20`:
-
-```
-density 0.001   probe hit   2%   (theory   2%)
-density 0.010   probe hit  16%   (theory  18%)
-density 0.100   probe hit  88%   (theory  88%)
-density 0.990   probe hit 100%   (theory 100%)
-```
-
-**That test failed twice before it measured anything.** First: the corpses were given a 1ns TTL to
-avoid sleeping, but the clock doesn't tick for 541µs, so ~30% of trials had **no corpses at all**.
-Second, and worse: the corpses were inserted *first*, making the single corpse the LRU tail — the
-fallback evicted it whether or not the probe found it, so **the test could not have failed.** Fixed
-by backdating `expires` directly (no clock) and inserting the live keys first. Rule earned: *a test
-that cannot fail is not evidence.*
-
-**Also:** `CLAUDE.md` now documents the test/benchmark commands — `-count=1` (defeats the test cache),
-`-v` (surfaces `t.Logf`), `-run xxx -bench` (benchmarks only), `-benchmem`, never `-race` a benchmark.
-
----
-
-### Session 5 (cont.) — Phase 1 step 6: hit rate, and a hypothesis half-refuted
-
-**Hit rate, not latency, is the metric for an eviction policy.** A cache that instantly evicts exactly
-the wrong key has excellent latency. Everything measured before this was latency; `Set` at 1M is
-579ns and flat, and that number says *nothing* about whether we evict the right things.
-
-Built a cache-aside harness (`cache/hitrate_test.go`): `Get` → on miss, `Set`. That miss-path `Set`
-**is** the experiment — the cache never chooses to admit the scan's keys, the application hands them
-over as ordinary writes. Three workloads: **Zipf** (power law, real traffic), **uniform** (flat
-working set), **cyclic loop** (a report, a table scan).
-
-**Prediction, written down first, then wrong.** I predicted the post-scan hit rate would fall to
-20–40% and recover slowly. Measured: **76.5%**, a 1.7-point dip. Two mistakes, both instructive:
-1. I used a 20,000-request window, having *just* warned that aggregating hides a transient. **A
-   window is a smaller aggregate.** At 200-request resolution the crater is real (78.2% → 45.5%) and
-   ~2,000 requests wide.
-2. **A scan's damage is bounded by capacity** — you cannot lose more than you were holding. Recovery
-   costs at most one cache-worth of misses, and the scan cost the app 10,000 DB queries anyway.
-   The marginal harm to everyone else is small. I had never done that arithmetic.
+### Session 5 (cont.) — Hit rate, and a hypothesis half-refuted
+**Wrote a prediction down first, and it was wrong.** I predicted the post-scan hit rate would fall to 20–40%;
+measured **76.5%**, a 1.7-point dip. Two mistakes, both instructive: I aggregated over a 20,000-request window
+having *just* warned that aggregating hides a transient (**a window is a smaller aggregate** — at 200-request
+resolution the crater is real and ~2,000 requests wide); and I had never done the arithmetic showing **a scan's
+damage is bounded by capacity** — you cannot lose more than you were holding.
 
 **And I wrote fabricated numbers into the comments before running the code.** Caught it, deleted them.
-A number in a comment that was never measured is a rumor with a monospace font.
+> **A number in a comment that was never measured is a rumor with a monospace font.**
 
-**The real finding: the collapse depends entirely on the shape of the working set.**
+### Session 4 — 2026-07-09 · Concurrency, TTL, and the sweeper
+**Quiz: 4 ✅ · 2 ⊘.** Demonstrated the data race live (both failure signals), taught the **five failure modes of
+unsynchronized memory** and **mutex = mutual exclusion + publication barrier** (→ `GO_NOTES.md`), then built TTL
+and the sweeper.
 
-```
-zipf s=1.1 over 10k keys, cap 1000     flat working set 900, cap 1000
-  no batch job              78.2%        no batch job             100.0%
-  1 scan per 10 user        75.5%        1 scan per 10 user        89.3%
-  1 scan per  4 user        72.8%        1 scan per  4 user        76.0%
-  1 scan per  1 user        65.8%        1 scan per  1 user        47.5%
-```
+**Measuring turned out to be harder than building**, and three attempts failed before one worked: per-op latency
+printed `p50=0s` (a `Get` is 67 ns; `time.Now()` resolves to **829 µs** — 12,000× coarser); a phantom 10 ms
+"max latency" **with nothing running** turned out to be `append` growing a slice and triggering a GC (**measuring
+the measurement**); and a component benchmarked **slower than the whole containing it**, because `var sink any`
+**boxed** the value and allocated. → `GO_NOTES.md`.
 
-A batch job issuing **as many requests as every user combined** costs Zipf traffic 12.6 points. That
-is real, and it is not a collapse. **A power law's working set is tiny**: the top hundred keys carry
-most of the load, are re-requested every few operations, and never drift near the tail. The scan's
-keys, touched once, sink to the tail immediately and **evict each other.** The scan chews a slice off
-the cache and leaves the hot core alone. LRU is far more scan-resistant than this project asserted
-for four sessions — *on skewed traffic*.
+**Aayush caught a bad comment**, and it mattered: I had justified the sweep budget with a story about a
+90%-corpse cache looping forever. **False** — corpses are finite. The *real* reason only appeared when it was
+measured, and it was a different reason entirely (51% of wall time in lock contention).
 
-Where it breaks is a **flat** working set: every entry worth as much as every other, so every stolen
-slot is a lost hit. 100% → 47.5%.
+### Session 3 — 2026-07-08 · Phase 0
+Go 1.26.5 installed. Phase 0 concepts taught and quizzed (**all passed**): what a cache is, why distribute one,
+CAP, cluster-in-a-box.
 
-**And the cliff:**
-```
-cyclic loop over  900 keys (capacity 1000)   100.0%
-cyclic loop over 1100 keys (capacity 1000)     0.0%
-```
-A 22% wider working set turns a perfect cache into a useless one. Every key is evicted exactly one
-request before it is wanted again. **LRU does not degrade; it falls off a cliff.** Bélády would score
-~91% here, and so would *MRU* — evict the most recent. Nothing about the cache size is the problem.
+### Session 2 — 2026-07-08 · Failure modes, quorum, and locking the design
+A long informal deep-dive that became **HLD §6.1** (why node death causes staleness) and **§6.2** (the
+failure-mode catalog), then **walked the six §10 tradeoffs and LOCKED all of them** — HLD flipped DRAFT →
+APPROVED.
 
-**Decision: segmented LRU is DEFERRED**, with a number rather than a shrug. ~12 points on a 1:1 scan
-against skewed traffic does not pay for the complexity. Revisit if a flat-working-set workload shows
-up. That is the naive→measure→iterate loop actually being allowed to say *no*.
+Aayush reconstructed the **false-positive cascade** unprompted, reasoned out the **coordinator→consensus trap**
+on his own, and traced conflict resolution back to its single root cause: **two primaries.** The teaching (CAP,
+quorum, split-brain) is consolidated in the Phase 0 checklist above.
 
----
+**Teaching preference corrected this session:** analogies are now *optional* — default to a plain explanation +
+concrete example.
 
-### Session 4 — 2026-07-09
-- **`cache/race_test.go` written** — 100 goroutines × 100 writes of *disjoint* keys into the naive
-  map. No assertions by design: the pass/fail signal is the Go **runtime**, not `t.Errorf`. Verified
-  both failure paths live — plain `go test` → `fatal error: concurrent map writes` at `cache.go:22`;
-  `go test -race` → `WARNING: DATA RACE`, two goroutines writing the *same address* despite disjoint
-  keys (proof that the shared thing is the map's **buckets/growth flag**, not the value slots).
-- **Test simplified** to Go 1.25's `wg.Go(func(){...})` (bundles `Add(1)` + `go` + `defer Done()`,
-  making the "Add must precede `go`" bug unrepresentable) + `for i := range n`. `go vet` clean; both
-  failure signals still fire. Kept disjoint keys deliberately — they carry the lesson.
-- **Go idioms taught:** goroutines (vs `std::thread` / Python threads, no GIL); `sync.WaitGroup`
-  (zero value usable, no constructor); `defer` (= C++ RAII / `try...finally`); loop-var capture and
-  why Go 1.22 retired the `func(id int){...}(g)` workaround; `strconv.Itoa` (= `std::to_string` /
-  `str()`), why Go forbids `"k" + intVal`, and the `string(65) == "A"` trap.
-- **Data race vs race condition** — data race = mechanical memory property (same address, ≥1 write,
-  no synchronization) → **undefined behavior**, machine-detectable. Race condition = correctness
-  depends on interleaving; defined relative to intent, so **not** machine-detectable. Not the same
-  set: the read-modify-write counter (`Get` → `+1` → `Set`, each individually locked) has **zero**
-  data races and is still wrong — **check-then-act**. Slogan: *the mutex protects the data, not the
-  invariant*; the atomic unit must be the operation the **caller** cares about (→ motivates a future
-  `SetIfAbsent`). Flagged as the single-machine miniature of the whole distributed problem.
-- **The 5 failure modes of unsynchronized shared memory** (escalating severity): (1) **lost update**
-  — `counter++` is load/add/store; demoed live, 100 goroutines × 1000 incs gave 97938 / 95007 / 96209
-  across three runs, never 100000, never the same twice; (2) **corrupted data structure** — map
-  rehash breaks cross-field invariants (our test); (3) **torn values** — slice `(ptr,len,cap)` and
-  interface `(type,data)` are multi-word, half-written → *memory unsafety in a language with no
-  pointer arithmetic*; (4) **stale reads / visibility** — compiler hoists the load out of the loop →
-  infinite loop; atomicity isn't the issue, **publication** is; (5) **reordering** — `data=42;
-  ready=true` may become visible out of order. Punchline: which one you get is unpredictable — that
-  *is* what UB means, and it's why "ran it 1000× and it was fine" is worthless.
-- **Mutex = mutual exclusion + publication barrier** (the half people forget): everything written
-  before `Unlock` is visible to whoever `Lock`s next. Kills all 5 modes at once.
-- **Cross-language check:** the problem and the primitives are universal (`std::mutex`,
-  `threading.Lock`, `synchronized`, `Mutex<T>`, `Interlocked`). What varies: **consequences** (C++/Go
-  = UB; **Java defines racy reads** — no fabricated values, no corruption, but non-`volatile`
-  `long`/`double` may tear), **prevention** (Rust makes data races a *compile error* via ownership /
-  `Send`+`Sync`, and `Mutex<T>` holds the data *inside* the lock — but Rust still permits race
-  conditions and deadlocks), and **tooling**. Python's GIL half-protects: `dict` internals stay sane,
-  but `counter += 1` is several bytecodes → lost updates anyway; free-threaded Python (PEP 703)
-  removes that accidental safety net. JS dodges it with one event loop until `SharedArrayBuffer`.
-  Go's actual contributions: `-race` in the toolchain, the runtime's own map guard, and channels as
-  an alternative discipline — **not** the mutex itself.
-- Reinforced: Go's `sync.Mutex` and the map it guards are *separate fields* — nothing forces the
-  association, forgetting to lock compiles fine. (Contrast Rust's `Mutex<T>`.)
-- **Session 4 quiz taken** after all (6 Q, 4 ✅ / 2 ⊘). Full text + model answers in `docs/QUIZZES.md`.
-
-#### Session 4 (cont.) — Phase 1 step 3: TTL, and step 3b: the sweeper
-- **TTL taught.** TTL = the *bound* on the bounded-staleness bargain; without it staleness is
-  unbounded. Naive design (one timer goroutine per key) rejected for two reasons: a goroutine per
-  key, and — the real one — it is **silently wrong on overwrite**. `Set(k,"a",30s)` then
-  `Set(k,"b",10min)`: the first timer still fires at t=30s and deletes `"b"`, which had 9.5 min left.
-  The timer holds a **stale belief** about what it's deleting. Insight: **expiry is not an event to
-  schedule, it's a comparison to make.** Nobody can observe a key expired unless they look at it.
-- **Built lazy expiry** — `entry{value, expires time.Time}`; deadline stored **absolute** (arithmetic
-  once at write time, not per read); `ttl <= 0` → zero `time.Time` sentinel, tested via `IsZero()`
-  not a magic constant; `Get` compares and deletes on the spot. Note **`Get` is now a writer** →
-  cannot take an `RLock` if we ever move to `RWMutex`. (Tension with the deferred `RWMutex` idea.)
-- **Measured the leak** (`cache/leak_test.go`). Session-cache workload: 200k keys, short TTL, never
-  read back. Result: **40.9 MB retained, 200 000 corpses, 1 live key** — and `heapMB()` forces
-  `runtime.GC()` first, so this survives a full collection. **A GC frees *unreachable* memory; every
-  corpse is reachable from `c.data`, so it is by definition live.** A *logical* leak, not a collector
-  bug — no GC in any language can fix it, because "useless" is a fact about intent, not reachability.
-  (Same intent-vs-mechanism split as race condition vs data race.) Extrapolated: 1k logins/sec ≈
-  8.4 GB/day → OOM within a day while never holding more than a few thousand live keys.
-- **Built the sweeper** — background goroutine, `time.Ticker` + `select` on a `done chan struct{}`,
-  `Close()` idempotent via `sync.Once` and blocking on a `sync.WaitGroup`.
-  - **Why `Close()` is mandatory, not politeness:** a running goroutine's stack is a **GC root**, so
-    the sweeper keeps the whole `Cache` reachable forever. Goroutine and cache hold each other up.
-    Only the goroutine *returning* can free either. `runtime.SetFinalizer` can't help — a finalizer
-    runs when an object becomes unreachable, which is exactly what can't happen.
-  - **Ticker not `time.Sleep`:** `Sleep` cannot be interrupted, so `Close()` would block up to a full
-    interval. `select` can only race *channels*; a `Ticker` is `Sleep` reshaped into a channel.
-  - **`close()` not send:** closing broadcasts (every receiver unblocks, now and forever); a send
-    wakes exactly one. Double-close **panics** → `sync.Once`.
-  - **`wg.Wait()` in `Close()`** separates *asking* to stop from *knowing* it stopped — makes
-    `TestCloseStopsSweeper` deterministic instead of sleep-and-hope. If `sweepLoop` ignored `done`,
-    `Close` blocks forever and the hang **is** the assertion.
-  - **Channels are the exception to "zero value is usable."** `sync.Mutex`/`Once`/`WaitGroup` work
-    unconstructed; a channel's zero value is `nil` and **receiving from nil blocks forever** —
-    a silent hang, no panic. Must `make()`.
-- **Go facts nailed down:** deleting from a map *during* `range` is legal (an entry removed before
-  it's reached is never produced) — unlike C++ iterator invalidation; map iteration order is
-  **randomized per `range`**, so there is no cursor and "resume where I left off" is not
-  implementable; lowercase identifiers are package-private (test seam without public API).
-- **Surprise, measured:** after sweeping 200k entries to `Len()==0`, the heap sat at **16.5 MB**.
-  Confirmed by throwaway experiment: replacing `c.data` with a fresh map dropped it to 0.5 MB.
-  **Go maps never shrink** — `delete()` frees keys and values, the bucket array stays sized for the
-  all-time peak. A cache that spikes to 1M keys once at 3am holds that array until the process dies.
-  Redis rehashes into a smaller table; Go doesn't. **Filed as a known limit, not fixed.**
-- **A test failure that taught something:** the first `leak_test.go` had the background sweeper
-  reclaiming keys *while the 200k-key write loop was still running* (writes take ~1s under `-race`,
-  TTL was 50ms) → `Len()=10529`. Rewritten to disable the background sweeper
-  (`newWithSweepInterval(time.Hour)`) and call `c.sweep()` directly. Timing moved out of the
-  assertion into a place where it can't lie. Also fixed a fake payload: 200k entries all storing the
-  *same* `strings.Repeat("x",100)` share **one** backing array (a Go string is a 16-byte
-  `(ptr,len)` pair), so the values must be made distinct to allocate for real.
-- **Sweeper quick-check quiz** (3 Q) — see `docs/QUIZZES.md`. 1 ✅ · 1 ⚠️ · 1 half.
-  **Pattern flagged:** the ⚠️ was *again* "acted on a value read before releasing the lock" —
-  the same **compare, don't remember** miss as Session 4 Q2. Twice now; logged as a pattern.
-#### Session 4 (cont.) — Phase 1 step 3c: measure the pause, then the sampling sweeper
-- **Benchmarked the defect** (`cache/bench_test.go`). `Get` = **67 ns/op, 0 allocs**, decomposed:
-  mutex Lock+Unlock **26.9 ns**, map lookup **22.2 ns**, `time.Now()` **8.0 ns**. So an *uncontended*
-  mutex is **40% of a read** — that's the `RWMutex` question answered with evidence: an `RLock` costs
-  *more* than a `Lock` and would have only ~22 ns of work to overlap. Not an obvious win.
-- **`sweepAll` is O(total keys), not O(expired keys):** 24.4 / 24.2 / 23.5 / 27.5 ns per key at
-  1k / 10k / 100k / 1M. Ten times the keys, ten times the time. And `fill()` writes **permanent**
-  keys, so every one of those sweeps **deleted nothing** and still cost 27 ms at 1M. **The scan pays
-  for looking, not for finding.** At ~24 ns/key it's already one map-iteration step + a compare —
-  **a full scan cannot be optimized below this; you have to stop scanning.**
-- **The damage:** one sweep of 1M keys holds the lock **47.9 ms cold** / 27.5 ms warm. Reader
-  throughput **6,584,449 → 8,769** gets per 500 ms window (**751×**). Those 8,769 reads × 76 ns is
-  0.67 ms of work in 500 ms — **the reader was productive 0.13% of the time.** Not "slower": an
-  outage that answers 8,769 requests. It gets 8,769 rather than 0 only because **Go's mutex enters
-  starvation mode** after a waiter blocks 1 ms and hands the lock over directly. On a 1 s interval the
-  cache is **frozen 2.5% of wall time**, blowing any p99 budget by construction, on an idle machine.
-  **The naive sweeper converts a memory problem into a tail-latency problem** — for a cache, a bad
-  trade. Tuning the interval slides along that curve; it doesn't leave it.
-- **Measuring is hard — three failed attempts, all recorded in `GO_NOTES.md`:**
-  (a) per-op latency printed `p50=0s` — a `Get` is **67 ns**, this machine's `time.Now()` resolves to
-  **829 µs**, 12,000× coarser; (b) a phantom 10 ms "max latency" **with nothing running** — that was
-  `append` growing a 4M-element slice and triggering a GC, i.e. *measuring the measurement*;
-  (c) the `Get` decomposition first reported `RawMapLookup` at **78 ns — slower than the 67 ns `Get`
-  containing it**, because `var sink any` **boxes** the value and allocates. Typed sinks + `-benchmem`
-  + `0 allocs/op` fixed it. Rules: *fix the count and time the batch, or fix the time and count the
-  operations*; *never allocate inside the measured loop*; *a component can't cost more than the whole*.
-- **Built the sampling sweeper.** `samplePass` locks, walks ≤20 keys of the `expiring` index, deletes
-  the expired ones, unlocks. `sampleSweep` repeats immediately while >25% of a sample came back
-  expired. `sweepAll` kept **only** as the benchmark baseline.
-  - **`expiring map[string]struct{}`** — the separate TTL index Aayush's quiz answer implied.
-    Verified by `TestSampleSweepIgnoresPermanentKeys` (100k permanent + 100 expiring).
-    Three sites mutate `data`, so three must mutate `expiring`: `Set` (index if `ttl>0`, **un-index
-    otherwise** — overwrite-to-permanent), `Get` (lazy expiry), `samplePass`. New bug class: two maps
-    that must agree → `TestExpiringIndexStaysConsistent`.
-  - **Why dropping the lock is safe here and was fatal before:** `samplePass` is **stateless** — locks,
-    re-reads fresh, acts, unlocks, carries out only two ints. Nothing to be stale about.
-    *Compare, don't remember*, satisfied structurally rather than by discipline.
-  - **Go's randomized map iteration** — the property that made "resume where I left off" impossible
-    in the sweeper quiz — is exactly what makes `for k := range m { …; break }` a cheap random sample.
-    Same language decision punishing one design and rewarding the next. (Samples *buckets*, not keys,
-    so not perfectly uniform. Fine for estimating a fraction.)
-- **Results:** lock hold at 1M keys **27,489,911 ns → 7,064 ns (3,891×)**. Reader cost **751× → 2.0×**
-  — and the residual 2.0× **isn't a stall**: that test runs the sampler flat out, so two goroutines
-  split one mutex and half each is *correct*. The real `sweepLoop` costs ~7 µs/s = **0.0007%** of wall
-  time vs the full scan's 2.5%.
-- **My "constant pause" claim was WRONG, and the measurement said so:** `samplePass` = 953 ns at 1k
-  keys → **7,064 ns at 1M**, a 7.4× growth over 1000× the data. It touches exactly 20 keys at every
-  size; what changes is what a touch *costs* — at 1k the map is in L1, at 1M every random bucket probe
-  is a cache and TLB miss. **48 ns/key → 353 ns/key. Not algorithmic — physics.** Still flat-*ish* vs
-  the full scan's true O(n) (1,128× over the same range), so the design holds. Lesson recorded:
-  **the algorithm said constant, the hardware said nearly. Memory locality is invisible from the
-  algorithm.**
-- **Adaptive rate, not a tuned interval:** 50k corpses cleared in **2 `sampleSweep` calls** — a sample
-  that comes back 100% expired fails the threshold and passes again *immediately*, no sleep, no tick.
-  "Sample 20 keys" ≠ "reclaim 20 keys per interval"; it means *reclaim as fast as there is garbage, in
-  bites that never block a reader for long*. The rate is **emergent**. `defaultSweepInterval` — the
-  constant flagged as "picked by gut" — **no longer sets the sweep rate**, only how often we check.
-  We deleted the guess rather than tuning it. A healthy cache's first sample comes back clean and
-  `sampleSweep` returns after ~1 µs.
-- **Aayush caught a bad comment.** I'd justified the sweep budget as "without it a cache that is 90%
-  corpses would pass forever and pin a core." **False** — corpses are finite, the loop always
-  terminates. Probed it: reclaiming 500k corpses unbounded takes **25,000 passes over 513.9 ms** of
-  continuous lock churn; on a 1 s tick that's **51% of wall time in contention**, which is the
-  throughput damage the rewrite existed to prevent, re-entering at 20 µs granularity instead of one
-  27 ms lump. So the two bounds do **different jobs**: `sampleSize` bounds the **pause** (individual
-  request latency); the **budget** bounds how long the sweeper keeps **competing** for the lock,
-  because pass count is O(expired keys) — set by the workload, not by us. Budgeted: reclaims 347,900
-  of 500,000 in 251 ms and **carries 152,100 to the next tick**. Same bargain as the sampler itself,
-  applied to time instead of space: **bounded waste in exchange for bounded interference.** (Redis
-  caps itself at 25% CPU the same way.) *The original comment was a plausible-sounding rationalization
-  that was never checked — exactly the habit this project is meant to train out.*
-
-#### Session 4 (cont.) — who calls `Close()`? (design, no code)
-- **Ownership rule: whoever constructs it, closes it.** Ownership is created by `New()` and does not
-  float. A function that *receives* a `*Cache` must never close it. So the chain is
-  `main` → `node.Close()` → `cache.Close()`; each layer closes exactly what it made, and the
-  obligation propagates upward — a node that owns a resource is *forced* to grow a `Close()`.
-- **Honest caveat: for a one-cache, one-process server, `Close()` is nearly pointless** — process exit
-  reclaims everything. Leaking a goroutine only costs you if caches are created and destroyed
-  *repeatedly* within one process lifetime.
-- **…which is exactly this project.** The money moment is `/admin/kill`. Every kill destroys a node
-  and its cache; every recovery makes new ones. Forty demo clicks = forty leaked sweeper goroutines,
-  and each goroutine stack is a **GC root**, so none of that memory is collectable. The process
-  demonstrating self-healing would slowly die of the thing it demonstrates. **`Close()` is
-  load-bearing *because of* the failure-injection design.**
-- **Shutdown ordering:** `signal.NotifyContext` → `<-ctx.Done()` → `srv.Shutdown(ctx)` (stop
-  accepting, drain in-flight handlers) → **then** `cluster.Close()`. **Stop the users, then stop the
-  thing they use.** Reversing it tears down a cache a handler is mid-`Get` on. (Ours survives that —
-  `Close` only stops sweeping — but relying on it is fragile.)
-- Decided: `Close()` returns **nothing**, not `error`. It can't fail, and inventing an always-nil
-  error to satisfy `io.Closer` is a lie about the API. And **not** `New(ctx)`: `context` is for
-  request scope and in-flight cancellation, `Close()` is for resource lifetime. Tying cache lifetime
-  to a shared context would make it impossible to kill *one* node — precisely what the demo needs.
-- Nothing calls `Close()` outside tests yet (no `main`). Not a bug. `node.Close()` / `Cluster.Close()`
-  are the first things Phase 2 must grow.
-
-#### Session 4 (cont.) — Phase 1 step 4: eviction (taught & quizzed; NO CODE YET)
-- **Why a size limit is a second, independent bound.** TTL bounds **staleness**, not **size**:
-  1k sessions/sec × 30-min TTL = **1.8M live entries** in steady state, none of them stale. And
-  `ttl <= 0` keys never expire — a cache of permanent keys with no limit is a **memory leak by
-  design**.
-- **Bélády's optimal algorithm** — evict the entry needed *farthest in the future*. Provably optimal,
-  **unimplementable** (needs the future). Reframe: **every real policy is an approximation of Bélády
-  using only the past.** You are not choosing a data structure, you are choosing **a theory about how
-  your users behave.** Random (no theory) · FIFO ("old things stop being useful") · **LRU** (temporal
-  locality) · LFU (popularity is stable).
-- **LRU's failure mode — the sequential scan.** Capacity 3, hot `{a,b,c}` at ~100% hit rate. A batch
-  job reads `x1..x10` once each: each miss makes the app `Set` the key, each `Set` evicts the LRU.
-  End state `{x8,x9,x10}` — keys **nobody will ever read again**; `a,b,c` gone; hit rate **0%**. The
-  scan got *zero* benefit (every read missed regardless) and destroyed the hot set: **strictly
-  negative work.** With a scan longer than the cache, it even flushes itself. Root cause: **LRU treats
-  a single access as sufficient evidence a key deserves to be cached**, and for a scan that evidence
-  is a lie.
-- **Aayush caught a real error in my trace.** I wrote `Get(x1) → insert, evict a`, but **our `Get`
-  never inserts** — it's a **cache-aside (look-aside)** store, like Redis/memcached: the *application*
-  does `Get` → miss → `db.Query` → `Set`. **Eviction can only happen in `Set`.** (A **read-through**
-  cache — Caffeine, Guava `LoadingCache` — takes a loader and populates itself; there `Get` can evict.)
-  The consequence is sharper, not weaker: the cache sees ten ordinary `Set`s with no flag saying
-  "batch job." **Pollution originates in the caller's fill pattern**, so scan resistance must live in
-  the eviction policy — the only place with enough information to tell a hot key from a scan artifact.
-  Division of labour: `Get` **hit** updates recency (→ `Get` is a writer, **third** time, which kills
-  `RWMutex` properly rather than provisionally) · `Get` **miss** does nothing · `Set` updates recency
-  **and** evicts.
-- **Aayush's challenge: "won't LRU evict the expired keys anyway — aren't corpses least-recently
-  used?"** Sometimes, but **recency and expiry are independent orderings**: LRU sorts by *last touch*,
-  expiry sorts by *deadline*. Killer case (our own leak workload): 999 sessions `Set` with a 50 ms TTL
-  in the last second and never read, plus one permanent `config` key touched a minute ago. A `Set` is
-  an access, so **every corpse is more recently used than the live key** → LRU evicts `config` and
-  keeps 999 corpses. The cache is then *worse than empty*: 1000 slots serving nothing. Converse: a key
-  `Set` 1 ms ago with a 1 ms TTL is the **MRU entry and already a corpse**. Recency of *use* ≠ freshness
-  of *value*. And "usually right" is not a bound when the check costs **one timestamp compare**.
-  → **Reclaim a corpse before evicting anything live.** The `expiring` index + `samplePass` already
-  give us the machinery. This is the step-3↔step-4 seam, found by Aayush arguing with me.
-- **Scan resistance — four families**, three of which weaken the meaning of a single access:
-  | Family | Question it adds | Real systems |
-  |---|---|---|
-  | More evidence | "have you been used *twice*?" | InnoDB young/old sublists, 2Q, Linux active/inactive |
-  | Frequency | "how *often*?" | LFU **+ decay** (Redis log counter, halving), ARC (adaptive recency/frequency boundary), LIRS (reuse distance, RocksDB) |
-  | **Admission** | "are you better than whoever you'd evict?" | **TinyLFU / W-TinyLFU** (Caffeine) |
-  | Hinting | "will the caller just tell us?" | PostgreSQL seq-scan ring buffer, `MADV_SEQUENTIAL` |
-  - **Admission is the deep reframe: LRU has no admission policy.** Every arriving key is admitted
-    unconditionally; the only question ever asked is *who leaves*. TinyLFU asks *should this key come
-    in* — victim `a` has freq ~1000, `x1` has freq 1, so **reject `x1`** and leave the cache untouched.
-    The whole scan costs nothing.
-  - Tracking a count per key would cost more than the cache, so TinyLFU uses a **Count-Min Sketch**
-    (few bits/key, error only ever an over-estimate) + a **doorkeeper** Bloom filter for one-hit
-    wonders + periodic counter halving for decay. **Approximate answer, bounded error, memory
-    independent of data size** — the *same bargain* as the sampling sweeper, and the one Phase 4's
-    failure detection will make. It keeps recurring because it's how you get O(1) out of problems that
-    look O(n).
-  - Naive LFU is broken on its own: counts never decay, so last Tuesday's viral key is immortal and a
-    genuinely rising key can never accumulate enough count to displace it. **LFU can't adapt.**
-- **The metric changes here.** "Does it work" is the wrong question — LRU always evicts *something*.
-  The metric is **hit rate** = hits/(hits+misses). Eviction policy is the main lever on it, and **you
-  cannot compare two policies without measuring it.** Hence step 4's benchmark before any scan fix.
-- **Deliberately NOT fixing scan resistance yet.** Segmented LRU is ~30 lines, but we have no hit-rate
-  benchmark and no scan workload. Adding W-TinyLFU now = adding a solution to a problem we haven't
-  measured, on the strength of a story. **The scan story is a hypothesis until it prints a number.**
-
-### Session 3 — 2026-07-08
-- Confirmed HLD §6.2 failure-mode catalog present (line 206) — user had missed it (it's a
-  subsection of §6, not a top-level section).
-- **Go 1.26.5 installed** via `winget install GoLang.Go` (at `C:\Program Files\Go\bin`).
-- **Phase 0 concepts taught & quizzed (all passed):**
-  - **What a cache is** — key→value, cache hit/miss, TTL, eviction, *bounded staleness* bargain.
-    Quick-check: stale read (sharpened "inconsistent"→"stale"); LRU + temporal locality. ✅
-  - **Why distribute** — single-node walls: capacity, throughput, availability (SPOF → thundering
-    herd + retry storms). Fix = split (capacity/throughput) → replicate (survive a death) →
-    self-heal (survive repeated deaths). Quick-check ✅ (sharpened Q3 onto the 3 named steps).
-  - **CAP consolidation** — C/A/P definitions, P-not-optional (real choice = C vs A), AP-vs-CP
-    partition behavior ("AP always answers but may lie; CP never lies but may refuse"). ✅
-  - **Cluster-in-a-box** — real protocol (nodes, real HTTP msg-passing, real detection/replication/
-    heal) vs collapsed topology (N goroutines/1 container); shared-fate honesty caveat (legit vs
-    dishonest claims for the writeup). ✅
-- Phase 0 checklist: cache ☑, CAP ☑, cluster-in-a-box ☑. (Go idioms taught on-demand in Phase 1.)
-
-### Session 2 — 2026-07-08
-- **Teaching preference corrected:** analogies are now *optional* — default to a simple explanation +
-  concrete example, use an analogy only when a concept is genuinely hard or Aayush asks. Updated in
-  both `CLAUDE.md` (teaching-style bullets) and the `learning-project-preferences` memory.
-- **HLD enriched** (`docs/HLD.md`):
-  - Added **§6.1 "Why node death causes staleness"** — async-write replication window; the freshest
-    copy can die with the primary (lost write vs stale read); self-heal restores *redundancy* not
-    *freshness*; TTL / read-repair / W-acks bound the damage.
-  - Added **§6 "Who runs the heal (decided)"** — no dedicated healer node; each key range's current
-    primary coordinates its own heal, deterministically from the ring (no election); nodes scan only
-    the keys they already hold (no node knows the global keyset).
-- **Failure-mode deep dive (informal, pre-phase — like Session 1):**
-  - **Lost writes:** acked-but-unreplicated write dies with the primary; primary-only ack vs W-acks
-    is a dial that turns single-node silent loss into correlated-multi-node loss (never zero).
-  - **Heal trigger mechanics:** *promotion is lazy/triggerless* (just what `owner(k)` returns once
-    the view changes) vs *the heal is event-triggered* off the `alive→dead` transition; edge- not
-    level-triggered; react to node-identity **transitions**, not the alive **count** (one-out/one-in
-    keeps the count constant yet ownership shifts).
-  - **available ≠ fully-replicated:** the window between promotion (instant) and heal (later) serves
-    reads while under-replicated.
-  - **Detection window:** ring still includes the dead node → reads survive via fallback but pay a
-    timeout of latency (bounded by the app-level request timeout, not OS/TCP); writes to the dead
-    node's ranges briefly unavailable or risky.
-  - **False positives:** GC pause/slow node looks identical to death (silence is ambiguous); needless
-    migration → CPU/network cost → secondary false positives → flapping/cascade storm; the
-    short-vs-long timeout tradeoff is fundamental. Named phi-accrual, SWIM indirect probes,
-    grace/incarnation numbers as mitigations.
-  - **Partition / split-brain:** both sides think they're the survivor; both serve (AP) → divergent
-    writes → LWW on reconcile silently drops the loser (real data loss = the price of AP). CAP made
-    concrete; **quorum/majority** as the CP alternative (minority side goes unavailable). Key
-    correction: a **coordinator does not dodge the CAP choice** — a single one is a SPOF, a
-    replicated one partitions too and needs consensus (= quorum = CP). Callback to Session 1's
-    "replicating a coordinator itself needs consensus" insight. Cluster-in-a-box partitions are
-    *injected* (`/admin/partition`), not natural.
-  - **Quorum:** quorum = a *count/threshold*, NOT hand-picked nodes. Two flavors — (1) **membership
-    quorum** (majority of all N; decides which side serves under partition; a side has quorum iff
-    reachable-nodes > N/2), (2) **per-key R/W quorum** (Dynamo W-acks; candidate pool = the key's N
-    replicas from the ring; `R+W>N` guarantees read/write set overlap → no stale read). Core property:
-    any two majorities of a set must overlap → at most one writable side / read always sees latest
-    write. Prefer **odd N** (even N wastes a machine + risks a 2–2 split-vote → both sides
-    unavailable). `W=N` destroys write fault-tolerance (any 1 replica down → all writes fail).
-  - **Conflict resolution under quorum:** *overlap ≠ ordering*. Consensus/single-leader quorum (CP)
-    → no conflicts (writes serialized by leader). Leaderless R/W quorum (Dynamo) → concurrent writes
-    to different W-subsets diverge → needs LWW / vector clocks. **For our design:** the per-key
-    primary serializes writes → no conflict in normal operation; conflict (hence LWW) arises *only*
-    when the single-primary invariant breaks → **two primaries**, via partition or asymmetric false
-    positive. LWW is our split-brain *repair* tool, not a data-path concern.
-- **Quiz outcomes:** see quiz log below. Overall strong; Aayush independently reconstructed the
-  false-positive cascade, reasoned the coordinator→consensus trap, and traced conflict resolution
-  back to the two-primaries root cause.
-- **Added HLD §6.2 "Failure modes (catalog)"** — concise 7-row table (lost write, detection window,
-  available≠fully-replicated, false positive, partition/split-brain, two-primaries conflict,
-  correlated total loss) + the timeout & AP-vs-CP cross-cutting tension.
-- **Walked the 6 §10 tradeoffs and LOCKED all of them** (see Current status). HLD status banner
-  flipped DRAFT → APPROVED; §10 rewritten from open ⚑ questions to locked ✅ decisions with reserves.
-
-### Session 1 — 2026-07-07
-- Set up project scaffolding: CLAUDE.md, ROADMAP.md, PROGRESS.md, memory files.
-- Decisions locked: Go · **complete-beginner** teaching level (updated from "some exposure"
-  mid-session) · mixed quizzing · cluster-in-a-box.
-- Removed all references to the (now-deleted) DISTRIBUTED_SYSTEMS_PROJECT_IDEAS.md.
-- **Taught (informal Q&A, not yet a formal phase):** why consensus is out of scope; CAP & AP vs CP;
-  consistency / staleness / eventual consistency; async replication vs read-repair vs anti-entropy
-  vs TTL; split-brain & conflict resolution; control plane vs data plane; peer-gossip failure
-  detection (no coordinator → no consensus needed); full failure-mode catalog for our design; and
-  how the whole discussion maps onto the project phases.
-- Aayush's quick-checks: answered strongly (correctly reasoned that replicating a coordinator would
-  itself need consensus among coordinators — the key insight). Comfortable with the material.
-- **Drafted `docs/HLD.md`** (architecture, components, flows, interfaces, 6 open ⚑ decisions).
-- Go toolchain still NOT installed — first practical task in Phase 0.
-- Stopped for the day; will continue tomorrow.
+### Session 1 — 2026-07-07 · Scaffolding
+Project set up; decisions locked (Go · complete-beginner teaching level · mixed quizzing · cluster-in-a-box);
+`docs/HLD.md` drafted with six open ⚑ decisions. Taught informally: why consensus is out of scope, CAP, eventual
+consistency, split-brain, control plane vs data plane. **Aayush's key insight, unprompted: replicating a
+coordinator would itself need consensus among the coordinators** — which is the argument the whole AP design
+rests on.
 
 ---
 
-## Quiz results log
-_(Score + what to revisit. **Full question text and model answers live in `docs/QUIZZES.md`.**)_
+## Quiz scoreboard
+Score and what to revisit. **Full question text, model answers, and the named gap behind every ⚠️/❌ live in
+`docs/QUIZZES.md`.**
 
-### 2026-07-10 — Session 6: Phase 4 milestone quiz (failure detection) → **2 ✅ · 2 ⚠️ · 2 ⊘**
-- ✅ three causes of silence (crash/GC/network) · ✅ independent views → coordinator→SPOF→**consensus**→CP chain
-- ⚠️ **the timeout knob** — 50ms false-positives ✅; 5s conclusion right but *mechanism* wrong (a crashed node fails pings *fast*; the delay is the `lastSeen` **declaration** threshold, not a hanging connection).
-- ⚠️ **scaling** — named "gossip/SWIM" but not the mechanism (a node learns of a death **second-hand** / transitively, not by direct ping).
-- ⊘ **self-suspicion & split-brain** — left blank *despite the live demo minutes earlier*. Re-ask cold.
-- ⊘ **extend it / reduce false positives** — left blank. Model answers (indirect probing, suspicion+incarnation, N-misses, phi-accrual) + the universal tradeoff (every mitigation slows *real* detection) in QUIZZES.md.
-- **Revisit:** the pattern is **label-not-mechanism** (Q2 why, Q5 how, Q4/Q6 blank) — the hard concepts (Q1, Q3) were clean, so it's precision, not comprehension. Push for the mechanism on re-ask. Carry Q4 and Q6 forward cold into Session 7.
-
-### 2026-07-10 — Session 5: cold re-ask of the 9 carried-forward questions → **2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘**
-- ✅ naive-timer overwrite bug · ✅ `Close()`/`select`/`Ticker`
-- ❌ **check-then-act** — third miss. Looked for a missing lock in a fully-locked function.
-- ⚠️ **starvation** defined backwards · ⚠️ **resource semantics** ("heap allocation makes it a
-  resource" — no; a `[]byte` is heap-allocated and is a value) · ⚠️ **compare-don't-remember** —
-  slogan recited, interleaving not produced · ⚠️ **expiry-aware eviction** — right victim, imported
-  the wrong principle · ⚠️ **scan resistance** — 3 of 4 families, never *named* admission control
-- ⊘ **happens-before** — not attempted; taught in full.
-- **Revisit first:** check-then-act (still unanswered), then admission control, then happens-before.
-
-### 2026-07-09 — Session 4: concurrency, races, mutex (6 Q) → **4 ✅ · 2 ⊘ · 0 ❌**
-- **Disjoint keys still race** — ✅ named the shared map; sharpened to *which part* (bucket array /
-  growth flag / count, not the value slots).
-- **Data race definition** — ✅ all three conditions. **Race condition ≠ data race** — ⚠️ named
-  check-then-act as a category but did not produce concrete code. → re-ask cold.
-- **Why `Get` locks** — ✅ strong; produced "map mid-rehash" unprompted. Sharpened: it's *required*
-  by the definition (≥1 writer suffices), not caution; consequence is corruption, not staleness.
-- **`defer` / lock never released** — ⚠️ mechanism exactly right, called it **starvation** when it is
-  **deadlock**. Vocabulary gap, not understanding. Matters in Phase 4. → re-ask cold.
-- **Atomic map ⇒ no mutex?** — ⊘ taught instead: lost updates + **safe publication** survive
-  per-operation atomicity; mutex = critical section **+ happens-before edge over all memory**.
-  → **re-ask before Phase 3** (becomes "when is a replicated write visible?").
-- **`SetIfAbsent` vs `RWMutex`** — ⊘ taught instead: correctness (reasoned, needs a *caller*) vs
-  performance (needs a `b.RunParallel` benchmark; `RWMutex` may well be *slower* on ns-long
-  critical sections).
-
-### 2026-07-08 — Failure-mode quick-checks (pre-phase, informal)
-- **Deterministic promotion / no election** — ✅ strong. Correctly explained ownership as a pure
-  function of (ring, alive nodes), added the "given agreement on membership" caveat when prompted.
-- **W-acks don't eliminate loss** — ✅ correct (shrinks to correlated-multi-node loss).
-- **Read succeeds during heal / replication status** — ⚠️ partial. Got promotion + routing right but
-  missed that the cluster is *under-replicated* at that instant. Re-taught "available ≠
-  fully-replicated." → revisit.
-- **React to transitions not count** — ⚠️ partial. Right direction but didn't produce the concrete
-  one-out/one-in counterexample. Re-taught.
-- **False-positive cascade (short timeout)** — ✅✅ excellent, reconstructed the storm unprompted.
-- **Detection-window latency source** — ✅ correct (timeout before fallback; refined to app-level
-  request timeout).
-- **Two conflicting values under false positive** — ⚠️ partial → re-taught **frozen (→ staleness)
-  vs alive-but-unreachable (→ true conflicting writes)**. → revisit.
-- **Coordinator resolves split-brain?** — ✅ Aayush self-corrected via Session 1's insight
-  (replicated coordinator needs consensus = quorum = CP). Solid.
-
-### 2026-07-08 (cont.) — Quorum + conflict-resolution quick-checks
-- **Partition CP behavior** — ✅ (refined: minority always refuses writes; refuses reads only if a
-  strong-read guarantee is wanted, else it *may* serve stale reads).
-- **W=3, R=1 on N=3** — ✅ `R+W>N`, read-your-writes; downside sharpened from "latency" to "W=N
-  destroys write fault-tolerance — any 1 replica down → all writes fail."
-- **Why 4 nodes worse than 3** — ✅ 2–2 split-vote (neither has majority) + no extra fault tolerance
-  for the extra machine.
-- **Conflict resolution possible in our design?** — ✅ correctly identified **two primaries**
-  (split-brain via partition or asymmetric false positive) as the sole root cause.
+| Date | Quiz | Score | What it flagged |
+|---|---|---|---|
+| 2026-07-11 | **S9 · Phase 5+6 milestone** | 2 ✅ · 3 ⚠️ · 3 ⊘ | States *what the code does*, stops short of *the principle*. Real gap: **presence ≠ version**. Q0 re-ask ✅ (debt closed). |
+| 2026-07-10 | **S7 · cold re-ask (Q4, Q6)** | 1 ✅ · 1 ⊘ | Q4 **✅ closed**. Q6 (false-positive mitigations) **blank a third time** → taught. |
+| 2026-07-10 | **S7 · Phase 5 quick-checks** | see QUIZZES | Passed before building the heal. |
+| 2026-07-10 | **S6 · Phase 4 milestone** | 2 ✅ · 2 ⚠️ · 2 ⊘ | **Label-not-mechanism.** Hard questions clean → precision, not comprehension. |
+| 2026-07-10 | **S5b · O(1) eviction** | 3 ✅ · 1 ⚠️ | Passed before coding. |
+| 2026-07-10 | **S5 · cold re-ask ×9** | 2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘ | **check-then-act ❌ (third miss)** · starvation backwards · happens-before ⊘ → taught. |
+| 2026-07-09 | **S4d · eviction** | see QUIZZES | **Aayush's two challenges changed the design** (cache-aside ⇒ eviction only in `Set`; corpse-first eviction). |
+| 2026-07-09 | **S4c · the sweeper** | 1 ✅ · 1 ⚠️ · 1 ½ | ⚠️ was **compare-don't-remember** *again* — logged as a pattern. |
+| 2026-07-09 | **S4b · TTL** | see QUIZZES | Passed before coding. |
+| 2026-07-09 | **S4 · concurrency & races** | 2 ✅ · 2 ⚠️ · 2 ⊘ | *(tally corrected 2026-07-11 from "4 ✅ · 2 ⊘" — two entries name real gaps)*: race condition ≠ data race (named the category, produced no code) · called **deadlock** starvation. |
+| 2026-07-08 | **S2 · quorum & conflict resolution** | 4 ✅ | Strong. Correctly identified **two primaries** as the sole conflict source. |
+| 2026-07-08 | **S2 · failure modes** | 5 ✅ · 3 ⚠️ | Re-taught: **available ≠ fully-replicated**; **frozen ≠ partitioned**; react to *transitions*, not the alive *count*. |
+| 2026-07-08 | **S3 · Phase 0** | all ✅ | Cache, distribution, CAP, cluster-in-a-box. |

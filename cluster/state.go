@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/AayushAlokGit/self-healing-distributed-cache/node"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
 )
 
@@ -74,10 +75,14 @@ func (c *Cluster) State() State {
 	now := time.Now()
 	holdersByKey := map[string][]string{}
 	expiresByKey := map[string]time.Time{} // zero value = never expires
+	reclaimed := map[string][]node.Reclaim{}
 	var totalHeal int64
 	for _, id := range aliveIDs {
 		n := c.nodes[id]
 		totalHeal += n.HealCopies()
+		if rc := n.DrainReclaimed(); len(rc) > 0 {
+			reclaimed[id] = rc
+		}
 		for k, e := range n.HeldEntries() {
 			holdersByKey[k] = append(holdersByKey[k], id)
 			// Replicas should all carry the same deadline. Take the latest anyway: if they
@@ -100,6 +105,9 @@ func (c *Cluster) State() State {
 			})
 		}
 	}
+
+	c.noteExpiries(now, holdersByKey, expiresByKey)
+	c.noteReclamations(aliveIDs, reclaimed)
 
 	// Non-nil empty slices: a nil slice marshals to JSON null, and the frontend's
 	// keys.filter(...) / vnodes.map(...) crash on null (i.e. when everything is dead).
@@ -163,4 +171,102 @@ func (c *Cluster) State() State {
 	}
 
 	return st
+}
+
+// noteExpiries emits one event per key whose deadline has passed since the last poll.
+// Caller holds c.mu.
+//
+// A key that has left holdersByKey has left it for one of two reasons, and they are
+// not the same fact:
+//
+//   - its deadline passed. Snapshot() hides an entry the instant it expires, so every
+//     replica drops it from the snapshot AT THE DEADLINE — together, because SetAt gave
+//     them all the same absolute instant. This is an expiry, and it is one event, no
+//     matter how many replicas held the key.
+//   - every node holding it was killed. The key is simply gone, below the deadline it
+//     was promised. That is data loss, and reporting it as an expiry would be a lie —
+//     the demo's headline action would spray fake expiry events on every kill.
+//
+// The deadline is what tells them apart, which is why the previous poll's deadlines
+// are kept: at the moment a key vanishes it is too late to ask it when it was due.
+func (c *Cluster) noteExpiries(now time.Time, holders map[string][]string, expires map[string]time.Time) {
+	gone := make([]string, 0, len(c.deadlines))
+	for k := range c.deadlines {
+		if _, still := holders[k]; !still {
+			gone = append(gone, k)
+		}
+	}
+	sort.Strings(gone) // stable event order; map range is not
+
+	for _, k := range gone {
+		deadline := c.deadlines[k]
+		delete(c.deadlines, k)
+		if deadline.IsZero() || now.Before(deadline) {
+			continue // killed out from under us, not expired
+		}
+		c.appendEvent(Event{
+			Kind: "expire",
+			Msg:  fmt.Sprintf("%s expired — its deadline passed on every replica at once", k),
+			Keys: []string{k},
+		})
+	}
+
+	for k := range holders {
+		c.deadlines[k] = expires[k]
+	}
+}
+
+// noteReclamations emits one event per node per reason for the expired entries that
+// node actually freed. Caller holds c.mu.
+//
+// This is NOT the expiry — the key was already dead to every reader when its deadline
+// passed, whether or not the bytes were still in the map. This is the memory being
+// handed back, which happens later, at a different time on every node, and only when
+// something goes looking: a Get that lands on the corpse, or the sampler drawing it.
+// The lag between the two is not a defect; it is the sampling sweeper working.
+//
+// Batched per node, like heals: one pass freeing 8 keys is one line, not eight, or the
+// log would drown the fault that people are actually here to watch.
+//
+// It carries no Cause. A heal is caused by a membership change; a reclamation is caused
+// by nothing but the clock, and attributing it to the nearest kill would tell a viewer
+// that killing a node destroyed their data.
+func (c *Cluster) noteReclamations(aliveIDs []string, byNode map[string][]node.Reclaim) {
+	for _, id := range aliveIDs {
+		rcs := byNode[id]
+		if len(rcs) == 0 {
+			continue
+		}
+		byReason := map[string][]string{}
+		for _, rc := range rcs {
+			byReason[rc.Reason] = append(byReason[rc.Reason], rc.Key)
+		}
+		for _, reason := range []string{node.ReclaimSweep, node.ReclaimLazy, node.ReclaimEvict} {
+			keys := byReason[reason]
+			if len(keys) == 0 {
+				continue
+			}
+			sort.Strings(keys)
+			c.appendEvent(Event{
+				Kind: "reclaim",
+				Msg: fmt.Sprintf("%s freed %d expired key%s — %s",
+					id, len(keys), plural(len(keys)), reclaimText(reason)),
+				From: id,
+				Keys: keys,
+			})
+		}
+	}
+}
+
+// reclaimText says who did the freeing, in the dashboard's voice.
+func reclaimText(reason string) string {
+	switch reason {
+	case node.ReclaimSweep:
+		return "the background sweeper drew them"
+	case node.ReclaimLazy:
+		return "a read landed on them"
+	case node.ReclaimEvict:
+		return "the cache was full and preferred a corpse to a live key"
+	}
+	return reason
 }

@@ -1,8 +1,19 @@
 # High-Level Design — Self-Healing Distributed Cache
 
-> **Status:** APPROVED (2026-07-08). All six §10 decisions are **locked** — ready to start Phase 0.
-> This is a *high-level* design — components, data, and flows, not code. Low-level details (structs,
-> exact wire formats) come per-phase in `docs/ROADMAP.md`.
+> **Status:** APPROVED 2026-07-08; **BUILT (Phases 0–6) as of 2026-07-11.** All six §10 decisions are
+> locked. This is the *design* — components, data, and flows, not code. Where building it **corrected**
+> the design, the correction is marked **⇒ AS BUILT** in place; those markers are the honest record of
+> what a design cannot know in advance. Measurements and the narrative live in `docs/PROGRESS.md`.
+
+**What shipped vs. what this document designed:**
+
+| Designed | Reality |
+|---|---|
+| `SET` / `GET` / `DELETE` | **No `DELETE`.** Never needed by the demo; keys leave via TTL or eviction. |
+| Entry carries a `version` for LWW | **Not built.** The heal checks *presence*, not version — so a divergent key is skipped and the conflict is preserved forever. The known top gap; see PROGRESS "Next action (b)". |
+| Async replication, primary acks first | **Synchronous fan-out** to all R owners, acking after **W** (default W=1). The lost-write window in §6.1 is real all the same — W=1 *is* primary-only ack. |
+| Heal coordinated by the range's **primary** | **Corrected — see §6.** The primary rule stranded keys forever. The healer is the first owner, in ring order, that **actually holds** the key. |
+| `/admin/partition` (network split injection) | **Not built.** Failure injection is kill / revive / pause-health (a GC-pause stand-in). |
 
 ---
 
@@ -114,6 +125,11 @@ traffic). A separate **dashboard** reads cluster state and drives failure inject
 
 - **Entry:** `key → { value, expiresAt, version }`. `version` (timestamp/counter) supports
   last-write-wins if we add conflict resolution.
+  > **⇒ AS BUILT: there is no `version`.** The entry is `{value, expires}`. This is the design's most
+  > consequential unbuilt piece: with no version, the heal can only ask *"do you have key k?"* and a
+  > `200` means **"somebody has *a* value," not "*the* value."** So a divergent key is **skipped, and the
+  > conflict preserved forever**, and a client read returns the first reachable owner in ring order —
+  > **ring geometry decides, stably and silently.** **Presence ≠ version.**
 - **The ring:** a hash space `0 … 2³²−1` wrapped into a circle. Each physical node is placed at
   many points via **virtual nodes** (vnodes) for even spread.
 - **Ownership:** `hash(key)` → walk clockwise → first node = **primary**; next R−1 distinct
@@ -127,12 +143,17 @@ traffic). A separate **dashboard** reads cluster state and drives failure inject
 
 **SET (write path)** — client hits any node ("coordinator for this request"):
 ```
-client → Node A: SET k v
+client → Node A: SET k v [ttl]
   Node A: owner(k)? → ring says {primary=B, replicas=[C,D]}
-  Node A → B (primary): store k
-  B → C, D (replicas): replicate k   [async — see ⚑ ack decision]
-  B → Node A: ok  → client
+  Node A: ttl → an ABSOLUTE DEADLINE, decided once, here
+  Node A → B, C, D: store k (value + that same deadline)
+  Node A: ack the client once W owners have stored it   (W=1 by default)
 ```
+> **⇒ AS BUILT:** the coordinator fans out to **all R owners itself** (in-band, not a background
+> forward from the primary) and acks after **W**. With the default **W=1** this is still primary-only
+> ack, so §6.1's lost-write window is exactly as described. And the deadline is converted **once, by the
+> coordinator** — a TTL re-based at each hop would be pushed further out by every heal, and a
+> frequently-healed key would **never die**. → PROGRESS, Phase 5.
 
 **GET (read path):**
 ```
@@ -161,14 +182,26 @@ Node D stops sending heartbeats
   → throughout: reads keep being served from surviving replicas   ✅
 ```
 
-**Who runs the heal (decided).** There is no dedicated healer node. Heal is coordinated **per key
-range by that range's current primary** — deterministic from the ring, so no election is needed and
-no two nodes fight over the same range. Each node **scans only the keys it already holds** (no node
-knows the global keyset); for each such key it recomputes the replica set against the new ring and,
-as the range's primary, ensures the R copies are whole — pushing a key to any replica node that is
-missing it (and, on a *join*, pulling keys that now belong to it). This works because every key that
-can still be healed is held by at least one survivor that will find it by scanning locally; if all R
-copies die at once, no survivor holds it and it is unrecoverable (accepted, see §9).
+**Who runs the heal.** There is no dedicated healer node and **no election**. Each node **scans only
+the keys it already holds** (no node knows the global keyset), recomputes each key's owners against the
+new ring, and pushes the key to any owner missing it. Exactly one node must send each key, or every
+co-owner pushes the same key and the heal costs R×(R−1) copies instead of R−1. Every key that can still
+be healed is held by *some* survivor that will find it by scanning locally; if all R copies die at once,
+nobody holds it and it is unrecoverable (accepted, §9).
+
+> **⇒ AS BUILT — the original rule here was wrong, and it stranded keys forever.**
+> This document said the sender is **the range's current primary**. That silently requires one node to be
+> **both the primary AND a holder**, and there is a case where **nobody is**: a revived node comes back
+> **empty**, and the ring promotes it straight back to primary of its own arcs. The **primary then has
+> nothing to send** (the key isn't in its snapshot), and the **holders stand down** (they aren't the
+> primary). The key stays under-replicated **forever** — no further membership change is coming to
+> retrigger anything. Found live: kill to 2 nodes, revive all three, **7 of 20 keys never recovered**.
+>
+> **The rule that actually works: permission follows the DATA, not the ring position.** The healer for a
+> key is the **first owner, in ring order, that actually holds it.** That preserves what the primary rule
+> existed for (exactly one sender ⇒ no duplicate copies) *and* guarantees a sender **exists** whenever
+> anybody has the data. A node ranked below a holder stands down; one ranked above a holder — or holding a
+> key **no owner has at all** (a leftover from an older ring) — steps up. → PROGRESS, Phase 5.
 
 ### 6.1 Why node death causes staleness (and why we accept it)
 
@@ -176,10 +209,9 @@ copies die at once, no survivor holds it and it is unrecoverable (accepted, see 
 restores *redundancy* (R copies), **not** *freshness* — these are different problems, and it's worth
 being explicit about the second one.
 
-The root cause is in our own write path + open decision #2: **writes are asynchronous.** The primary
-stores the value and acks the client *immediately*, then forwards to the R−1 replicas **in the
-background**. So there is always a **replication window** in which the primary holds a fresher copy
-than its replicas. Node death turns that window into staleness:
+The root cause is decision §10.2: **we ack before every copy has landed** (W=1 — the write returns as
+soon as *one* owner has stored it). So there is a **replication window** in which one node holds a
+fresher copy than the others. Node death turns that window into staleness:
 
 ```
 client → B (primary): SET k = v2      (replicas C, D still hold v1)
@@ -227,23 +259,26 @@ side unavailable), which is out of scope (§9).
 
 ---
 
-## 7. Interfaces (high level)
+## 7. Interfaces — **as built**
 
-**Client API (HTTP)**
-- `GET /kv/{key}` → value | 404
-- `PUT /kv/{key}` body=value, `?ttl=` → ok
-- `DELETE /kv/{key}` → ok
+**Client API** (on every node; any node coordinates any key)
+- `GET /get/{key}` → value, plus `X-Served-By` / `X-Primary` — *which* owner answered, so the read
+  fallback is legible to the client instead of buried in a server log.
+- `PUT /set/{key}` body=value, `?ttl=250ms|2m0s` → fans out to all R owners, acks after W.
 
-**Internal API (node↔node)**
-- `heartbeat(from, membershipDigest)` — liveness + gossip piggyback
-- `replicate(key, value, version, ttl)` — primary → replica
-- `transferKeys(range)` — bulk move during join/heal
-- `readReplica(key)` — fallback read
+**Internal API** (node↔node — the same HTTP, one hop down)
+- `GET /kv/{key}` → the raw stored value. Also the heal's *"do you have this?"* probe — ⚠️ which means
+  the probe **downloads the whole value**; a `HEAD` would make it free (PROGRESS, Next action (c)).
+- `PUT /kv/{key}` body=value, header `X-Expires-At` — the **absolute deadline**, carried, never re-based.
+- `GET /health` → liveness. Silence past the timeout is what convicts a peer.
 
-**Admin/Dashboard API**
-- `GET /cluster` → nodes, states, ring layout, key counts, metrics
-- `POST /admin/kill/{nodeID}` — failure injection
-- `POST /admin/partition` — stretch: simulate network split
+**Dashboard API** (`cmd/server`, over the cluster manager)
+- `GET /api/state` — the god's-eye view: ring, nodes, keys, intended owners vs actual holders.
+- `POST /api/kill|revive|pause` — failure injection · `POST /api/set|seed`, `GET /api/get`.
+
+> No `DELETE`, no gossip digest, no `transferKeys` bulk move (the heal copies key-by-key), and no
+> `/admin/partition`. Pause-health is the injected failure that matters: it is a **live** node that
+> merely *looks* silent, which is the only way to manufacture a false positive on demand.
 
 ---
 
@@ -285,10 +320,9 @@ All chosen for **learnability + a clean demo** over raw performance. All easily 
 4. **Transport → HTTP/JSON everywhere.** Every message is human-readable (curl/browser/DevTools),
    which is worth more than speed here. *Reserve:* gRPC/protobuf if performance ever becomes a goal.
 5. **Dashboard → polish is a priority** (it's the recruiter-facing "money moment": kill a node, watch
-   keys re-replicate live). Invest in the visuals — smooth ring animation, live per-node state, a
-   satisfying failure-injection interaction. A framework or a viz library (e.g. D3) is fine **if it
-   elevates the demo**; the only hard constraint is that it stays **static-hostable and free** (build
-   to static assets — no paid backend for the UI itself). Final stack chosen in Phase 6.
+   keys re-replicate live). The only hard constraint is that it stays **static-hostable and free**.
+   *Chosen in Phase 6:* **React + Vite + TypeScript**, hand-rolled SVG ring (no viz library needed),
+   building to static assets.
 6. **Replication factor → R=3, configurable.** Kill one node → 2 copies survive → heal back to 3
    (clean "keeps serving + heals" demo; pairs with W=2/R=2 quorum → `R+W>N`). *Reserve:* configurable
    so we can also demo the scarier R=2 behavior.

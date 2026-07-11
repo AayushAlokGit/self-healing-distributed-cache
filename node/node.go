@@ -617,6 +617,22 @@ func (n *Node) HeldKeys() []string {
 // dies.
 func (n *Node) HeldEntries() map[string]cache.Entry { return n.cache.Snapshot() }
 
+// Reclaim is an expired entry whose memory this node has freed. Aliased, not
+// wrapped, so the manager can read it without importing the cache package.
+type Reclaim = cache.Reclaim
+
+// Reasons a Reclaim can carry, re-exported for the same reason.
+const (
+	ReclaimLazy  = cache.ReclaimLazy
+	ReclaimSweep = cache.ReclaimSweep
+	ReclaimEvict = cache.ReclaimEvict
+)
+
+// DrainReclaimed returns the expired entries this node's cache has freed since the
+// last drain, and clears them. The manager polls it the same way it polls the heal
+// log — the node reports what it did, and never calls up to say so.
+func (n *Node) DrainReclaimed() []Reclaim { return n.cache.DrainReclaimed() }
+
 // Addr is the node's bound address, e.g. "127.0.0.1:53187".
 func (n *Node) Addr() string { return n.addr }
 

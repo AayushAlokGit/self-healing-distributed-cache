@@ -50,6 +50,12 @@ type Cluster struct {
 	nextTick     uint64  // monotonic event id, so the UI can dedupe without a clock
 	seeded       int     // demo keys issued so far, so Seed appends instead of rewriting
 
+	// deadlines is the previous poll's key → deadline, and it is what makes an expiry
+	// detectable at all: nothing in this system fires a timer when a key dies, so the
+	// only way to notice is to remember what was alive last time and compare. Zero
+	// Time means the key never expires. See State.
+	deadlines map[string]time.Time
+
 	// log is the durable server log, distinct from events above. Discards until
 	// SetLogger. Atomic because Set and Get read it without holding c.mu.
 	log atomic.Pointer[slog.Logger]
@@ -80,6 +86,7 @@ func New(rf, wq int, grace time.Duration, ids ...string) *Cluster {
 		ringReplicas: demoRingReplicas,
 		nodes:        make(map[string]*node.Node, len(ids)),
 		addrs:        make(map[string]string, len(ids)),
+		deadlines:    make(map[string]time.Time),
 		client:       &http.Client{Timeout: 2 * time.Second},
 	}
 	c.SetLogger(nil)

@@ -28,7 +28,27 @@ const (
 	// tail. A sample cannot prove no corpse exists, but its hit rate tracks the
 	// corpse density, and so does the cost of missing — see evictLocked.
 	evictProbeSize = 20
+
+	// Reclamations buffered before the oldest are dropped. Nothing guarantees a
+	// drainer exists (a plain `go test` has no dashboard), so this must be bounded
+	// or it is an unbounded leak. The log is for display, not durability.
+	maxReclaimLog = 64
 )
+
+// Why an expired entry's memory was actually freed. The key was already dead to
+// every reader at its deadline — Get checks the clock, not the map — so this says
+// nothing about WHEN the key expired, only when the bytes went.
+const (
+	ReclaimLazy  = "lazy"  // a Get landed on it and deleted it in passing
+	ReclaimSweep = "sweep" // the background sampler drew it
+	ReclaimEvict = "evict" // the cache was full and preferred a corpse to a live key
+)
+
+// Reclaim is one expired entry whose memory has been freed.
+type Reclaim struct {
+	Key    string
+	Reason string
+}
 
 // node stores the absolute deadline, not the TTL duration: the arithmetic happens
 // once at Set time so Get only has to compare.
@@ -82,6 +102,12 @@ type Cache struct {
 
 	// Lets Close wait for the sweeper to return, not merely be told to.
 	wg sync.WaitGroup
+
+	// reclaimed is what the sweeper and the lazy path have freed since the last
+	// drain. Written under mu at the delete sites and taken by DrainReclaimed —
+	// the cache never calls out to report it, so it can never be half of a
+	// lock-order inversion with whatever is collecting.
+	reclaimed []Reclaim
 }
 
 // New creates an empty Cache holding at most capacity entries, and starts its
@@ -134,6 +160,32 @@ func (c *Cache) removeLocked(n *node) {
 	c.unlink(n)
 	delete(c.data, n.key)
 	delete(c.expiring, n.key)
+}
+
+// reclaimLocked is removeLocked for an entry that is being freed BECAUSE it expired,
+// and records it. Evicting a live key at the LRU tail is not an expiry and must not
+// come through here, or the log would report keys as dead that a client can still read.
+// Callers must hold c.mu.
+func (c *Cache) reclaimLocked(n *node, reason string) {
+	c.removeLocked(n)
+	c.reclaimed = append(c.reclaimed, Reclaim{Key: n.key, Reason: reason})
+	if over := len(c.reclaimed) - maxReclaimLog; over > 0 {
+		c.reclaimed = c.reclaimed[over:] // drop oldest
+	}
+}
+
+// DrainReclaimed returns every expired entry freed since the last drain, and clears
+// the buffer. Clearing is the point: whoever polls this would otherwise re-report the
+// same reclamations on every call.
+func (c *Cache) DrainReclaimed() []Reclaim {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.reclaimed) == 0 {
+		return nil
+	}
+	out := c.reclaimed
+	c.reclaimed = nil
+	return out
 }
 
 // sweepLoop sweeps on each tick until done is closed. It waits on both at once,
@@ -194,7 +246,7 @@ func (c *Cache) samplePass() (scanned, expired int) {
 		scanned++
 
 		if n.expired(now) {
-			c.removeLocked(n)
+			c.reclaimLocked(n, ReclaimSweep)
 			expired++
 		}
 	}
@@ -212,7 +264,7 @@ func (c *Cache) sweepAll() int {
 	removed := 0
 	for _, n := range c.data {
 		if n.expired(now) {
-			c.removeLocked(n)
+			c.reclaimLocked(n, ReclaimSweep)
 			removed++
 		}
 	}
@@ -236,11 +288,11 @@ func (c *Cache) evictLocked(now time.Time) {
 		probed++
 
 		if n.expired(now) {
-			c.removeLocked(n)
+			c.reclaimLocked(n, ReclaimEvict)
 			return
 		}
 	}
-	c.removeLocked(c.tail.prev)
+	c.removeLocked(c.tail.prev) // a live key, evicted for capacity: not an expiry
 }
 
 // Set stores (or overwrites) the value for key, expiring it after ttl. A ttl <= 0
@@ -339,7 +391,7 @@ func (c *Cache) Get(key string) (string, bool) {
 		return "", false
 	}
 	if n.expired(time.Now()) {
-		c.removeLocked(n)
+		c.reclaimLocked(n, ReclaimLazy)
 		return "", false
 	}
 
