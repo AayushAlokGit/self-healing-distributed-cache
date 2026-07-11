@@ -100,7 +100,6 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .nrow .meta { color: var(--muted); font-size: 10.5px; flex: 1; font-variant-numeric: tabular-nums; }
 .nrow button { padding: 4px 9px; font-size: 11px; }
 .nrow.dead { opacity: 0.5; filter: grayscale(0.6); }
-.nrow.paused { box-shadow: inset 0 0 0 1px rgb(var(--warn)), 0 0 14px rgb(var(--warn) / 0.15); }
 .btns { display: flex; gap: 6px; }
 
 /* --btn is the only thing a variant sets; :hover just raises its alpha. */
@@ -114,7 +113,6 @@ button:hover { background: rgb(var(--btn) / 0.3); transform: translateY(-1px); }
 button:active { transform: translateY(0); }
 button.kill { --btn: var(--danger); color: var(--danger-ink); }
 button.revive { --btn: var(--ok); color: var(--ok-ink); }
-button.pause.on { --btn: var(--warn); background: rgb(var(--btn) / 0.28); color: #ffe08a; }
 /* After button:hover, so the gradient survives a hover (equal specificity, later wins). */
 button.primary { background: linear-gradient(90deg, rgb(var(--cyan) / 0.9), rgba(124, 77, 255, 0.9)); color: #04121a; width: 100%; }
 button.primary:hover { filter: brightness(1.1); }
@@ -221,8 +219,6 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .nodeg .sub { font-size: 9px; fill: var(--muted); text-anchor: middle; }
 .nodeg.alive .halo { animation: beat 1.6s ease-in-out infinite; }
 @keyframes beat { 0%, 100% { opacity: 0.18; r: 26; } 50% { opacity: 0.42; r: 33; } }
-.nodeg.paused .halo { animation: beatpause 0.5s ease-in-out infinite; }
-@keyframes beatpause { 0%, 100% { opacity: 0.3; r: 26; } 50% { opacity: 0.7; r: 34; } }
 .nodeg.dead { opacity: 0.32; }
 .nodeg.dead .label { fill: var(--muted); }
 

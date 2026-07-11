@@ -1,9 +1,11 @@
 // Types mirror the Go cluster.State JSON (cluster/state.go).
 
+// The server also reports `paused` (health stalled, a false-positive injection). The
+// dashboard no longer offers that control, so the field is left unmodelled rather than
+// carried as a value nothing reads.
 export interface NodeState {
   id: string
   alive: boolean
-  paused: boolean
   angle: number
   keyCount: number
   healCopies: number
@@ -111,8 +113,6 @@ async function post(path: string, body: unknown, what: string): Promise<void> {
 
 export const killNode = (id: string) => post('/api/kill', { id }, `kill ${id}`)
 export const reviveNode = (id: string) => post('/api/revive', { id }, `revive ${id}`)
-export const pauseNode = (id: string, paused: boolean) =>
-  post('/api/pause', { id, paused }, `${paused ? 'pause' : 'resume'} ${id}`)
 // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs.
 export const setKey = (key: string, value: string, ttlMs: number) =>
   post('/api/set', { key, value, ttlMs }, `write ${key}`)

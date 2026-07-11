@@ -142,14 +142,14 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
           return (
             <g
               key={n.id}
-              className={'nodeg ' + (!n.alive ? 'dead' : n.paused ? 'paused' : 'alive')}
+              className={'nodeg ' + (n.alive ? 'alive' : 'dead')}
               transform={`translate(${x},${y})`}
             >
               <circle className="halo" r={26} fill={n.alive ? color : 'none'} stroke={color} />
               <circle className="core" r={20} fill={n.alive ? '#0b1220' : '#171c26'} stroke={color} filter="url(#glow)" />
               <text className="label">{n.id}</text>
               <text className="sub" y={34}>
-                {n.alive ? (n.paused ? 'paused' : `${n.keyCount} keys`) : 'dead'}
+                {n.alive ? `${n.keyCount} keys` : 'dead'}
               </text>
             </g>
           )

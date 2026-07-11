@@ -1,4 +1,4 @@
-import { killNode, pauseNode, reviveNode, type NodeState } from '../api'
+import { killNode, reviveNode, type NodeState } from '../api'
 import { colorFor } from '../geometry'
 import { useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
@@ -17,7 +17,7 @@ export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: (
       <h2>Failure injection</h2>
       <div className="nodes-ctl">
         {nodes.map((n) => (
-          <div className={'nrow' + (!n.alive ? ' dead' : n.paused ? ' paused' : '')} key={n.id}>
+          <div className={'nrow' + (n.alive ? '' : ' dead')} key={n.id}>
             <div className="id">
               {/* CSS derives fill and glow from currentColor, so only `color` is set here. */}
               <span className="swatch" style={{ color: colorFor(n.id) }} />
@@ -26,14 +26,9 @@ export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: (
             <div className="meta">{n.alive ? `${n.keyCount} keys · ${n.healCopies} pushed` : 'offline'}</div>
             <div className="btns">
               {n.alive ? (
-                <>
-                  <button className={'pause' + (n.paused ? ' on' : '')} onClick={() => act(() => pauseNode(n.id, !n.paused))}>
-                    {n.paused ? 'Resume' : 'Pause'}
-                  </button>
-                  <button className="kill" onClick={() => act(() => killNode(n.id))}>
-                    Kill
-                  </button>
-                </>
+                <button className="kill" onClick={() => act(() => killNode(n.id))}>
+                  Kill
+                </button>
               ) : (
                 <button className="revive" onClick={() => act(() => reviveNode(n.id))}>
                   Revive
