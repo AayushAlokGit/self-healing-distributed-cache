@@ -100,6 +100,7 @@ input:focus { outline: none; border-color: #22d3ee; }
 .ringbase { fill: none; stroke: rgba(120, 160, 220, 0.12); stroke-width: 1.5; }
 .varc { fill: none; stroke-width: 16; stroke-linecap: butt; opacity: 0.9; transition: stroke 0.5s ease; filter: saturate(1.1); }
 .keydot { transition: cx 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), cy 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.keylabel { font-size: 8.5px; fill: var(--muted); text-anchor: middle; dominant-baseline: middle; pointer-events: none; font-variant-numeric: tabular-nums; }
 .keydot.under { animation: underpulse 1s ease-in-out infinite; }
 @keyframes underpulse { 0%, 100% { r: 5; filter: drop-shadow(0 0 2px var(--danger)); } 50% { r: 8; filter: drop-shadow(0 0 8px var(--danger)); } }
 .nodeg { transition: opacity 0.4s; }

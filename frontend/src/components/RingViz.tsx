@@ -109,29 +109,34 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
           ))}
         </g>
 
-        {/* key dots on their true hash angle, colored by primary owner */}
+        {/* key dots on their true hash angle, colored by primary owner, labeled */}
         <g>
           {state.keys.map((k) => {
             const [kx, ky] = xy(k.angle, KEY_R)
+            const [lx, ly] = xy(k.angle, KEY_R - 15)
             return (
-              <circle
-                key={k.key}
-                cx={kx}
-                cy={ky}
-                r={5}
-                className={'keydot' + (k.underReplicated ? ' under' : '')}
-                fill={colorFor(k.owners[0] ?? 'n0')}
-                stroke="#0b1220"
-                strokeWidth={1.5}
-                style={{ color: '#ff5470' }}
-              >
-                <title>
+              <g key={k.key}>
+                <circle
+                  cx={kx}
+                  cy={ky}
+                  r={5}
+                  className={'keydot' + (k.underReplicated ? ' under' : '')}
+                  fill={colorFor(k.owners[0] ?? 'n0')}
+                  stroke="#0b1220"
+                  strokeWidth={1.5}
+                  style={{ color: '#ff5470' }}
+                >
+                  <title>
+                    {k.key}
+                    {'\n'}owners: {k.owners.join(', ')}
+                    {'\n'}holders: {k.holders.join(', ')}
+                    {k.underReplicated ? '  ⚠ under-replicated' : ''}
+                  </title>
+                </circle>
+                <text x={lx} y={ly} className="keylabel">
                   {k.key}
-                  {'\n'}owners: {k.owners.join(', ')}
-                  {'\n'}holders: {k.holders.join(', ')}
-                  {k.underReplicated ? '  ⚠ under-replicated' : ''}
-                </title>
-              </circle>
+                </text>
+              </g>
             )
           })}
         </g>

@@ -99,6 +99,55 @@ func TestClusterDemoFlow(t *testing.T) {
 	}
 }
 
+// nodeKeyCount reads a node's key count from a snapshot.
+func nodeKeyCount(st State, id string) int {
+	for _, n := range st.Nodes {
+		if n.ID == id {
+			return n.KeyCount
+		}
+	}
+	return -1
+}
+
+// A revived node comes back empty, but the check-first heal repopulates it: once
+// it rejoins the ring as an owner of some ranges, the primaries of those ranges
+// notice it is missing the keys and push them over. Without this, a returned node
+// stays empty until new writes happen to land on it.
+func TestRevivedNodeRepopulates(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(15); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const victim = "n2"
+	if kc := nodeKeyCount(c.State(), victim); kc <= 0 {
+		t.Fatalf("precondition: %s should hold keys, got %d", victim, kc)
+	}
+
+	if err := c.Kill(victim); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	// Let the death heal settle so its keys live on the survivors.
+	time.Sleep(2 * time.Second)
+
+	if err := c.Revive(victim); err != nil {
+		t.Fatalf("revive: %v", err)
+	}
+	// It returns empty…
+	if kc := nodeKeyCount(c.State(), victim); kc != 0 {
+		t.Fatalf("a revived node should return empty, got %d keys", kc)
+	}
+	// …then the heal repopulates it as peers notice it owns keys it lacks.
+	waitUntil(t, 6*time.Second, "revived node repopulates via the check-first heal", func() bool {
+		return nodeKeyCount(c.State(), victim) > 0
+	})
+	t.Logf("revived %s repopulated to %d keys with no client writes", victim, nodeKeyCount(c.State(), victim))
+}
+
 // A false positive with a grace period costs no heal copies: pause a node's
 // health, let peers suspect it, resume before the grace period, and confirm the
 // cluster did not re-replicate.

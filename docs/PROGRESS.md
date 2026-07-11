@@ -21,7 +21,8 @@ session and after each milestone. Newest entries at the top of the log.
   **Candidate next steps (all optional polish):** (a) **milestone quizzes** for Phase 5 and Phase 6
   (the per-phase review the ritual calls for — not yet taken); (b) optimize the naive heal to copy
   only *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner);
-  (c) the genuine-recovery repopulation gap (a revived node comes back empty); (d) deploy the demo to
+  (c) ~~the genuine-recovery repopulation gap~~ **DONE (Session 8: check-first heal repopulates)**;
+  (d) deploy the demo to
   a free host + writeup; (e) hinted handoff / read-repair for the AP staleness gaps. Pick per Aayush's
   interest. **Carried-forward to re-ask cold:** the Snapshot-recency ⚠️ (it's the Phase-1
   sequential-scan LRU pollution) from Session 7. **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
@@ -127,8 +128,17 @@ Mark ☑ when taught AND the quick-check quiz was passed.
   false positive that cost 200 copies now costs **0**. Price = the Q6 tradeoff made concrete: a
   *genuine* death heals in **~1.55s vs ~550ms** (extra under-replication exposure bought
   storm-immunity). New Go idiom recorded: coalescing signal (buffered-1 chan + non-blocking send).
-  - **Known gap (out of scope):** a genuine recovery *after* a real heal does not repopulate the
-    returned node. Fine for the demo (the false-positive flap never loses data).
+- ☑ **Check-first heal + recovery repopulation (Session 8 upgrade).** The heal now asks each owner
+  whether it already holds a key (`fetchFrom` → 200/404) and copies **only what's missing**. This let
+  us safely **trigger the heal on *any* membership change** (death *or* recovery) and delete the
+  `hasSuspectedDead` gate: a flapped node still holds its data → 0 copies (no storm), a genuinely
+  **revived node comes back empty → gets repopulated** (`TestRevivedNodeRepopulates`: a killed node,
+  revived, refills to N keys with no client writes). **The "genuine recovery doesn't repopulate" gap
+  is now CLOSED.** Side effect: the check-first heal skips redundant re-pushes, so the false-positive
+  "storm" dropped from `keys×(R-1)`≈200 to just the genuinely-needed newcomer copies (~49 for 100
+  keys); grace still makes it **0**. **Also fixed a latent data race** (`-race`, caught by the new
+  revive test): the cluster handed one shared `peers` map to every node and `SetMembership` aliased it,
+  so `SetPeerAddr` on one node raced another's heartbeat read — now each node `maps.Clone`s its own.
 - ◐ Serving reads during heal — **already true via the Phase 3 read fallback** (available ≠
   fully-replicated): reads hop past the missing copy while the heal runs. Not yet made explicit in a
   Phase-5 test; light follow-up.

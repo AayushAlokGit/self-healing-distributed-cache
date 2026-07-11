@@ -153,7 +153,10 @@ func (n *Node) SetMembership(peers map[string]string) {
 	defer n.mu.Unlock()
 
 	now := time.Now()
-	n.peers = peers
+	// Clone, don't alias: the caller (the cluster) hands the same map to every
+	// node, and SetPeerAddr mutates it. Each node's peers must be its own, guarded
+	// only by its own mutex, or one node's write races another's heartbeat read.
+	n.peers = maps.Clone(peers)
 	n.lastSeen = make(map[string]time.Time, len(peers))
 	n.alive = make(map[string]bool, len(peers))
 	r := n.newRingLocked()
@@ -296,7 +299,7 @@ func (n *Node) heartbeatRound() {
 	for id := range answered {
 		n.lastSeen[id] = now
 	}
-	deathDetected := false
+	membershipChanged := false
 	for id := range n.peers {
 		if id == n.id {
 			continue
@@ -306,19 +309,22 @@ func (n *Node) heartbeatRound() {
 		case n.alive[id] && !isAlive:
 			n.alive[id] = false
 			n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
-			deathDetected = true
+			membershipChanged = true
 		case !n.alive[id] && isAlive:
 			n.alive[id] = true
-			n.ring.Add(id) // it came back — cheap re-route, no heal needed
+			n.ring.Add(id) // it came back — reroute, and repopulate it (see below)
+			membershipChanged = true
 		}
 	}
 
-	// Only a death may leave a range under-replicated, so only a death kicks the
-	// heal. A recovery re-routes for free: a node that flapped back never lost
-	// data, so there is nothing to reconcile. Non-blocking so the heartbeat loop
-	// never stalls; coalescing so a burst schedules one pass. The heal itself
-	// waits out a grace period before committing to any copy (see healLoop).
-	if deathDetected {
+	// Any membership change may leave a key's owners out of sync with its holders:
+	// a death promotes a new owner that lacks the data, a recovery re-admits a node
+	// that came back empty. Either way, kick the heal. It is safe to fire on a
+	// recovery too because the heal is check-first (see heal): it copies only what
+	// an owner is actually missing, so a node that merely flapped — and still holds
+	// all its data — costs zero copies. Non-blocking so the heartbeat loop never
+	// stalls; coalescing so a burst schedules one pass; grace-delayed in healLoop.
+	if membershipChanged {
 		select {
 		case n.healTrigger <- struct{}{}:
 		default:
@@ -348,44 +354,29 @@ func (n *Node) healLoop() {
 			return
 		case <-n.healTrigger:
 			// The re-route already happened (cheap, reversible). Wait out a grace
-			// period before the expensive re-replication, then recheck: a brief
-			// false positive (a GC pause) recovers inside the window, leaving
-			// nothing suspected dead, and we skip the needless copy entirely.
+			// period before the expensive re-replication so a brief false positive
+			// (a GC pause) recovers first — by the time this fires, a flapped node
+			// is back in the ring holding all its data, so the check-first heal
+			// finds nothing missing and copies nothing.
 			select {
 			case <-n.done:
 				return
 			case <-time.After(n.gracePeriod()):
 			}
-			if n.hasSuspectedDead() {
-				n.heal()
-			}
+			n.heal()
 		}
 	}
-}
-
-// hasSuspectedDead reports whether this node currently believes any peer is dead.
-// The grace-period gate: if the suspect recovered while we waited, this is false
-// and the heal is skipped.
-func (n *Node) hasSuspectedDead() bool {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	for id, alive := range n.alive {
-		if id != n.id && !alive {
-			return true
-		}
-	}
-	return false
 }
 
 // heal re-asserts the replication invariant: for every key this node is the
-// primary owner of, push a copy to that key's other current owners. When a death
-// promotes a new owner, this is what actually moves the bytes so the range is
-// back to R live copies. Idempotent — a co-owner that already has the key just
-// overwrites it.
+// primary owner of, make sure each of that key's other current owners has a copy.
+// When a death promotes a new owner, or a recovery re-admits an empty node, this
+// is what moves the bytes so every owner actually holds the key.
 //
-// Naive on purpose (Phase 5 step 1): it re-pushes every key it is primary of, not
-// only those the dead node held, and pushes to co-owners that already have a copy.
-// Both are wasted sends — the re-replication storm step 2 will measure.
+// Check-first: before copying, it asks whether the owner already has the key and
+// skips it if so. That does two jobs at once — a node that merely flapped (still
+// holding its data) costs zero copies, and a genuinely returned node is
+// repopulated — without any special-casing of death vs. recovery.
 func (n *Node) heal() {
 	for key, value := range n.cache.Snapshot() {
 		select {
@@ -401,7 +392,10 @@ func (n *Node) heal() {
 			continue
 		}
 		for _, o := range owners[1:] {
-			n.storeOn(o.addr, key, value) // naive: no retry; a failed copy waits for the next heal
+			if _, has, err := n.fetchFrom(o.addr, key); err != nil || has {
+				continue // unreachable (can't copy) or already holds it (nothing to do)
+			}
+			n.storeOn(o.addr, key, value)
 			n.healCopies.Add(1)
 		}
 	}

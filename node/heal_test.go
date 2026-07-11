@@ -139,11 +139,13 @@ func TestHealRestoresReplicationAfterDeath(t *testing.T) {
 	t.Logf("R=%d restored: %q lives on %v again, two live copies healed back to three", rf, key, newOwners)
 }
 
-// The storm, with NO grace period (the naive heal). PauseHealth makes a
-// fully-alive node look dead; its peers each heal the instant they convict it and
-// copy keys around to "restore" a replication that was never lost. Nothing died,
-// yet the cluster copies hundreds of keys — Q6's "gigabytes copied for nothing"
-// made countable. TestGracePeriodPreventsHealStorm is the same scenario fixed.
+// The storm, with NO grace period. PauseHealth makes a fully-alive node look
+// dead; its peers convict it the instant they see silence, a newcomer is promoted
+// for every key the "dead" node owned, and those newcomers get copies of keys
+// that were never actually lost. Even with the check-first heal (which skips
+// re-copying to replicas that already hold the key), that is dozens of needless
+// copies — Q6's "copied for nothing" made countable. The grace period
+// (TestGracePeriodPreventsHealStorm) is the same scenario fixed.
 func TestFalsePositiveTriggersHealStorm(t *testing.T) {
 	const rf = 3
 	ids := []string{"n0", "n1", "n2", "n3", "n4"}
@@ -211,6 +213,6 @@ func TestGracePeriodPreventsHealStorm(t *testing.T) {
 	if c := totalHealCopies(nodes); c != 0 {
 		t.Fatalf("grace period should have prevented the storm, but %d copies were made", c)
 	}
-	t.Logf("grace period (%v) absorbed the false positive: 0 copies, versus 200+ with no grace", grace)
+	t.Logf("grace period (%v) absorbed the false positive: 0 copies, versus dozens with no grace", grace)
 	logHealCopies(t, nodes, "grace")
 }
