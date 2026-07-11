@@ -47,6 +47,7 @@ type Cluster struct {
 	client       *http.Client
 	events       []Event
 	nextTick     uint64 // monotonic event id, so the UI can dedupe without a clock
+	seeded       int    // demo keys issued so far, so Seed appends instead of rewriting
 }
 
 // Event is one entry in the dashboard's activity log.
@@ -235,16 +236,33 @@ func (c *Cluster) Get(key string) (value string, found bool, err error) {
 	}
 }
 
-// Seed writes n demo keys, kept small so the ring stays legible.
+// Seed writes n *new* demo keys, kept small so the ring stays legible. The
+// cluster numbers them itself rather than taking a range from the caller: a
+// dashboard that tracked "how many have I seeded" would be remembering state it
+// does not own, and two browser tabs (or a page reload) would then hand out the
+// same key numbers twice — the seed button would silently rewrite existing keys
+// instead of adding any.
 func (c *Cluster) Seed(n int) error {
-	for i := range n {
-		key := fmt.Sprintf("key:%d", i)
-		if err := c.Set(key, fmt.Sprintf("v%d", i)); err != nil {
+	if n <= 0 {
+		return nil
+	}
+
+	// Claim the numbers under the lock, then write outside it: Set does network
+	// I/O to the owners, and holding c.mu across that would block the dashboard's
+	// State() polls for the duration.
+	c.mu.Lock()
+	first := c.seeded
+	c.seeded += n
+	c.mu.Unlock()
+
+	for i := first; i < first+n; i++ {
+		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i)); err != nil {
 			return err
 		}
 	}
+
 	c.mu.Lock()
-	c.logf("seed", "seeded %d keys", n)
+	c.logf("seed", "seeded %d keys (key:%d..key:%d)", n, first, first+n-1)
 	c.mu.Unlock()
 	return nil
 }

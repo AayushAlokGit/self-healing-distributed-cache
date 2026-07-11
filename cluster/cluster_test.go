@@ -99,6 +99,40 @@ func TestClusterDemoFlow(t *testing.T) {
 	}
 }
 
+// Seed must ADD keys, not rewrite key:0..key:n-1 every call. The dashboard's
+// "seed 8 more keys" button calls Seed(8) repeatedly, and when Seed numbered from
+// zero each click silently overwrote keys that already existed — the button was a
+// no-op and the ring never changed. TestClusterDemoFlow could not catch this: it
+// calls Seed exactly once, and the bug only appears on the second call.
+func TestSeedAppendsRatherThanRewrites(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	if err := c.Seed(12); err != nil { // what the server does at startup
+		t.Fatalf("seed: %v", err)
+	}
+	if err := c.Seed(8); err != nil { // what the dashboard button does
+		t.Fatalf("seed: %v", err)
+	}
+
+	st := c.State()
+	if len(st.Keys) != 20 {
+		t.Fatalf("12 + 8 seeded: want 20 distinct keys, got %d (Seed is rewriting, not appending)", len(st.Keys))
+	}
+	for _, k := range st.Keys {
+		if len(k.Holders) != 3 {
+			t.Errorf("key %q: want 3 holders, got %v", k.Key, k.Holders)
+		}
+	}
+	// The second batch must be the *new* numbers, not a rerun of the first.
+	if _, ok := keyState(st, "key:19"); !ok {
+		t.Errorf("key:19 missing: the second Seed(8) did not continue past the first batch")
+	}
+}
+
 // nodeKeyCount reads a node's key count from a snapshot.
 func nodeKeyCount(st State, id string) int {
 	for _, n := range st.Nodes {
