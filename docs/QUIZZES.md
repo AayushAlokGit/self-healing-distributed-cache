@@ -10,6 +10,37 @@ Question text + model answers, so quizzes can be re-asked cold weeks later. Scor
 
 ---
 
+## Session 7 — 2026-07-10 · Phase 5 quick-checks (self-heal)
+
+Asked after teaching each design piece, before/around the build. Running tally below.
+
+**After Q1 (who heals) — 3 Q's: 3 ✅.** (1) ownership-vs-data: the ring re-points owners for free; the
+heal must still *copy the bytes* to the promoted owner (redundancy/fault-tolerance restored). (2) not a
+dedicated healer: avoids consensus-among-healers (SPOF→CP), and a global keyset no node has. (3) no
+election: ownership is a deterministic function of (membership view, key), so nodes agree without
+talking. **Sharpened on (3):** the "if all agree on the view" precondition is load-bearing — Phase 4
+gives *independent* views, so determinism only yields agreement *to the degree views have converged*;
+divergence (false positive/partition) makes different nodes confidently do *conflicting* heals. That
+"if" is exactly why Q3 (the storm) exists.
+
+**After Q2 (which keys) — 1 Q: ✅.** "For each key, compare owners before vs after removal; the changed
+ones lost a replica, the newly-appearing node is the target." Correct. Layered on: scan only *local*
+keys (every under-replicated key is held by ≥1 survivor since R≥2, so local scans collectively cover
+everything with no global index), and only the *primary* pushes (else co-owners double-send).
+
+**After the step-1 build — 2 Q's: 1 ✅ · 1 ⚠️.**
+- **Q1 (why heal in its own goroutine, not inline in heartbeatRound) — ✅.** Copying is slow I/O; a
+  synchronous heal would keep the heartbeat goroutine from pinging → it declares *more* false deaths →
+  more heals. **Self-reinforcing loop**; decoupling breaks it. (Nailed the feedback loop.)
+- **Q2 (why Snapshot must not update recency) — ⚠️.** Got the direction ("recency disturbed") but the
+  mechanism wrong ("random map-iteration order randomises it"). **Correct:** order is irrelevant; the
+  problem is a heal touches *every* key, so promoting all of them marks the whole cache MRU at once,
+  flattening the recency signal. **This is the Phase-1 sequential-scan LRU pollution** — a background
+  heal would evict the hot working set it is trying to protect. Named the failure mode, not just the
+  symptom, is the gap.
+
+---
+
 ## Session 7 — 2026-07-10 · cold re-ask of the two carried-forward Q's (Q4, Q6)
 
 Taken cold at session start, before any Phase 5 teaching, per the ritual. **Q4 ✅ · Q6 ⊘ (taught).**
