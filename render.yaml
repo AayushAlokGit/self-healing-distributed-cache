@@ -14,6 +14,17 @@ services:
     # (cmd/server/server.go), so there is nothing extra to build.
     healthCheckPath: /
 
+    envVars:
+      # Push a notification when somebody opens the dashboard (notify/, cmd/server/visits.go).
+      # Unset = the feature is simply off.
+      #
+      # ⚠️ sync: false means "Render prompts me for this value; it is NOT stored in the repo."
+      # That matters: an ntfy topic has no password. Anyone who learns the name can read your
+      # notifications AND send you some. Treat it as a secret — a long random string, never
+      # committed, never a VITE_* variable (those are inlined into the JS every visitor gets).
+      - key: NTFY_TOPIC
+        sync: false
+
     # ⚠️ PORT is deliberately NOT set here. Render injects it, and defaultAddr() in main.go
     # reads it. Pinning it would just be a second source of truth that can disagree.
     #

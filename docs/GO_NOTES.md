@@ -418,7 +418,33 @@ via `ln.Addr()` — essential for tests, no port collisions. → `node.Start`
 resource-not-value lesson as the cache sweeper: an `http.Server` owns a goroutine and must be stopped.
 
 ⚠️ **Always `resp.Body.Close()`** on a client response, even if you ignore the body — the connection
-leaks otherwise. `defer resp.Body.Close()` right after the error check.
+leaks otherwise. `defer resp.Body.Close()` right after the error check. **Close is not enough to *reuse*
+it**: the transport only returns a connection to the keep-alive pool once the body is read to EOF, so a
+response you don't care about still wants `io.Copy(io.Discard, resp.Body)` before the Close. Skip it and
+every call dials a fresh TCP connection. → `notify.Ntfy.Notify`
+
+⚠️⚠️ **`*http.Request` is dead the moment the handler returns, and so is its context.** Two separate traps,
+both fatal to fire-and-forget work (`go doSomething(r)`):
+1. **The request is not yours to keep.** After the handler returns the server may recycle it; reading `r`
+   from a goroutine that outlived the handler is a race. Pull out the strings you need *before* the `go`.
+2. **`r.Context()` is cancelled when the response is written.** So the very natural
+   `go post(r.Context(), ...)` gets cancelled a microsecond after it starts — and it fails *sometimes*,
+   depending on which won the race, which is the worst kind of bug. Background work needs
+   `context.Background()` and a timeout of its own.
+```go
+msg := build(r)                    // read r HERE, while it is still alive
+go func() {
+    ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)  // NOT r.Context()
+    defer cancel()
+    send(ctx, msg)
+}()
+```
+→ `visits.middleware`
+
+**Behind a proxy, `r.RemoteAddr` is the proxy.** On any PaaS every visitor looks like the same client
+unless you read `X-Forwarded-For` — `"client, proxy1, proxy2"`, so the client is the *first* entry.
+⚠️ It is a header the caller writes, so it is trivially spoofed: fine for a metric, never for a decision
+that matters. → `clientIP`
 
 **`//go:embed` bakes files into the binary.** A magic comment directly above a package-level var:
 ```go
@@ -499,6 +525,29 @@ is both faster and clearer, and the algorithm is the point of this project.
 **Slices are not lists.** Move-to-front on a slice shifts every element before the target: O(n). Arrays
 store order **positionally** (an element's order *is* its address), lists store it in **pointers**, so
 reordering a list is a local edit. That is the whole reason LRU uses a list.
+
+---
+
+## Interfaces
+
+**Satisfaction is implicit — there is no `implements`.** A type has the methods or it doesn't; it never
+names the interface, and it can satisfy one written *after* it, in a package it has never heard of. C++
+and Java both make you declare the relationship up front; Go infers it. → `notify.Notifier`
+
+**Keep them one method wide.** `Notify(ctx, Notification) error` is all any caller needs, so it is all the
+interface says. Every method you add is a method every future implementation must write — a wide interface
+taxes implementors to serve callers who don't exist yet. (`io.Reader`, `io.Writer`, `error`: all one.)
+
+**The zero implementation beats `nil`.** An unconfigured notifier is a `Nop{}` that discards, *not* a nil
+interface — so no call site needs `if n != nil`. Null-object pattern; the nil check you don't write is the
+nil check that can't be forgotten. ⚠️ And in Go a nil interface is subtle anyway: a nil *pointer* stored in
+an interface is **not** `== nil`, because the interface holds `(type, value)` and the type is non-nil.
+
+**Compile-time check:** `var _ Notifier = (*Ntfy)(nil)` — turns "forgot a method" into an error *here*,
+not at the call site. Free at runtime.
+
+**Accept interfaces, return structs.** `newVisits` takes a `Notifier` (any transport); `NewNtfy` returns a
+`*Ntfy` (everything it has). The caller can always narrow; it can never widen.
 
 ---
 

@@ -19,28 +19,15 @@ keeps serving.
 
 ## Architecture
 
-- **Backend** (`cmd/server`, Go) — runs the cluster-in-a-box and exposes a JSON control API on
-  `:8080` (`/api/state`, `/api/kill`, `/api/revive`, `/api/pause`, `/api/set`, `/api/get`, `/api/seed`,
-  `/api/delete`, `/api/clear`).
-- **Frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard, talking to the API. It builds
-  to static files, so in production the FE deploys to a free static host and the Go API to a free
-  container — the HLD's "static frontend + one backend container."
+- **Backend** (`cmd/server`, Go) — runs the cluster-in-a-box and exposes a JSON control API on `:8080`
+  (`/api/state`, `/kill`, `/revive`, `/pause`, `/set`, `/get`, `/seed`, `/delete`, `/clear`).
+- **Frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard. It builds to static files, so
+  in production the FE deploys to a free static host and the Go API to a free container — the HLD's
+  "static frontend + one backend container."
 
 ## Run the demo
 
-Two processes. **Terminal 1 — backend:**
-
-```
-go run ./cmd/server
-```
-
-**Terminal 2 — frontend:**
-
-```
-cd frontend
-npm install     # first time only
-npm run dev
-```
+Two processes: `go run ./cmd/server`, and `cd frontend && npm install && npm run dev`.
 
 Open **http://localhost:5173** (Vite proxies `/api` to the Go backend on `:8080`). Then:
 
@@ -69,38 +56,43 @@ Backend flags: `-addr :8080` (or `$PORT`), `-grace 2s` (heal grace period), `-se
 Two pieces, two hosts, both free: the **dashboard** is static files on a CDN, the **cluster** is a
 long-running container.
 
-> **Why the backend cannot be serverless.** The five nodes are goroutines holding in-memory state and
-> heartbeating every 100 ms. A serverless platform freezes or kills the process between requests, so
-> the heartbeats stop — and when traffic resumes, every node sees stale beats and **falsely convicts
-> every other node as dead.** This is the same reason Google Cloud Run needs *instance-based billing*
-> (`CPU always allocated`) rather than its default request-based mode. It needs a real process.
-
 **1 — Backend → Render** (free, no credit card). The repo carries a [`render.yaml`](render.yaml)
 Blueprint, so: New → Blueprint → pick this repo → Apply. Render builds the [`Dockerfile`](Dockerfile),
 injects `$PORT`, and health-checks `/`. Note the service URL it gives you.
 
 **2 — Frontend → Vercel** (or Netlify/Pages). Point it at the **`frontend/`** directory (framework:
-Vite, build `npm run build`, output `dist`) and set one environment variable:
-
-```
-VITE_API_URL = https://<your-render-service>.onrender.com
-```
+Vite, build `npm run build`, output `dist`) and set `VITE_API_URL = https://<your-render-service>.onrender.com`.
 
 ⚠️ **Vite inlines `VITE_API_URL` at build time, not run time.** Change the backend URL and you must
-*rebuild* the frontend — there is no runtime config to edit on the CDN. Set it before the first build,
-or redeploy after.
+*rebuild* the frontend — there is no runtime config to edit on the CDN.
 
-⚠️ Once split across two origins, the backend's permissive CORS (`Access-Control-Allow-Origin: *`,
-`cmd/server/server.go`) stops being decoration and becomes **load-bearing**. It also allows only
-`GET`/`POST` — which is why every mutating control-API route is a `POST`, including the deletes. (The
-node↔node protocol, which no browser touches, uses real `PUT`/`DELETE` verbs.)
+⚠️ Once split across two origins, the backend's permissive CORS (`cmd/server/server.go`) stops being
+decoration and becomes **load-bearing**. It also allows only `GET`/`POST` — which is why every mutating
+control-API route is a `POST`, including the deletes. (The node↔node protocol, which no browser touches,
+uses real `PUT`/`DELETE` verbs.)
 
-**The cold start is real and accepted.** Render's free tier sleeps a service after ~15 minutes idle, and
-the next request pays **~30–60 s** to wake it. Sleeping *terminates the process*, so the cache is wiped
-and the cluster re-seeds on boot. Rather than look broken, the dashboard detects this and shows
-*"waking the cluster…"* instead of an error. If that ever becomes unacceptable, the fix is a host that
-does not sleep (Northflank's free tier does not) — **not** a GitHub Actions cron pinger, which is an
-explicit violation of GitHub's Acceptable Use Policy.
+**3 — Get pinged when someone visits** (optional). Set `NTFY_TOPIC` on the backend to any unguessable
+string, install [ntfy](https://ntfy.sh) on your phone, and subscribe. Unset, the feature is off.
+
+⚠️ **The topic name is the only secret ntfy has** — no key, no account. Anyone who knows it can read your
+notifications *and* send you some. Keep it in an env var (`render.yaml` marks it `sync: false`, so it never
+enters git), and **never** as a `VITE_*` variable — those are inlined into the bundle every visitor
+downloads. The push carries a *hash* of the visitor's IP, never the IP.
+
+The interesting part is that **a visit is not a request**: the dashboard polls `/api/state` about once a
+second, so a naive push-per-request is a push per second per open tab. `cmd/server/visits.go` dedups on the
+visitor, treats the 30-minute window as an *idle* timeout (a tab left open all day is one visit), and caps
+pushes at 20/hour — the API is public, and a bot sweeping it must not turn into a DoS on your own phone.
+The transport sits behind [`notify.Notifier`](notify/notify.go), so swapping ntfy for mail or Slack is a
+new type in that package and nothing else.
+
+⚠️ **The backend cannot be serverless**, and that is a property of the design. The five nodes are goroutines
+holding in-memory state and heartbeating every 100 ms; a platform that freezes the process between requests
+stops the beats, and when traffic resumes **every node falsely convicts every other node as dead**. (Same
+reason Google Cloud Run needs instance-based billing rather than its default request-based mode.) Render's
+free tier sleeps after ~15 min idle and pays **~30–60 s** to wake — and sleeping *terminates the process*,
+so the cache is wiped and re-seeds on boot. Accepted, and surfaced in the UI as *"waking the cluster…"*
+rather than an error. Full reasoning and the rejected alternatives: [HLD §8.5](docs/HLD.md).
 
 ## Status — complete
 
@@ -130,8 +122,8 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
   the missing ones onto their current owners, restoring R. Exactly one node sends each key: **the first
   owner, in ring order, that actually holds it** — permission follows the *data*, not the ring
   position, so a node promoted back to primary while holding nothing can still be repopulated. A grace
-  period gates the copying against false positives: a brief GC pause recovers inside the window and
-  nothing is copied. Deadlines travel with the data, so a healed copy expires when the original would.
+  period gates the copying against false positives. Deadlines travel with the data, so a healed copy
+  expires when the original would.
 
 ## Layout
 
@@ -141,6 +133,7 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
 | `ring/` | Consistent-hashing ring with virtual nodes |
 | `node/` | A cache behind HTTP: coordinating role, replication, heartbeats, self-heal |
 | `cluster/` | Cluster-in-a-box manager + god's-eye state and failure-injection controls |
+| `notify/` | `Notifier` interface + an ntfy transport (push when the demo is visited) |
 | `cmd/server/` | Backend: the JSON control API over the cluster |
 | `logging/` | Structured logs: human-readable text on the console, JSON on disk |
 | `frontend/` | React + Vite + TypeScript dashboard (the animated hash-ring UI) |

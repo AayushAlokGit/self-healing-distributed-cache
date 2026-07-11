@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
+	"github.com/AayushAlokGit/self-healing-distributed-cache/notify"
 )
 
 // maxSeed bounds one POST /api/seed batch. The dashboard stops the user lower
@@ -150,8 +151,20 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		})
 	})
 
+	var h http.Handler = mux
+
+	// Push a notification when somebody opens the live dashboard — off unless the
+	// environment configures a notifier, so local development never pushes anything. The
+	// middleware only exists when it is on, so there is no disabled path to pay for.
+	if to, on := notify.FromEnv(); on {
+		log.Info("visit notifications on", "via", to)
+		h = newVisits(to, log, time.Now()).middleware(h)
+	} else {
+		log.Info("visit notifications off ($NTFY_TOPIC unset)")
+	}
+
 	// CORS: the React app is a different origin in both dev and prod.
-	return withLogging(withCORS(mux), log)
+	return withLogging(withCORS(h), log)
 }
 
 // noisyPaths are polled several times a second, so they log at Debug: at Info they

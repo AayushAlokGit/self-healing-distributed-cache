@@ -483,6 +483,42 @@ re-replicate.
 ## Session log
 What happened, in order. The detail lives in the checklist above; this is the narrative and the surprises.
 
+### Session 14 — 2026-07-11 · Visit notifications, and the interface under them
+**Build only, no quiz.** A push (ntfy) when somebody opens the live demo. Not a distsys feature — but three
+of its traps are the same shape as ones the cache already taught, which is why it earns a note.
+
+**`notify/` is an interface, not an ntfy call.** `Notifier` is one method wide (`Notify(ctx, Notification)
+error`), `Ntfy` is today's transport, `Nop` is what an unconfigured server holds — so **no call site carries
+a nil check**, the same null-object move that keeps a discarding `slog` handler out of every log line. Go's
+interfaces are implicit, so `Ntfy` never names `Notifier`; a mail sender would be a new type in that package
+and not one line changed in `cmd/server`. → GO_NOTES *Interfaces*
+
+**The real problem: a visit is not a request.** The dashboard polls `/api/state` ~1×/s, so the obvious
+push-per-request is a push per second, per open tab. Three guards (`cmd/server/visits.go`):
+- dedup on `sha256(IP + UA)`;
+- the 30-min window is an **idle** timeout, refreshed on *every* poll — a tab left open all afternoon is
+  **one** visit, where a *fixed* window would push every 30 minutes at somebody who never left;
+- ≤ 20 pushes/hour, hard. The API is public: ⚠️ a bot sweeping it must not become a **DoS on my own phone**.
+
+⚠️ **Two Go traps, both about the request outliving itself.** `*http.Request` is dead once the handler
+returns (so the message is built *before* the goroutine spawns), and `r.Context()` is **cancelled when the
+response is written** — handing it to the send would cancel the POST before it left the process, *sometimes*,
+depending on who won the race. Background work needs `context.Background()` and a timeout of its own.
+
+⚠️ **The topic is the only secret ntfy has.** No key, no account: whoever knows the name can read the
+notifications *and* send some. Hence `$NTFY_TOPIC` + `sync: false` in `render.yaml`, never logged (`String()`
+prints the server, not the topic), and **never a `VITE_*`** — those are inlined into the bundle every visitor
+downloads. Same reason the push carries a *hash* of the IP, not the IP.
+
+Tests: `notify/` drives a real `httptest` ntfy server (headers, body, 429, cancelled ctx). `visits_test.go`
+takes the clock as a parameter, so the 30-min and 1-hour windows are exercised in nanoseconds — a test that
+waits 30 real minutes is a test nobody runs.
+
+⚠️ **A pre-existing flake, seen but not caused here:** `TestDeleteFindsCopiesTheRingNoLongerNames` failed
+once under full-suite load, then passed 8/8 on re-run. Timing-sensitive; worth pinning down.
+
+---
+
 ### Session 13 — 2026-07-11 · Cleanup: heal was a ratchet
 **Build only, no quiz.** Aayush's question — *"when the killed node is restored, is the copy the other
 node gained deleted?"* — and the answer was **no.** **Heal only ever COPIES.** Kill a node, its keys are

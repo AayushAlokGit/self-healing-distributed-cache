@@ -373,6 +373,31 @@ Splitting the origins also makes two previously-cosmetic things **load-bearing**
 header, and the fact that it allows `GET`/`POST` only — which is why every mutating control-API route is
 a `POST`, deletes included, while the node↔node protocol keeps real `PUT`/`DELETE` verbs.
 
+### 8.6 Visit notifications — a *visit* is not a *request*
+
+A push when somebody opens the live demo. `notify.Notifier` is the interface (*what happened*);
+`notify.Ntfy` is today's transport; `notify.Nop` is what an unconfigured server holds, so no call site
+carries a nil check. `cmd/server/visits.go` decides *what a visit is* and never learns how it is sent.
+
+⚠️ **The dashboard polls `/api/state` ~1×/s.** Notify per request and it is one push per second, per open
+tab. Three guards turn the poll storm back into visits:
+
+| Guard | Why |
+|---|---|
+| dedup on `sha256(IP + UA)` | one visitor is one push |
+| an **idle** window, refreshed on *every* poll | a tab left open all afternoon is **one** visit; a *fixed* window would push every 30 min at somebody who never left |
+| ≤ 20 pushes/hour, hard | the API is public — ⚠️ a bot sweeping it must not become a **DoS on your own phone** |
+
+⚠️ **The ntfy topic is the only secret ntfy has** — no key, no account: whoever knows the name can *read*
+your notifications *and* send you some. So it is an env var (`$NTFY_TOPIC`, `sync: false` in
+`render.yaml`), never in git, never logged, and **never a `VITE_*`** — those are inlined into the bundle
+every visitor downloads. For the same reason the message carries a *hash* of the IP, not the IP.
+
+Two Go traps the design turns on: `*http.Request` is **dead once the handler returns**, so the message is
+built before the goroutine spawns; and `r.Context()` is **cancelled when the response is written**, so the
+send uses `context.Background()` with its own timeout — passing the request's would cancel the POST before
+it left the process.
+
 ---
 
 ## 9. Explicitly out of scope (with honest caveats)
