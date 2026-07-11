@@ -121,14 +121,13 @@ func withLogging(h http.Handler, log *slog.Logger) http.Handler {
 			level = slog.LevelWarn
 		}
 
-		log.Log(r.Context(), level, "handled an API request from the dashboard",
+		log.Log(r.Context(), level, "http",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"query", r.URL.RawQuery,
 			"status", rec.status,
 			"bytes", rec.written,
 			"took", time.Since(start).Round(time.Millisecond),
-			"client", r.RemoteAddr,
 		)
 	})
 }

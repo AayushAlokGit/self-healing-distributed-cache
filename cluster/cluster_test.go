@@ -229,12 +229,21 @@ func lastEventID(st State) uint64 {
 	return st.Events[len(st.Events)-1].ID
 }
 
-// underReplicated names every key that does not have as many holders as it should.
-func underReplicated(st State) []string {
+// notOnItsOwners names every key that some OWNER of it does not hold.
+//
+// This is the real replication invariant, and it is strictly stronger than
+// UnderReplicated (holders < R). A key can have R holders and still be broken: after
+// a kill/revive cycle the survivors keep leftover copies of keys they no longer own,
+// and those leftovers pad the holder count while a genuine owner sits empty. Waiting
+// on UnderReplicated alone therefore lets a test proceed before the heal has
+// converged — which is exactly the flake this replaced.
+func notOnItsOwners(st State) []string {
 	var out []string
 	for _, k := range st.Keys {
-		if k.UnderReplicated {
-			out = append(out, k.Key)
+		for _, o := range k.Owners {
+			if !slices.Contains(k.Holders, o) {
+				out = append(out, k.Key+"/"+o)
+			}
 		}
 	}
 	sort.Strings(out)
@@ -281,9 +290,11 @@ func TestReviveRestoresFullReplication(t *testing.T) {
 		}
 	}
 
-	// Every key must get back to R=3 with NO client writes — the heal alone.
-	waitUntil(t, 15*time.Second, "every key to return to full replication after the revives", func() bool {
-		return len(underReplicated(c.State())) == 0
+	// Every key must get back onto all R of its owners with NO client writes — the
+	// heal alone. Wait on the same invariant the assertions below check, or the wait
+	// can exit early on leftover copies and the test flakes.
+	waitUntil(t, 20*time.Second, "every key to land on all of its owners after the revives", func() bool {
+		return len(notOnItsOwners(c.State())) == 0
 	})
 
 	st := c.State()

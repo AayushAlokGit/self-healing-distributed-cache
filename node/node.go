@@ -358,7 +358,7 @@ func (n *Node) heartbeatRound() {
 			n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
 			membershipChanged = true
 			n.noteHealCause(id + " went silent")
-			n.logger().Warn("peer went silent past the failure timeout: suspecting it dead and removing it from my ring, so reads/writes stop routing to it. Its keys are now under-replicated; a heal is scheduled after the grace period",
+			n.logger().Warn("peer suspected dead, removed from ring",
 				"peer", id,
 				"silent_for", silence.Round(time.Millisecond),
 				"failure_timeout", n.failureTimeout,
@@ -368,9 +368,7 @@ func (n *Node) heartbeatRound() {
 			n.ring.Add(id) // it came back — reroute, and repopulate it (see below)
 			membershipChanged = true
 			n.noteHealCause(id + " came back")
-			n.logger().Info("peer answered health again: re-admitting it to my ring. It may have come back empty, so a heal will check and repopulate whatever it is missing",
-				"peer", id,
-			)
+			n.logger().Info("peer recovered, re-added to ring", "peer", id)
 		}
 	}
 
@@ -386,7 +384,7 @@ func (n *Node) heartbeatRound() {
 		case n.healTrigger <- struct{}{}:
 		default:
 			// The trigger already held a pending signal, so a heal is coming anyway.
-			n.logger().Debug("membership changed again while a heal was already pending: coalescing into the one upcoming pass rather than queueing a second")
+			n.logger().Debug("heal already pending, coalescing")
 		}
 	}
 }
@@ -418,9 +416,7 @@ func (n *Node) healLoop() {
 			// is back in the ring holding all its data, so the check-first heal
 			// finds nothing missing and copies nothing.
 			grace := n.gracePeriod()
-			n.logger().Info("membership changed, so ownership moved: waiting out the grace period before re-replicating, in case the peer is only briefly stalled (a GC pause) and comes back on its own",
-				"grace_period", grace,
-			)
+			n.logger().Info("heal scheduled, waiting out grace period", "grace", grace)
 			select {
 			case <-n.done:
 				return
@@ -467,16 +463,12 @@ func (n *Node) heal() {
 	var healerFor, deferred, alreadyPresent, unreachable, failed int
 
 	log := n.logger()
-	log.Info("heal pass starting: for every key I hold, checking whether each of its owners actually holds a copy, and pushing only the ones that are missing. I push a key only if no owner ahead of me in ring order has it — so exactly one node sends each key, and a sender always exists as long as somebody has the data",
-		"keys_held", len(snapshot),
-		"triggered_by", strings.Join(causes, "; "),
-	)
+	log.Debug("heal started", "keys_held", len(snapshot), "cause", strings.Join(causes, "; "))
 
 	for key, value := range snapshot {
 		select {
 		case <-n.done:
-			log.Info("heal pass aborted: the node is shutting down mid-scan",
-				"copies_made_before_abort", len(moved))
+			log.Debug("heal aborted: node closing", "copies", len(moved))
 			return // stop promptly on Close rather than finish a long scan
 		default:
 		}
@@ -508,8 +500,7 @@ func (n *Node) heal() {
 		}
 		if standDown {
 			deferred++
-			log.Debug("standing down on this key: an owner ahead of me in ring order holds it, so it is the healer and I would only be duplicating its work",
-				"key", key)
+			log.Debug("heal: stood down, an owner ahead of me holds this key", "key", key)
 			continue
 		}
 
@@ -522,25 +513,21 @@ func (n *Node) heal() {
 			switch {
 			case err != nil:
 				unreachable++ // can't copy to a node we can't reach; a later pass retries
-				log.Debug("skipping an owner that did not answer the check: cannot copy to a node I cannot reach, so this key stays under-replicated until it returns",
-					"key", key, "owner", o.id, "err", err)
+				log.Debug("heal: owner unreachable, key stays under-replicated", "key", key, "owner", o.id, "err", err)
 				continue
 			case has:
 				alreadyPresent++ // check-first paying off: no copy needed
-				log.Debug("owner already holds this key, so no copy is made — this is the check-first heal skipping needless work",
-					"key", key, "owner", o.id)
+				log.Debug("heal: owner already has key, no copy", "key", key, "owner", o.id)
 				continue
 			}
 			if err := n.storeOn(o.addr, key, value); err != nil {
 				failed++
-				log.Warn("a heal copy failed to land: the owner answered the check but rejected the write, so this key is still under-replicated",
-					"key", key, "owner", o.id, "err", err)
+				log.Warn("heal: copy failed, key still under-replicated", "key", key, "owner", o.id, "err", err)
 				continue // record only copies that actually landed
 			}
 			n.healCopies.Add(1)
 			moved[o.id] = append(moved[o.id], key)
-			log.Debug("copied a missing key to one of its owners, restoring one replica",
-				"key", key, "to", o.id)
+			log.Debug("heal: copied key", "key", key, "to", o.id)
 		}
 	}
 
@@ -549,28 +536,28 @@ func (n *Node) heal() {
 		copies += len(keys)
 	}
 
-	// A pass that copied nothing is the healthy case (a flap, or nothing owed) and
-	// the one that copied something is the news — so they get different levels.
+	// A pass that copied nothing is the healthy case — a flap the grace period
+	// absorbed, or nothing owed. It is not news, so it stays at Debug; only a pass
+	// that actually moved bytes gets an Info line.
 	attrs := []any{
 		"copies", copies,
 		"targets", len(moved),
-		"healer_for_keys", healerFor,
-		"stood_down_on_keys", deferred,
+		"healer_for", healerFor,
+		"stood_down", deferred,
 		"already_present", alreadyPresent,
-		"unreachable_owners", unreachable,
-		"failed_copies", failed,
+		"unreachable", unreachable,
+		"failed", failed,
 		"took", time.Since(start).Round(time.Millisecond),
 		"heal_copies_total", n.healCopies.Load(),
 	}
 	if copies == 0 {
-		log.Info("heal pass finished having copied nothing: every owner already held what it should, so the membership change cost zero replication — this is what the grace period buys on a false alarm", attrs...)
+		log.Debug("heal complete: no copies needed", attrs...)
 	} else {
 		for to, keys := range moved {
 			slices.Sort(keys)
-			log.Info("heal pass re-replicated keys to a peer, restoring the replication factor for them",
-				"to", to, "count", len(keys), "keys", strings.Join(keys, ","))
+			log.Info("heal: re-replicated keys", "to", to, "count", len(keys), "keys", strings.Join(keys, ","))
 		}
-		log.Info("heal pass finished: the keys the dead node held are replicated again, so the cluster is back to full replication and keeps serving", attrs...)
+		log.Info("heal complete: replication restored", attrs...)
 	}
 
 	n.recordHeal(moved, causes)
@@ -651,9 +638,9 @@ func (n *Node) DrainHealLog() []HealCopy {
 func (n *Node) PauseHealth(paused bool) {
 	n.healthPaused.Store(paused)
 	if paused {
-		n.logger().Warn("health replies stalled by fault injection: this node is fully alive and still serving reads and writes, but it will stop answering health pings, so its peers will wrongly conclude it died")
+		n.logger().Warn("health replies stalled (fault injected): node is alive but will look dead to peers")
 	} else {
-		n.logger().Info("health replies resumed: peers will see this node answer on their next ping and re-admit it to their rings")
+		n.logger().Info("health replies resumed")
 	}
 }
 
@@ -701,19 +688,16 @@ func (n *Node) Close() error {
 	var err error
 	n.closeOnce.Do(func() {
 		log := n.logger()
-		log.Info("node stopping: it will go silent, and its peers must now notice on their own via heartbeat rather than being told",
-			"keys_held", len(n.HeldKeys()),
-			"heal_copies_total", n.healCopies.Load(),
-		)
+		keys := len(n.HeldKeys())
 		close(n.done) // stop the heartbeat loop first
 		n.wg.Wait()
 		err = n.srv.Shutdown(context.Background())
 		n.cache.Close()
 		if err != nil {
-			log.Error("node's HTTP server did not shut down cleanly", "err", err)
+			log.Error("node stopped with an unclean HTTP shutdown", "err", err)
 			return
 		}
-		log.Info("node stopped: heartbeat and heal loops are done and the HTTP server is closed")
+		log.Info("node stopped", "keys_held", keys, "heal_copies_total", n.healCopies.Load())
 	})
 	return err
 }
@@ -767,17 +751,17 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 			v, ok, err = n.fetchFrom(o.addr, key)
 		}
 		if err != nil {
-			log.Warn("an owner of this key could not be reached on a read, so falling back to the next owner in ring order — this is the replica fallback that keeps reads serving after a node dies",
-				"key", key, "unreachable_owner", o.id, "owner_rank", i, "of_owners", len(owners), "err", err)
+			log.Warn("read: owner unreachable, falling back to next owner",
+				"key", key, "owner", o.id, "rank", i, "of", len(owners), "err", err)
 			continue // owner unreachable: fall back to the next
 		}
 		reachedNone = false
 		if ok {
 			if i > 0 {
-				log.Info("read served from a fallback replica rather than the primary, because an earlier owner was unreachable — the kill did not cost us this read",
-					"key", key, "served_by", o.id, "owner_rank", i)
+				// The fallback earning its keep: the primary is gone, a replica served.
+				log.Info("read served by fallback replica", "key", key, "served_by", o.id, "rank", i)
 			} else {
-				log.Debug("read served by the key's primary owner", "key", key, "served_by", o.id)
+				log.Debug("read hit", "key", key, "served_by", o.id)
 			}
 			io.WriteString(w, v)
 			return
@@ -785,12 +769,11 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if reachedNone {
-		log.Error("read failed: every owner of this key was unreachable, so the cluster cannot answer — this is real unavailability, not a miss",
-			"key", key, "owners", len(owners))
+		log.Error("read failed: all owners unreachable", "key", key, "owners", len(owners))
 		http.Error(w, "all owners unreachable", http.StatusBadGateway)
 		return
 	}
-	log.Debug("read is an honest miss: an owner answered but does not hold this key", "key", key)
+	log.Debug("read miss", "key", key)
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
@@ -821,8 +804,9 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err := n.storeOn(o.addr, key, value); err != nil {
-			log.Warn("a write to one of this key's owners failed, so that replica is missing the value — the write can still succeed if enough other owners ack, and a later heal will repair this copy",
-				"key", key, "owner", o.id, "err", err)
+			// Not fatal on its own: the write still succeeds if enough others ack,
+			// and a later heal repairs this replica.
+			log.Warn("write: owner did not ack", "key", key, "owner", o.id, "err", err)
 			continue
 		}
 		acks++
@@ -830,13 +814,12 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 
 	quorum := n.writeQuorum
 	if acks < quorum {
-		log.Error("write rejected: fewer owners acknowledged than the write quorum requires, so we refuse rather than claim a durability we do not have",
-			"key", key, "acks", acks, "write_quorum", quorum, "owners", strings.Join(ownerIDs, ","))
+		log.Error("write rejected: quorum not met",
+			"key", key, "acks", acks, "quorum", quorum, "owners", strings.Join(ownerIDs, ","))
 		http.Error(w, "write quorum not met", http.StatusBadGateway)
 		return
 	}
-	log.Debug("write accepted: enough owners acknowledged to meet the write quorum",
-		"key", key, "acks", acks, "write_quorum", quorum, "owners", strings.Join(ownerIDs, ","))
+	log.Debug("write ok", "key", key, "acks", acks, "quorum", quorum)
 	w.WriteHeader(http.StatusNoContent)
 }
 

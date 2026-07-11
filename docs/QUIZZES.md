@@ -46,6 +46,29 @@ consensus**; a partitioned node can disagree *forever*. What saves us is that di
 two nodes both believing they're primary both push, and the pushes are idempotent. We *tolerate* divergent
 views rather than prevent them. AP being AP.
 
+> **POSTSCRIPT (same session): Q1's model answer had a hole, and the code had it too.**
+> The answer above is right about a primary that **dies**: the ring promotes the next clockwise node,
+> and that node **already holds a copy**, so it can heal. **The mirror case is fatal.** When a primary
+> **returns** (a revived node comes back empty), the ring promotes it straight back to primary of its
+> own arcs — while it holds **nothing**. And "only the primary pushes" then means:
+> - the **primary can't** push it (the key isn't in its `Snapshot()`; it has nothing to send), and
+> - the **holders won't** push it (they have it, but they aren't the primary, so they stand down).
+>
+> **Nobody is both a holder and permitted to push. The key stays under-replicated forever** — no
+> further membership change is coming to retrigger anything. Found live, in the browser: kill down to
+> 2 nodes, revive all three, and 7 of 20 keys never recovered. `TestRevivedNodeRepopulates` had missed
+> it for a session because it asserted `keyCount > 0` — a revived node **does** get back the keys where
+> it is a non-primary *replica*, so the count leaves zero and the weak assertion is satisfied.
+>
+> **The fix, and the generalizable lesson: permission must follow the DATA, not the ring position.**
+> The healer for a key is the **first owner, in ring order, that actually holds it**. That preserves
+> what the primary rule existed for (exactly one sender ⇒ no duplicate copies) *and* guarantees a
+> sender exists whenever anybody has the data. A node ranked below a holder stands down; a node ranked
+> above one — or holding a key **no owner has at all** (a leftover from an older ring) — steps up.
+>
+> Ask cold later: *"A revived node is promoted back to primary of an arc while holding nothing. Under
+> 'only the primary heals,' who repopulates it?"* Answer: **nobody, ever.**
+
 **Q2 — State the rule that decides which reaction fires instantly and which waits. Name the price. — ⚠️.**
 Gave one of the two properties ("cheap vs expensive," "more evidence to pay a big cost"). **Missed
 reversibility**, which is the load-bearing half. `ring.Remove` is cheap **and undoable** — `ring.Add` puts

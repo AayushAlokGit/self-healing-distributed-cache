@@ -127,19 +127,11 @@ func (c *Cluster) Start() error {
 	defer c.mu.Unlock()
 
 	log := c.logger()
-	log.Info("starting the cluster: bringing up every node as a goroutine in this one process, each with its own HTTP server, cache, and independent view of who is alive",
-		"nodes", len(c.ids),
-		"replication_factor", c.rf,
-		"write_quorum", c.wq,
-		"heal_grace", c.grace,
-		"ring_replicas_per_node", c.ringReplicas,
-	)
-
 	for _, id := range c.ids {
 		n := node.New(id, "127.0.0.1:0", nodeCapacity)
 		n.SetLogger(c.logger()) // before Start, so the node's own startup log is captured
 		if err := n.Start(); err != nil {
-			log.Error("a node failed to start, so the cluster cannot come up", "node", id, "err", err)
+			log.Error("node failed to start, cluster cannot come up", "node", id, "err", err)
 			return fmt.Errorf("start %s: %w", id, err)
 		}
 		c.nodes[id] = n
@@ -147,9 +139,11 @@ func (c *Cluster) Start() error {
 	}
 	c.wireAll()
 	c.logf("info", "cluster up: %d nodes, R=%d, W=%d, grace=%v", len(c.ids), c.rf, c.wq, c.grace)
-	log.Info("cluster is up: every node knows every peer and is heartbeating them. No node is a coordinator — any of them can accept any key and route it",
+	log.Info("cluster up",
 		"nodes", len(c.ids),
-		"addrs", fmt.Sprint(c.addrs),
+		"replication_factor", c.rf,
+		"write_quorum", c.wq,
+		"grace", c.grace,
 	)
 	return nil
 }
@@ -176,16 +170,15 @@ func (c *Cluster) Kill(id string) error {
 
 	n, ok := c.nodes[id]
 	if !ok {
-		c.logger().Warn("kill was asked for a node that is not running, so there is nothing to kill", "node", id)
+		c.logger().Warn("kill: node is not running", "node", id)
 		return fmt.Errorf("node %s is not running", id)
 	}
-	held := len(n.HeldKeys())
-	c.logger().Warn("FAULT INJECTED — killing a node. Its peers are NOT told: they must notice the silence themselves via heartbeat, then re-route around it, then re-replicate its keys after the grace period. The delay between those steps is the thing to watch",
+	// Peers are not told — they must notice the silence via heartbeat themselves.
+	c.logger().Warn("node killed (fault injected)",
 		"node", id,
-		"keys_it_held", held,
-		"nodes_left_alive", len(c.nodes)-1,
-		"expected_detection", "up to the peers' failure timeout (~500ms)",
-		"expected_heal_after", c.grace,
+		"keys_held", len(n.HeldKeys()),
+		"nodes_left", len(c.nodes)-1,
+		"heal_expected_in", c.grace,
 	)
 	n.Close()
 	delete(c.nodes, id)
@@ -194,26 +187,27 @@ func (c *Cluster) Kill(id string) error {
 }
 
 // Revive starts a fresh node for a killed id on a new port and tells the live
-// peers its new address, so the next heartbeat re-admits it. It comes back empty
-// (repopulation of a returned node is a known gap); reads still serve from the
-// copies the heal already placed elsewhere.
+// peers its new address, so the next heartbeat re-admits it. It comes back empty,
+// and the heal repopulates it — including the keys it is now the *primary* of,
+// which the old primary-only heal could never deliver (see node.heal). Reads keep
+// serving throughout, from the copies the heal already placed elsewhere.
 func (c *Cluster) Revive(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if _, ok := c.nodes[id]; ok {
-		c.logger().Warn("revive was asked for a node that is already running", "node", id)
+		c.logger().Warn("revive: node is already running", "node", id)
 		return fmt.Errorf("node %s is already running", id)
 	}
 	if !slices.Contains(c.ids, id) {
-		c.logger().Warn("revive was asked for an id this cluster has never heard of", "node", id, "known", strings.Join(c.ids, ","))
+		c.logger().Warn("revive: unknown node id", "node", id, "known", strings.Join(c.ids, ","))
 		return fmt.Errorf("unknown node id %s", id)
 	}
 
 	n := node.New(id, "127.0.0.1:0", nodeCapacity)
 	n.SetLogger(c.logger())
 	if err := n.Start(); err != nil {
-		c.logger().Error("revive failed: the replacement node could not bind a port", "node", id, "err", err)
+		c.logger().Error("revive failed: could not bind a port", "node", id, "err", err)
 		return fmt.Errorf("revive %s: %w", id, err)
 	}
 	c.nodes[id] = n
@@ -234,7 +228,8 @@ func (c *Cluster) Revive(id string) error {
 		}
 	}
 	c.logf("revive", "revived %s on a fresh port — it returns empty; reads still serve from replicas", id)
-	c.logger().Info("revived a node on a fresh port and told its peers the new address. It comes back with an EMPTY cache — reads keep working because the heal already placed copies elsewhere, and the next heal pass will repopulate this node with the keys it owns",
+	// Comes back with an empty cache; the heal repopulates it.
+	c.logger().Info("node revived (empty, heal will repopulate)",
 		"node", id,
 		"addr", n.Addr(),
 		"nodes_alive", len(c.nodes),
@@ -252,21 +247,16 @@ func (c *Cluster) Pause(id string, paused bool) error {
 
 	n, ok := c.nodes[id]
 	if !ok {
-		c.logger().Warn("pause was asked for a node that is not running", "node", id, "paused", paused)
+		c.logger().Warn("pause: node is not running", "node", id, "paused", paused)
 		return fmt.Errorf("node %s is not running", id)
 	}
+	// n.PauseHealth logs the fault itself (it is the node's own event) — no second
+	// line for it here.
 	n.PauseHealth(paused)
 	if paused {
 		c.logf("pause", "paused %s's health — a GC-pause stand-in; peers may falsely suspect it", id)
-		c.logger().Warn("FAULT INJECTED — stalling a node's health replies. The node is alive and still serving; it only looks dead. Peers will falsely convict it, but because re-replication waits out the grace period, resuming it in time means the false alarm costs zero copies",
-			"node", id,
-			"resume_within_to_avoid_heal", c.grace,
-		)
 	} else {
 		c.logf("resume", "resumed %s's health — if it beat the grace period, no heal storm", id)
-		c.logger().Info("fault cleared — a node's health replies resume. If it beat the grace period, the pending heal will find every owner already holding its keys and copy nothing: the false positive cost us nothing but a re-route",
-			"node", id,
-		)
 	}
 	return nil
 }
@@ -279,7 +269,7 @@ func (c *Cluster) Set(key, value string) error {
 	coord := c.anyLiveAddrLocked()
 	c.mu.Unlock()
 	if coord == "" {
-		c.logger().Error("write dropped: every node is dead, so there is nobody to coordinate it. The cluster is fully unavailable for writes", "key", key)
+		c.logger().Error("write dropped: no live node to coordinate it", "key", key)
 		return fmt.Errorf("no live node to coordinate the write")
 	}
 
@@ -289,22 +279,20 @@ func (c *Cluster) Set(key, value string) error {
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		c.logger().Error("write failed: the coordinating node could not be reached", "key", key, "coordinator", coord, "err", err)
+		c.logger().Error("write failed: coordinator unreachable", "key", key, "coordinator", coord, "err", err)
 		return err
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 300 {
-		c.logger().Error("write rejected by the coordinating node — most likely it could not reach enough of the key's owners to meet the write quorum",
-			"key", key, "coordinator", coord, "status", resp.StatusCode)
+		c.logger().Error("write rejected by coordinator", "key", key, "coordinator", coord, "status", resp.StatusCode)
 		return fmt.Errorf("set %s: status %d", key, resp.StatusCode)
 	}
 
 	c.mu.Lock()
 	c.logf("set", "wrote %q via a coordinator", key)
 	c.mu.Unlock()
-	c.logger().Debug("write accepted: a coordinating node fanned it out to the key's owners and enough of them acked",
-		"key", key, "coordinator", coord, "took", time.Since(start).Round(time.Millisecond))
+	c.logger().Debug("write ok", "key", key, "coordinator", coord, "took", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
@@ -316,13 +304,13 @@ func (c *Cluster) Get(key string) (value string, found bool, err error) {
 	coord := c.anyLiveAddrLocked()
 	c.mu.Unlock()
 	if coord == "" {
-		c.logger().Error("read dropped: every node is dead, so there is nobody to coordinate it. The cluster is fully unavailable for reads", "key", key)
+		c.logger().Error("read dropped: no live node to coordinate it", "key", key)
 		return "", false, fmt.Errorf("no live node to coordinate the read")
 	}
 
 	resp, err := c.client.Get("http://" + coord + "/get/" + key)
 	if err != nil {
-		c.logger().Error("read failed: the coordinating node could not be reached", "key", key, "coordinator", coord, "err", err)
+		c.logger().Error("read failed: coordinator unreachable", "key", key, "coordinator", coord, "err", err)
 		return "", false, err
 	}
 	defer resp.Body.Close()
@@ -330,15 +318,13 @@ func (c *Cluster) Get(key string) (value string, found bool, err error) {
 	took := time.Since(start).Round(time.Millisecond)
 	switch resp.StatusCode {
 	case http.StatusOK:
-		c.logger().Debug("read hit: an owner of this key answered with the value",
-			"key", key, "coordinator", coord, "took", took)
+		c.logger().Debug("read hit", "key", key, "took", took)
 		return string(body), true, nil
 	case http.StatusNotFound:
-		c.logger().Debug("read miss: an owner answered, but nobody holds this key — an honest miss, not a failure",
-			"key", key, "coordinator", coord, "took", took)
+		c.logger().Debug("read miss", "key", key, "took", took)
 		return "", false, nil
 	default:
-		c.logger().Error("read failed: no owner of this key could be reached, so the cluster cannot say whether the key exists",
+		c.logger().Error("read failed: all owners unreachable",
 			"key", key, "coordinator", coord, "status", resp.StatusCode, "took", took)
 		return "", false, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
@@ -364,12 +350,10 @@ func (c *Cluster) Seed(n int) error {
 	c.mu.Unlock()
 
 	start := time.Now()
-	c.logger().Info("seeding demo keys: each one is hashed onto the ring and written to the R nodes that own it",
-		"count", n, "first_key", fmt.Sprintf("key:%d", first), "last_key", fmt.Sprintf("key:%d", first+n-1))
-
 	for i := first; i < first+n; i++ {
 		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i)); err != nil {
-			c.logger().Error("seeding stopped early because a write failed", "key", fmt.Sprintf("key:%d", i), "seeded_so_far", i-first, "err", err)
+			c.logger().Error("seed stopped early: a write failed",
+				"key", fmt.Sprintf("key:%d", i), "seeded_so_far", i-first, "err", err)
 			return err
 		}
 	}
@@ -377,8 +361,12 @@ func (c *Cluster) Seed(n int) error {
 	c.mu.Lock()
 	c.logf("seed", "seeded %d keys (key:%d..key:%d)", n, first, first+n-1)
 	c.mu.Unlock()
-	c.logger().Info("seeded demo keys: every one is now replicated across its owners",
-		"count", n, "total_seeded", first+n, "took", time.Since(start).Round(time.Millisecond))
+	c.logger().Info("seeded keys",
+		"count", n,
+		"range", fmt.Sprintf("key:%d..key:%d", first, first+n-1),
+		"total_seeded", first+n,
+		"took", time.Since(start).Round(time.Millisecond),
+	)
 	return nil
 }
 
@@ -386,12 +374,12 @@ func (c *Cluster) Seed(n int) error {
 func (c *Cluster) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.logger().Info("shutting the cluster down: stopping every live node", "nodes_alive", len(c.nodes))
+	stopped := len(c.nodes)
 	for _, n := range c.nodes {
 		n.Close()
 	}
 	c.nodes = map[string]*node.Node{}
-	c.logger().Info("cluster shut down: all nodes stopped")
+	c.logger().Info("cluster stopped", "nodes_stopped", stopped)
 }
 
 // anyLiveAddrLocked returns some live node's address, deterministically. Caller

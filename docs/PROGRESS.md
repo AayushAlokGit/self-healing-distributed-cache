@@ -30,19 +30,35 @@ session and after each milestone. Newest entries at the top of the log.
   an honest dashboard shows N disagreeing views), Q6 (a node has ~150 ring positions, so it has none —
   fake what has no true value, never fake the mechanism), and Q7 (heal by ring-arc diff; the tradeoff is
   taxing the hot `Set` path to speed up the rare death path) were **taught, not attempted**.
-- **Next action:** **The core project and demo are COMPLETE (Phases 0–6), and the milestone quizzes are
-  now done.** `go run ./cmd/server`. **Candidate next steps (all optional polish):**
-  (a) ~~milestone quizzes for Phase 5/6~~ **DONE (Session 9)**; (b) optimize the naive heal to copy
-  only *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner) —
-  **S9 Q7 sketched the design and argued *against* building it**: it taxes every `Set` forever to speed
-  up a rare death, so don't build it until a measured heal is too slow;
-  (c) ~~the genuine-recovery repopulation gap~~ **DONE (Session 8: check-first heal repopulates)**;
+- **Session 9 (cont.) — the quiz paid for itself: it found a REAL BUG.** Building the quiz-motivated
+  heal log surfaced, within minutes, that the heal **stranded keys below R forever** whenever a revived
+  node was promoted back to primary of an arc while holding nothing — *the exact inverse of Q1*. Fixed:
+  **the healer is the first owner, in ring order, that actually holds the key** (permission follows the
+  data, not the ring position). Also **merged the heal log into the activity log** so order *is*
+  causality, with each heal reporting the cause **its sender observed**. Both shipped, tested under
+  `-race`, and pushed (`04efdf1`). See the Phase 5 checklist.
+- **Next action:** **The core project and demo are COMPLETE (Phases 0–6), the milestone quizzes are
+  done, and the stranded-key bug is fixed.** `go run ./cmd/server` + `cd frontend && npm run dev`.
+  **Candidate next steps:**
+  (a) ~~milestone quizzes for Phase 5/6~~ **DONE (Session 9)**; (b) optimize the heal to touch only the
+  ring arcs that actually changed owner — **S9 Q7 sketched it and argued *against* building it**: it
+  taxes every `Set` forever to speed up a rare death, so wait for a measured need. (A cheaper, real win
+  is sitting right there though: **`fetchFrom` is a `GET`, so every "do you have this key?" check
+  downloads the whole value.** A `HEAD /kv/{key}` would make the check free and roughly halve heal
+  traffic.);
+  (c) ~~the genuine-recovery repopulation gap~~ **DONE (Session 8, and *actually* done in Session 9 —
+  see the stranded-key bug: Session 8's version only repopulated the keys a revived node was a
+  *replica* of)**;
   (d) **deploy the demo to a free host + writeup** ← *recommended next*; the writeup should carry S9
   Q5's honesty (no god's-eye view exists) alongside the cluster-in-a-box caveat;
-  (e) **versioned values + read-repair** for the AP staleness gaps — this is now the highest-value
-  *code* change, since S9 Q4 showed the heal silently preserves conflicts forever. Pick per Aayush's
+  (e) **versioned values + read-repair** for the AP staleness gaps — the highest-value *code* change,
+  since S9 Q4 showed the heal silently preserves conflicts forever. Pick per Aayush's
   interest. **Carried-forward to re-ask cold (new, from S9):** (1) **presence ≠ version**;
-  (2) **reversibility, not just cost**, as the rule splitting the instant reaction from the delayed one.
+  (2) **reversibility, not just cost**, as the rule splitting the instant reaction from the delayed one;
+  (3) **the stranded-key case** — *"a revived node is promoted back to primary of an arc while holding
+  nothing; under 'only the primary heals,' who repopulates it?"* (Answer: **nobody, ever.**)
+- **Not yet done:** the rewritten `ActivityLog` component + its CSS are typechecked but **not yet
+  eyeballed in a browser** (the running backend still had the old binary). Restart and look.
   **Carried-forward re-ask done (Session 7 cold):** Q4 (self-suspicion & split-brain)
   now **✅** — sharpened that the data loss happens at *reconciliation* (LWW silently drops the older
   acked write), not at the conflict itself. Q6 (false-positive mitigations + the universal tradeoff)
@@ -157,6 +173,44 @@ Mark ☑ when taught AND the quick-check quiz was passed.
   keys); grace still makes it **0**. **Also fixed a latent data race** (`-race`, caught by the new
   revive test): the cluster handed one shared `peers` map to every node and `SetMembership` aliased it,
   so `SetPeerAddr` on one node raced another's heartbeat read — now each node `maps.Clone`s its own.
+  - ⚠️ **Session 8's repopulation claim was only HALF true — see the next entry.** A revived node got
+    back the keys where it was a *replica*, and **never** the keys where it was the *primary*.
+- ☑ **THE STRANDED-KEY BUG, and the heal's real invariant (Session 9).** *"Only the **primary** of a
+  key pushes it"* quietly requires one node to be **both the primary AND a holder**. A revived node
+  comes back empty and the ring promotes it straight back to primary of its own arcs — so the
+  **primary has nothing to send**, the **holders aren't the primary and stand down**, and **nobody is
+  both. The key stays under-replicated forever**, because no further membership change is coming to
+  retrigger anything. Found live in the browser (kill to 2 nodes, revive all three → **7 of 20 keys
+  never recovered**, and for some, *not one of the three owners held it* while two non-owners did).
+  `TestRevivedNodeRepopulates` had missed it for a whole session by asserting `keyCount > 0` — the
+  replica-keys alone clear that bar. **A weak assertion is a test that cannot fail in the way that
+  matters.**
+  - **The fix: permission follows the DATA, not the ring position.** The healer for a key is the
+    **first owner, in ring order, that actually holds it.** This keeps exactly what primary-only was
+    *for* (one sender ⇒ no duplicate copies) *and* guarantees a sender exists whenever anybody has the
+    data. Ranked below a holder → stand down; ranked above one, or holding a key **no owner has at
+    all** (a leftover from an older ring) → step up. `TestReviveRestoresFullReplication` kills to 2,
+    revives all, and demands every key back to R=3 **on its true owners** with no client writes —
+    **verified to fail against the old rule (15s timeout) and pass with the fix.**
+  - **Cost, honestly:** each holder now makes up to one extra probe per key to decide whether to stand
+    down ≈ **2× the heal's probe traffic**. **Not fixed:** `fetchFrom` is a `GET`, so a "do you have
+    this?" check **downloads the whole value** — a `HEAD /kv/{key}` would make the check free.
+  - **This is the exact inverse of milestone-quiz Q1.** A *dying* primary is fine — the ring promotes
+    a node that already holds a copy. A *returning* primary is the killer: promoted while holding
+    nothing. Recorded as a postscript in `QUIZZES.md`.
+- ☑ **Causal heal log (Session 9).** Heals now live in the **same event list as the kills**, not a log
+  of their own: the question a viewer has is *"which kill caused which copies,"* and that is a question
+  about **order** — so one list, one counter, appended at the moment each thing happens answers it with
+  **no ordering logic anywhere**. A test asserts a heal's id is greater than the id of the kill that
+  caused it. Each heal also carries its cause **as the sending node saw it** (`because n4 saw n2 went
+  silent`), *not* as the manager knows it: a node heals because **its own heartbeat** stopped hearing a
+  peer, and two nodes can disagree about that — a false positive is exactly one node seeing a death
+  nobody else sees. Coalescing is reported honestly too (`n1 came back and n2 came back and n3 came
+  back`). Event cap **kept**, raised 40 → 300: an append-only list anyone can grow forever by clicking
+  Kill is the **Phase-1 logical leak in a new hat**. New Go idiom recorded: **lock-order inversion** —
+  a heal→manager *callback* would deadlock (Kill holds `c.mu` while `Close` waits on the heal
+  goroutine), so the node buffers and the manager **drains**. *A lower layer must never call up into
+  the layer that owns it.*
 - ◐ Serving reads during heal — **already true via the Phase 3 read fallback** (available ≠
   fully-replicated): reads hop past the missing copy while the heal runs. Not yet made explicit in a
   Phase-5 test; light follow-up.
@@ -194,6 +248,112 @@ node has ~150 scattered points and no single true position; keys/ticks keep thei
 ---
 
 ## Session log
+
+### Session 9 — 2026-07-11 · The milestone quiz, and the bug it found
+
+**Phase 5 + Phase 6 milestone quiz: 2 ✅ · 3 ⚠️ · 3 ⊘.** Questions and model answers in `QUIZZES.md`.
+The carried-forward Snapshot-recency ⚠️ was re-asked cold and is now **✅ — that debt is closed.** The
+new one, and the only real knowledge gap on the board, is **presence ≠ version**.
+
+**Then the quiz paid for itself, which is the story of this session.**
+
+Aayush asked for a heal log in the UI — "which keys moved from where to where." Building it took an
+hour. **Within minutes of it existing, it showed the heal was broken**, in a way five sessions of tests
+and four browser demos had never revealed.
+
+#### The stranded-key bug
+
+The heal's rule was *"only the **primary** of a key pushes it."* That sounds like a clean
+de-duplication rule. It quietly requires one node to be **both the primary AND a holder** — and there
+is a case where nobody is:
+
+- A revived node comes back **empty**.
+- The ring **promotes it straight back to primary** of its own arcs (that promotion is automatic — it
+  falls out of the sorted ring, which is exactly the property Q1 celebrates).
+- The **primary now has nothing to send.** The key isn't in its `Snapshot()`, so it never even
+  considers it.
+- The **holders won't send it.** They have it, but they're not the primary, so they stand down.
+
+**Nobody is both. The key stays under-replicated forever** — no further membership change is coming to
+retrigger anything. Reproduced live: kill down to 2 nodes, revive all three, and **7 of 20 keys never
+recovered.** For some of them, *not one of the three owners held it* while two non-owners did.
+
+**This is the exact inverse of quiz Q1.** A primary that *dies* is fine — the ring promotes a node that
+**already holds a copy**. A primary that *returns* is the killer — promoted while holding **nothing**.
+The model answer and the code shared the same blind spot.
+
+**Why the tests missed it for a whole session.** `TestRevivedNodeRepopulates` asserted
+`nodeKeyCount(victim) > 0`. A revived node *does* get back the keys where it is a non-primary
+**replica** — those have a live primary that holds them and pushes normally. So the count leaves zero,
+and the assertion is satisfied. It never checked that the cluster returned to **full R**.
+> **A weak assertion is a test that cannot fail in the way that matters.** Sibling of Session 5's
+> *"a test that cannot fail is not evidence."*
+
+**The fix — permission follows the DATA, not the ring position:**
+> **The healer for a key is the first owner, in ring order, that actually holds it.**
+
+That keeps the whole point of primary-only (**exactly one sender ⇒ no duplicate copies**) *and*
+guarantees a sender **exists** whenever anybody has the data. Ranked below a holder → stand down.
+Ranked above one, or holding a key **no owner has at all** (a leftover from an older ring) → step up.
+
+`TestReviveRestoresFullReplication` kills to 2 nodes, revives all three, and demands every key back to
+**R=3 on its true owners** with no client writes. **Verified to fail against the old rule** (times out
+at 15s) **and pass with the fix** (4s). Price, honestly: each holder now makes up to one extra probe
+per key to decide whether to stand down — **~2× the heal's probe traffic**. **Not fixed:** `fetchFrom`
+is a `GET`, so a *"do you have this?"* check **downloads the whole value**; a `HEAD /kv/{key}` would
+make the check free.
+
+#### …and then the new test flaked, which taught the same lesson twice
+
+`TestReviveRestoresFullReplication` passed, then failed, then passed. **The bug was in the test, and it
+was the *same* mistake in a new place: the wait condition was weaker than the assertion.**
+
+It waited on *"no key is under-replicated"* (`holders < R`) but asserted *"every **owner** holds its
+key."* Those differ — and they differ **precisely because of the bug being fixed**. After a kill/revive
+cycle the survivors keep **leftover copies of keys they no longer own**, and those leftovers pad the
+holder count to 3 while a genuine owner sits empty. So the wait could exit **before the heal had
+converged**, and the assertion would then fail on a cluster that just needed another second.
+
+Fixed by waiting on the invariant the test actually checks (`notOnItsOwners`), then run **8×** to prove
+the flake is gone. `holders >= R` is *not* the replication invariant — **`every owner holds its key`**
+is. The weaker one is what let the original bug hide, and it is what made the test that caught the bug
+lie about it.
+> **Three for three now: a test is only as good as its weakest predicate.** *A test that cannot fail is
+> not evidence* (S5) → *a weak assertion is a test that cannot fail in the way that matters* (this
+> session, on `keyCount > 0`) → *a weak **wait** is an assertion evaluated too early.*
+
+#### The log: order *is* causality
+
+Aayush's design call, and it was the right one: **heals go in the same list as the kills.** The question
+a viewer has is *"which kill caused which copies,"* and that is a question about **order** — so one
+list, one counter, appended at the moment each thing happens answers it with **no ordering logic
+anywhere**. A test asserts a heal's id exceeds the id of the kill that caused it.
+
+Two amendments to his proposal:
+- **He wanted to remove the 40-entry cap. Kept it, raised to 300.** An append-only list anyone can grow
+  forever by clicking Kill is the **Phase-1 logical leak in a new hat** — reachable, growing,
+  uncollectable. The cap wasn't the problem; *40* was.
+- **Each heal now reports the cause its SENDER observed** (`because n4 saw n2 went silent`), not what
+  the manager did. A node heals because **its own heartbeat** stopped hearing a peer, and two nodes can
+  **disagree** about that — a false positive is precisely one node seeing a death nobody else sees. So
+  attribution is *causal*, not positional, and when views diverge the log will show it. Coalescing is
+  honest too: `n1 came back and n2 came back and n3 came back`.
+
+#### Also
+- **"Seed 8 more keys" was a total no-op.** `Seed(n)` always wrote `key:0..key:n-1`, and the server
+  seeds 12 at startup — so every click rewrote keys that already existed. **Zero new keys, ever.** Fixed
+  by having the *cluster* number the keys and append. Deliberately **not** tracked in the frontend: a
+  client remembering "I've seeded 8 so far" is **check-then-act** in a UI costume — a reload or a second
+  tab hands out the same numbers twice.
+- **New Go idiom: lock-order inversion.** A heal→manager *callback* to report copies **deadlocks** —
+  `Kill` holds `c.mu` while `Close` waits on the heal goroutine, and the callback would want `c.mu`.
+  `-race` cannot see it (a deadlock is not a data race). Fixed structurally: the node buffers into its
+  own log and the manager **drains** it. *A lower layer must never call up into the layer that owns it.*
+- Packet animation slowed (750ms → 1900ms) and **staggered**, so a heal reads as a stream of keys in
+  flight rather than one blurred frame.
+
+---
+
 ### Session 5 — 2026-07-10 · Phase 1 step 4: eviction, built
 
 **Cold re-ask of the nine carried-forward questions: 2 ✅ · 5 ⚠️ · 1 ❌ · 1 ⊘.** Full text in

@@ -140,6 +140,32 @@ close(stop)   // ask it to stop
 `Cache.Close()` does this with `close(done)` + `wg.Wait()`. Skip the second and you return while a
 goroutine is still touching your data.
 
+### ⚠️ Lock-order inversion: the callback that deadlocks
+A callback looks like the obvious way to let a worker report progress upward. It is also the classic
+way to deadlock, and **`-race` will not warn you** — a deadlock is not a data race.
+
+The shape (from the heal log, Session 9). `Cluster.Kill` holds `c.mu` and calls `node.Close()`, which
+blocks on `n.wg.Wait()` until the heal goroutine exits. So if the heal goroutine reported each copy by
+calling back into the cluster:
+
+```go
+// heal goroutine                 // Kill goroutine
+n.onHealCopy(key, to)             c.mu.Lock()
+  └─ c.mu.Lock()   ← blocked      n.Close()
+                                    └─ n.wg.Wait()  ← blocked on the heal goroutine
+```
+
+Each waits for a lock the other will never release. **Two locks acquired in opposite orders by two
+goroutines is all a deadlock needs** — here the second "lock" is `wg.Wait()`, which is easy to miss
+because it isn't spelled `Lock`.
+
+**The fix is structural, not a smarter lock:** invert the direction. The node writes what it did into
+its *own* buffer under its *own* mutex; the manager **drains** it on its next poll. Nobody calls
+upward, so no cycle can form. → `node.healLog` / `node.DrainHealLog`
+
+Rule of thumb: **a lower layer must never call up into the layer that owns it.** Let the upper layer
+pull. (Same instinct as `Close()` ownership: whoever constructs it, drives it.)
+
 ### Goroutines and the GC
 **Every running goroutine's stack is a GC root.** A goroutine that never returns keeps everything it
 references reachable *forever* — and since it never returns, its stack never stops being a root. Two
@@ -314,6 +340,19 @@ walk on a ring: `i := sort.Search(len(pts), func(i int){ return pts[i].hash >= h
 **Filter-in-place** reuses the backing array: `kept := s[:0]; for _, x := range s { if keep(x) { kept = append(kept, x) } }; s = kept`.
 `s[:0]` is length 0, full capacity, same pointer — so `append` overwrites the original as it goes.
 Safe here only because the read index never lags the write index. → `Ring.Remove`
+
+**Bounded (ring-buffer-ish) log:** `if over := len(s) - maxN; over > 0 { s = slices.Delete(s, 0, over) }`
+drops the oldest entries and keeps the newest `maxN`. Prefer it to the older `s = s[len(s)-maxN:]`,
+which quietly **retains the whole backing array** — the dropped elements stay reachable through it, so
+a "bounded" log leaks unboundedly. `slices.Delete` shifts and zeroes, so the dropped ones are
+collectable. → `Cluster.appendEvent`, `Node.recordHeal`
+
+**`min`/`max` are builtins since Go 1.21** — no import, and they work on any ordered type:
+`owners[:min(rank, len(owners))]`. (Not `math.Min`, which is `float64`-only and needs casts.)
+
+**`maps.Keys` returns an iterator, not a slice** (Go 1.23+). `slices.Sorted(maps.Keys(m))` is the
+idiom for "iterate a map in a stable order" — needed because Go randomizes map iteration, so an
+unsorted render order flickers on every poll. → `Node.recordHeal`
 
 ---
 
