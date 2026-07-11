@@ -3,6 +3,12 @@ import { colorFor } from '../geometry'
 
 // KeyTable shows the precise key -> owner-nodes mapping, keeping that detail off
 // the ring (which now shows only nodes, ownership arcs, and key movement).
+//
+// Owners are named, not just coloured: a row of dots forces you to look the colour
+// up in the legend before you can say *which* node holds a key. The id is the fact
+// you actually want; the colour just ties it back to the ring. The primary (the
+// first node clockwise) is a solid pill, its replicas outlined — so replication
+// factor is readable at a glance without a key.
 export function KeyTable({ keys }: { keys: KeyState[] }) {
   const sorted = [...keys].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))
   return (
@@ -19,10 +25,16 @@ export function KeyTable({ keys }: { keys: KeyState[] }) {
                 {k.owners.map((o, i) => (
                   <span
                     key={o}
-                    className={'odot' + (i === 0 ? ' primary' : '')}
-                    style={{ color: colorFor(o), background: colorFor(o) }}
-                    title={o + (i === 0 ? ' (primary)' : '')}
-                  />
+                    className={'oid' + (i === 0 ? ' primary' : '')}
+                    style={
+                      i === 0
+                        ? { background: colorFor(o), borderColor: colorFor(o), color: '#08101c' }
+                        : { color: colorFor(o), borderColor: colorFor(o) }
+                    }
+                    title={o + (i === 0 ? ' — primary (first node clockwise)' : ' — replica')}
+                  >
+                    {o}
+                  </span>
                 ))}
                 {k.underReplicated && (
                   <span className="warn" title="under-replicated — re-replicating">

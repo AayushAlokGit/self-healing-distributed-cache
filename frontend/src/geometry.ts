@@ -6,7 +6,17 @@ export const CX = 360
 export const CY = 360
 export const RING = 250
 export const NODE_R = 298 // node markers, just outside the ring
-export const KEY_R = 205 // key dots, just inside
+export const KEY_R = 226 // key dots, just inside the ring's inner edge
+
+// Key labels read radially, inward from their dot. Only a key's *angle* is
+// meaningful (it's the hash), so a label — and, when two keys hash close
+// together, its whole tier — can be pulled inward for free.
+export const LABEL_R = KEY_R - 13
+// A tier steps inward along the *same* spoke, so the step has to clear a whole
+// label ("key:19" is ~34 units at 10px) or the stacked names run into each other.
+export const LABEL_STEP = 46
+export const LABEL_TIERS = 3 // 3 × 46 still stops well short of the centre badge
+export const MIN_SEP_DEG = 4.5 // closer than this and two labels would touch
 
 export const COLORS: Record<string, string> = {
   n0: '#22d3ee',
