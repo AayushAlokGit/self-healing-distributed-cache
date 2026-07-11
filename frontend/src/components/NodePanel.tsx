@@ -1,20 +1,16 @@
-import { useState } from 'react'
-import { errMsg, killNode, pauseNode, reviveNode, type NodeState } from '../api'
+import { killNode, pauseNode, reviveNode, type NodeState } from '../api'
 import { colorFor } from '../geometry'
+import { useApiError } from '../hooks'
+import { ErrorLine } from './ErrorLine'
 
 export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: () => void }) {
-  const [err, setErr] = useState<string | null>(null)
+  const { err, run } = useApiError()
 
+  // Refresh whether or not the call worked: on failure that re-syncs the UI with the
+  // truth instead of leaving a stale guess on screen.
   const act = async (fn: () => Promise<void>) => {
-    setErr(null)
-    try {
-      await fn()
-    } catch (e) {
-      // Say so out loud. A kill that quietly failed is indistinguishable from a
-      // cluster that ignored the kill — and this panel exists to be trusted.
-      setErr(errMsg(e))
-    }
-    onAction() // refresh either way: on failure it re-syncs the UI with the truth
+    await run(fn)
+    onAction()
   }
 
   return (
@@ -24,19 +20,15 @@ export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: (
         {nodes.map((n) => (
           <div className={'nrow' + (!n.alive ? ' dead' : n.paused ? ' paused' : '')} key={n.id}>
             <div className="id">
-              <span className="swatch" style={{ color: colorFor(n.id), background: colorFor(n.id) }} />
+              {/* one colour in, and CSS derives both the fill and the glow from it */}
+              <span className="swatch" style={{ color: colorFor(n.id) }} />
               {n.id}
             </div>
-            <div className="meta">
-              {n.alive ? `${n.keyCount} keys · ${n.healCopies} pushed` : 'offline'}
-            </div>
+            <div className="meta">{n.alive ? `${n.keyCount} keys · ${n.healCopies} pushed` : 'offline'}</div>
             <div className="btns">
               {n.alive ? (
                 <>
-                  <button
-                    className={'pause' + (n.paused ? ' on' : '')}
-                    onClick={() => act(() => pauseNode(n.id, !n.paused))}
-                  >
+                  <button className={'pause' + (n.paused ? ' on' : '')} onClick={() => act(() => pauseNode(n.id, !n.paused))}>
                     {n.paused ? 'Resume' : 'Pause'}
                   </button>
                   <button className="kill" onClick={() => act(() => killNode(n.id))}>
@@ -52,7 +44,7 @@ export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: (
           </div>
         ))}
       </div>
-      {err && <div className="api-err">⚠ {err}</div>}
+      <ErrorLine err={err} />
     </div>
   )
 }

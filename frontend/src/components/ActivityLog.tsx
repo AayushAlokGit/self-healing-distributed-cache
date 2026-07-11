@@ -65,7 +65,7 @@ export function ActivityLog({ events }: { events: ClusterEvent[] }) {
 
   return (
     <div className="card">
-      <h2>Activity &amp; re-replication</h2>
+      <h2>Activity log</h2>
       <div className="log">
         {blocks.map((b) => {
           const copies = b.heals.reduce((n, h) => n + (h.keys?.length ?? 0), 0)

@@ -4,7 +4,7 @@ import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
 import { RingViz } from './components/RingViz'
 import { Stats } from './components/Stats'
-import { useClusterState } from './useClusterState'
+import { useClusterState } from './hooks'
 
 export default function App() {
   const { state, prev, connected, refresh } = useClusterState()

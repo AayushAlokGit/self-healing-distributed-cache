@@ -1,12 +1,25 @@
+/* Colours are declared once as space-separated RGB triples so any alpha can be mixed
+   from them with rgb(... / a). Before this, the same five colours were re-typed as ~25
+   different rgba() literals and a tweak meant a find-and-replace. */
 :root {
+  --steel: 120 160 220; /* the blue-grey of every border, hairline and neutral fill */
+  --danger: 255 84 112;
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --cyan: 34 211 238;
+
   --bg: #070b12;
-  --panel: rgba(20, 28, 42, 0.66);
-  --panel-brd: rgba(120, 160, 220, 0.16);
   --ink: #e7eefb;
   --muted: #8ea3c4;
-  --danger: #ff5470;
-  --ok: #34d399;
+  --danger-ink: #ff90a4;
+  --ok-ink: #7df0c3;
+
+  --panel: rgba(20, 28, 42, 0.66);
+  --panel-brd: rgb(var(--steel) / 0.16);
+  --well: rgba(10, 16, 26, 0.5); /* the recessed background of a row or chip */
+  --hair: rgb(var(--steel) / 0.08); /* a border you should barely notice */
 }
+
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; height: 100%; }
 body {
@@ -24,204 +37,221 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .title h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; font-weight: 700; }
 .title h1 .accent { background: linear-gradient(90deg, #22d3ee, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .title p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
-.offline-badge { color: var(--danger); font-size: 12px; font-weight: 600; }
+.offline-badge { color: rgb(var(--danger)); font-size: 12px; font-weight: 600; }
+
+.card, .stat, .stage { background: var(--panel); border: 1px solid var(--panel-brd); backdrop-filter: blur(8px); }
+.card { border-radius: 16px; padding: 16px; }
+.card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1.6px; color: var(--muted); }
 
 .stats { display: flex; gap: 12px; flex-wrap: wrap; }
-.stat { background: var(--panel); border: 1px solid var(--panel-brd); border-radius: 12px; padding: 9px 14px; min-width: 88px; backdrop-filter: blur(8px); }
+.stat { border-radius: 12px; padding: 9px 14px; min-width: 88px; }
 .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted); }
 .stat .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
 .stat .v.pop { animation: pop 0.5s ease; }
-@keyframes pop { 0% { transform: scale(1); } 35% { transform: scale(1.28); color: #22d3ee; } 100% { transform: scale(1); } }
+@keyframes pop { 0% { transform: scale(1); } 35% { transform: scale(1.28); color: rgb(var(--cyan)); } 100% { transform: scale(1); } }
 
-/* The ring is the demo, so it gets the room: a wider left column and a taller cap
-   than before, which buys every key label real pixels to be legible in. */
 .grid { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(330px, 0.85fr); gap: 20px; align-items: start; }
 @media (max-width: 1040px) { .grid { grid-template-columns: 1fr; } }
 
-.stage { position: relative; background: radial-gradient(600px 600px at 50% 46%, rgba(30, 44, 70, 0.35), transparent 70%), var(--panel); border: 1px solid var(--panel-brd); border-radius: 20px; padding: 8px; overflow: hidden; }
+/* min-width: 0 on BOTH columns, or one blows out the screen: a `1fr` track is really
+   minmax(auto, 1fr), and that `auto` floor is the item's min-content width — so a
+   single unshrinkable child sets the width of the whole column. */
+.left, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+.stage { position: relative; border-radius: 20px; padding: 8px; overflow: hidden; background-image: radial-gradient(600px 600px at 50% 46%, rgba(30, 44, 70, 0.35), transparent 70%); }
 /* touch-action: manipulation, NOT none. The ring is the tallest thing on a phone, so a
-   finger swiping to scroll almost always starts on it — and `none` swallows that swipe,
-   leaving the page apparently frozen. Nothing here handles gestures, so there is nothing
-   to protect; `manipulation` still suppresses double-tap zoom. */
+   finger swiping to scroll almost always starts on it, and `none` swallows that swipe —
+   which reads as a frozen page. Nothing here handles gestures. */
 svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display: block; margin: 0 auto; touch-action: manipulation; }
 .caption { position: absolute; left: 16px; bottom: 12px; color: var(--muted); font-size: 11.5px; max-width: 60%; line-height: 1.5; }
 .legend { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
 .legend .row { display: flex; align-items: center; gap: 7px; color: var(--muted); }
-.legend .dot { width: 9px; height: 9px; border-radius: 50%; }
 
-/* min-width: 0 on BOTH, or the column blows out the screen. A grid track of `1fr` is
-   really minmax(auto, 1fr), and that `auto` floor is the item's min-content width — so
-   one unshrinkable child sets the width of the whole column. .side had no floor of its
-   own and forced the track to 383px inside a 320px grid; body's overflow-x: hidden was
-   quietly clipping the result rather than fixing it. */
-.left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* Both take a single colour via inline `color`, and derive fill and glow from it. */
+.legend .dot, .nrow .swatch { border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
+.legend .dot { width: 9px; height: 9px; }
+.nrow .swatch { width: 10px; height: 10px; }
+
 .muted-note { color: var(--muted); font-size: 12px; }
+.spacer { height: 10px; }
+
+/* A chip is a small rounded label. Everything below is one, differing only in colour:
+   the owner ids in the key panel, the node ids in a heal row, the key names, the event
+   tags. The shared shape lives here once. */
+.oid, .node-chip, .key-chip, .tag {
+  font-weight: 700;
+  border-radius: 5px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.oid, .node-chip { border: 1px solid; }
 
 .keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; max-height: 300px; overflow-y: auto; }
-.keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: rgba(10, 16, 26, 0.5); border: 1px solid rgba(120, 160, 220, 0.08); font-size: 12px; transition: 0.2s; }
+.keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
 .keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
 .keychip .owners { display: flex; gap: 4px; align-items: center; }
-.keychip .oid { font-size: 10.5px; font-weight: 700; line-height: 1.5; padding: 0 5px; border: 1px solid; border-radius: 5px; font-variant-numeric: tabular-nums; }
-.keychip .oid.primary { box-shadow: 0 0 8px rgba(255, 255, 255, 0.14); }
-.keychip.under { border-color: rgba(255, 84, 112, 0.5); box-shadow: 0 0 12px rgba(255, 84, 112, 0.12); }
-.keychip .warn { color: var(--danger); font-size: 12px; animation: healpulse 1.15s ease-in-out infinite; }
-.card { background: var(--panel); border: 1px solid var(--panel-brd); border-radius: 16px; padding: 16px; backdrop-filter: blur(8px); }
-.card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1.6px; color: var(--muted); }
+/* Primary is a solid pill, its replicas outlined — so R=3 reads without a legend. */
+.oid { font-size: 10.5px; line-height: 1.5; padding: 0 5px; }
+.oid.primary { box-shadow: 0 0 8px rgba(255, 255, 255, 0.14); }
+.keychip.under { border-color: rgb(var(--danger) / 0.5); box-shadow: 0 0 12px rgb(var(--danger) / 0.12); }
+.keychip .warn { color: rgb(var(--danger)); font-size: 12px; animation: healpulse 1.15s ease-in-out infinite; }
 
-/* Tightened: five rows of a known size, so there is no reason to spend height here
-   that the activity log could be using. */
+/* Five rows of a known size (the cluster is built as cluster.New(..., "n0" .. "n4"), so
+   this panel can never grow) — no reason to spend height the activity log could use. */
 .nodes-ctl { display: flex; flex-direction: column; gap: 5px; }
-.nrow { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 9px; background: rgba(10, 16, 26, 0.5); border: 1px solid rgba(120, 160, 220, 0.08); transition: 0.2s; }
+.nrow { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 9px; background: var(--well); border: 1px solid var(--hair); transition: 0.2s; }
 .nrow .id { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 7px; min-width: 46px; }
-.nrow .swatch { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
 .nrow .meta { color: var(--muted); font-size: 10.5px; flex: 1; font-variant-numeric: tabular-nums; }
 .nrow button { padding: 4px 9px; font-size: 11px; }
 .nrow.dead { opacity: 0.5; filter: grayscale(0.6); }
-.nrow.paused { box-shadow: inset 0 0 0 1px #fbbf24, 0 0 14px rgba(251, 191, 36, 0.15); }
+.nrow.paused { box-shadow: inset 0 0 0 1px rgb(var(--warn)), 0 0 14px rgb(var(--warn) / 0.15); }
 .btns { display: flex; gap: 6px; }
-button { font-family: inherit; cursor: pointer; border: none; border-radius: 9px; padding: 6px 11px; font-size: 11.5px; font-weight: 600; color: var(--ink); background: rgba(120, 160, 220, 0.14); transition: 0.15s; letter-spacing: 0.2px; }
-button:hover { background: rgba(120, 160, 220, 0.28); transform: translateY(-1px); }
+
+/* Every button is the same button in a different colour, so the colour is the only
+   thing a variant sets. --btn defaults to steel; :hover just raises the alpha. */
+button {
+  --btn: var(--steel);
+  font-family: inherit; cursor: pointer; border: none; border-radius: 9px;
+  padding: 6px 11px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.2px;
+  color: var(--ink); background: rgb(var(--btn) / 0.16); transition: 0.15s;
+}
+button:hover { background: rgb(var(--btn) / 0.3); transform: translateY(-1px); }
 button:active { transform: translateY(0); }
-button.kill { background: rgba(255, 84, 112, 0.16); color: #ff90a4; }
-button.kill:hover { background: rgba(255, 84, 112, 0.34); }
-button.revive { background: rgba(52, 211, 153, 0.16); color: #7df0c3; }
-button.revive:hover { background: rgba(52, 211, 153, 0.32); }
-button.pause.on { background: rgba(251, 191, 36, 0.28); color: #ffe08a; }
-button.primary { background: linear-gradient(90deg, rgba(34, 211, 238, 0.9), rgba(124, 77, 255, 0.9)); color: #04121a; width: 100%; }
+button.kill { --btn: var(--danger); color: var(--danger-ink); }
+button.revive { --btn: var(--ok); color: var(--ok-ink); }
+button.pause.on { --btn: var(--warn); background: rgb(var(--btn) / 0.28); color: #ffe08a; }
+/* After button:hover, so the gradient survives a hover (equal specificity, later wins). */
+button.primary { background: linear-gradient(90deg, rgb(var(--cyan) / 0.9), rgba(124, 77, 255, 0.9)); color: #04121a; width: 100%; }
 button.primary:hover { filter: brightness(1.1); }
 
 .kv { display: flex; gap: 8px; margin-bottom: 9px; }
-input { flex: 1; min-width: 0; background: rgba(10, 16, 26, 0.7); border: 1px solid rgba(120, 160, 220, 0.16); border-radius: 9px; color: var(--ink); padding: 8px 11px; font-family: inherit; font-size: 13px; }
-input:focus { outline: none; border-color: #22d3ee; }
-/* A request that failed outright — distinct from a cache miss, which is a real
-   answer about the cluster rather than a broken call. */
-.api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: #ff9db0; background: rgba(255, 84, 112, 0.1); border: 1px solid rgba(255, 84, 112, 0.35); word-break: break-word; }
+input { flex: 1; min-width: 0; background: rgba(10, 16, 26, 0.7); border: 1px solid var(--panel-brd); border-radius: 9px; color: var(--ink); padding: 8px 11px; font-family: inherit; font-size: 13px; }
+input:focus { outline: none; border-color: rgb(var(--cyan)); }
 
 .result { font-size: 12px; color: var(--muted); min-height: 16px; margin-top: 6px; }
-.result b { color: var(--ok); }
-.result.miss b { color: var(--danger); }
-.spacer { height: 10px; }
+.result b { color: rgb(var(--ok)); }
+.result.miss b { color: rgb(var(--danger)); }
+/* A request that failed outright — distinct from a cache miss, which is a real answer
+   about the cluster rather than a broken call. */
+.api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }
 
-/* The activity log is the only panel that grows without bound — the node panel is a
-   fixed five rows (the cluster is built as cluster.New(..., "n0" .. "n4"), so it can
-   never grow) and the key panel is three controls. So it gets the height, and the
-   two above it were tightened to hand some over.
-   Not flex-filled to the viewport: one kill fans out to four heal rows, each with its
-   keys and its cause, so a couple of kills already overflow any screen. The log has to
-   scroll regardless — better to make its box big and let the page scroll than to
-   squeeze it into whatever the ring leaves behind. */
-.log { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; gap: 0; }
-@media (max-width: 1040px) { .log { max-height: 440px; } }
+/* The activity log is the only panel here that grows without bound, so it gets the
+   height. Not flex-filled to the viewport: one kill fans out to four heal rows, each
+   with its keys and its cause, so a couple of kills overflow any screen and the log
+   must scroll regardless. A big box plus a scrolling page beats a small box that fits. */
+.log { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; }
 .ev { display: flex; gap: 9px; align-items: baseline; padding: 5px 2px; font-size: 12px; animation: slidein 0.35s ease; }
 @keyframes slidein { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; } }
-.ev .tag { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 6px; border-radius: 5px; white-space: nowrap; }
 .ev .msg { color: var(--muted); }
-.tag.kill { background: rgba(255, 84, 112, 0.2); color: #ff90a4; }
-.tag.revive { background: rgba(52, 211, 153, 0.2); color: #7df0c3; }
-.tag.pause, .tag.resume { background: rgba(251, 191, 36, 0.2); color: #ffe08a; }
-.tag.set, .tag.seed { background: rgba(34, 211, 238, 0.18); color: #8be9fd; }
-.tag.info { background: rgba(120, 160, 220, 0.18); color: var(--muted); }
+.ev .rollup { margin-left: auto; color: rgb(var(--ok)); font-size: 10.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
-/* One block = one fault plus the heal copies it caused, nested under it. The nesting
-   is the whole point: cause on top, consequences beneath, in the order they happened. */
-.block { border-bottom: 1px solid rgba(120, 160, 220, 0.06); padding: 3px 0; }
-.block.has-heals { background: rgba(52, 211, 153, 0.04); border-radius: 8px; padding: 4px 6px; margin: 3px 0; }
-.ev .rollup { margin-left: auto; color: var(--ok); font-size: 10.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Same story as the buttons: one tag, recoloured per event kind. */
+.tag { --tag: var(--steel); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 6px; background: rgb(var(--tag) / 0.2); color: var(--tag-ink, var(--muted)); }
+.tag.kill { --tag: var(--danger); --tag-ink: var(--danger-ink); }
+.tag.revive { --tag: var(--ok); --tag-ink: var(--ok-ink); }
+.tag.pause, .tag.resume { --tag: var(--warn); --tag-ink: #ffe08a; }
+.tag.set, .tag.seed { --tag: var(--cyan); --tag-ink: #8be9fd; }
 
-.heals { margin: 4px 0 2px 10px; padding-left: 10px; border-left: 2px solid rgba(52, 211, 153, 0.35); display: flex; flex-direction: column; gap: 7px; }
+/* One block = one fault plus the heal copies it caused, nested under it. The nesting is
+   the whole point: cause on top, consequences beneath, in the order they happened. */
+.block { border-bottom: 1px solid rgb(var(--steel) / 0.06); padding: 3px 0; }
+.block.has-heals { background: rgb(var(--ok) / 0.04); border-radius: 8px; padding: 4px 6px; margin: 3px 0; }
+.heals { margin: 4px 0 2px 10px; padding-left: 10px; border-left: 2px solid rgb(var(--ok) / 0.35); display: flex; flex-direction: column; gap: 7px; }
 .heal-row { animation: slidein 0.35s ease; }
 .heal-row .hop { display: flex; align-items: center; gap: 7px; }
-.heal-row .arrow { color: var(--ok); font-weight: 700; }
+.heal-row .arrow { color: rgb(var(--ok)); font-weight: 700; }
 .heal-row .count { margin-left: auto; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .heal-row .keys { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
 .heal-row .cause { margin-top: 4px; color: var(--muted); font-size: 10px; font-style: italic; opacity: 0.75; }
-.node-chip { font-size: 11px; font-weight: 700; padding: 1px 7px; border: 1px solid; border-radius: 6px; background: rgba(255, 255, 255, 0.03); }
-.key-chip { font-size: 10px; color: var(--muted); padding: 1px 5px; border-radius: 4px; background: rgba(120, 160, 220, 0.1); font-variant-numeric: tabular-nums; }
+.node-chip { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: rgba(255, 255, 255, 0.03); }
+.key-chip { font-size: 10px; font-weight: 400; color: var(--muted); padding: 1px 5px; border-radius: 4px; background: rgb(var(--steel) / 0.1); }
 
-/* SVG bits */
-.ringbase { fill: none; stroke: rgba(120, 160, 220, 0.12); stroke-width: 1.5; }
-.varc { fill: none; stroke-width: 16; stroke-linecap: butt; opacity: 0.9; transition: stroke 0.5s ease; filter: saturate(1.1); }
-.keydot { transition: cx 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), cy 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.keylabel { font-size: 10px; fill: #a7bcdb; dominant-baseline: middle; pointer-events: none; font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
-.keyleader { stroke: rgba(120, 160, 220, 0.3); stroke-width: 1; }
+/* --- SVG ---------------------------------------------------------------------- */
+.ringbase { fill: none; stroke: rgb(var(--steel) / 0.12); stroke-width: 1.5; }
+.varc { fill: none; stroke-width: 16; opacity: 0.9; transition: stroke 0.5s ease; filter: saturate(1.1); }
+/* Radius stays an SVG attribute (r={5}), not a CSS declaration: CSS `r` is not
+   universally supported, and a browser that ignores it would render r=0 — no dots at
+   all. The media query below overrides it where it is supported, which degrades safely. */
+.keydot { stroke: #0b1220; stroke-width: 1.5; transition: cx 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), cy 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .keydot.under { animation: underpulse 1s ease-in-out infinite; }
-@keyframes underpulse { 0%, 100% { r: 5; filter: drop-shadow(0 0 2px var(--danger)); } 50% { r: 8; filter: drop-shadow(0 0 8px var(--danger)); } }
+@keyframes underpulse {
+  0%, 100% { r: 5; filter: drop-shadow(0 0 2px rgb(var(--danger))); }
+  50% { r: 8; filter: drop-shadow(0 0 8px rgb(var(--danger))); }
+}
+.keylabel { font-size: 10px; fill: #a7bcdb; dominant-baseline: middle; pointer-events: none; font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
+.keyleader { stroke: rgb(var(--steel) / 0.3); stroke-width: 1; }
+
 .nodeg { transition: opacity 0.4s; }
-.nodeg.alive .halo { animation: beat 1.6s ease-in-out infinite; }
-@keyframes beat { 0%, 100% { opacity: 0.18; r: 26; } 50% { opacity: 0.42; r: 33; } }
-.nodeg.dead { opacity: 0.32; }
-.nodeg.dead .label { fill: var(--muted); }
-.nodeg.paused .halo { animation: beatpause 0.5s ease-in-out infinite; }
-@keyframes beatpause { 0%, 100% { opacity: 0.3; r: 26; } 50% { opacity: 0.7; r: 34; } }
+.nodeg .halo { stroke-width: 2; }
+.nodeg .core { stroke-width: 2.5; }
 .nodeg .label { font-size: 14px; font-weight: 800; fill: var(--ink); text-anchor: middle; dominant-baseline: middle; }
 .nodeg .sub { font-size: 9px; fill: var(--muted); text-anchor: middle; }
+.nodeg.alive .halo { animation: beat 1.6s ease-in-out infinite; }
+@keyframes beat { 0%, 100% { opacity: 0.18; r: 26; } 50% { opacity: 0.42; r: 33; } }
+.nodeg.paused .halo { animation: beatpause 0.5s ease-in-out infinite; }
+@keyframes beatpause { 0%, 100% { opacity: 0.3; r: 26; } 50% { opacity: 0.7; r: 34; } }
+.nodeg.dead { opacity: 0.32; }
+.nodeg.dead .label { fill: var(--muted); }
+
 .packet { filter: drop-shadow(0 0 6px currentColor); }
 .shock { fill: none; stroke-width: 3; }
-.center-badge { fill: var(--ink); font-weight: 800; text-anchor: middle; }
-.center-sub { fill: var(--muted); text-anchor: middle; font-size: 11px; }
+.center-badge { font-size: 30px; font-weight: 800; fill: var(--ink); text-anchor: middle; }
+.center-sub { font-size: 11px; fill: var(--muted); text-anchor: middle; }
 
-.heal-pill { position: absolute; left: 50%; top: 16px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 8px; background: rgba(255, 84, 112, 0.14); border: 1px solid rgba(255, 84, 112, 0.42); color: #ff9db0; padding: 7px 15px; border-radius: 999px; font-size: 12.5px; font-weight: 600; backdrop-filter: blur(6px); animation: healpulse 1.15s ease-in-out infinite; z-index: 5; }
+.heal-pill { position: absolute; left: 50%; top: 16px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 8px; background: rgb(var(--danger) / 0.14); border: 1px solid rgb(var(--danger) / 0.42); color: #ff9db0; padding: 7px 15px; border-radius: 999px; font-size: 12.5px; font-weight: 600; backdrop-filter: blur(6px); animation: healpulse 1.15s ease-in-out infinite; z-index: 5; }
 .heal-pill .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes healpulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 84, 112, 0.32); } 50% { box-shadow: 0 0 20px 3px rgba(255, 84, 112, 0.22); } }
+@keyframes healpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--danger) / 0.32); }
+  50% { box-shadow: 0 0 20px 3px rgb(var(--danger) / 0.22); }
+}
 
-/* ---------------------------------------------------------------------------
-   Phones. Last in the file so these win on source order, not on !important.
-   --------------------------------------------------------------------------- */
+/* --- Phones. Last, so these win on source order rather than !important. --------- */
 @media (max-width: 700px) {
-  /* Padding is 52px of a 390px screen — an eighth of the phone spent on margins. */
-  .wrap { padding: 14px 12px 28px; }
+  .wrap { padding: 14px 12px 28px; } /* 52px of a 390px screen was going to margins */
   .grid { gap: 14px; }
   .card, .stage { padding: 12px; border-radius: 14px; }
 
   header { gap: 12px; margin-bottom: 12px; }
   .title h1 { font-size: 18px; }
   .title p { font-size: 11px; line-height: 1.45; }
-  /* Four tiles across a phone is ~90px each: the label wraps and the number shrinks to
-     nothing. Two rows of two, sized by the grid rather than by min-width. */
+  /* Four tiles across a phone is ~90px each: the label wraps and the number shrinks. */
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
   .stat { min-width: 0; padding: 7px 11px; }
   .stat .v { font-size: 18px; }
 
-  /* The ring is now ~360px wide, i.e. a 0.5 scale on a 720-unit viewBox — so a 10-unit
-     key label renders at 5px. Illegible, and 12 of them collide into fuzz. Drop the
-     names and keep the dots: the ring still shows arcs, ownership colour and the keys
-     flying on a heal, and the key panel underneath already names every owner. */
+  /* The ring renders at a 0.5 scale on a 720-unit viewBox, so everything inside halves.
+     A 10-unit key label lands at 5px — illegible, and a dozen collide into fuzz. Drop
+     the names: the ring still shows the arcs, the ownership colours and the keys flying
+     on a heal, and the key panel below already names every owner. */
   .keylabel, .keyleader { display: none; }
   /* Each node's id is drawn on its own marker, so the legend is pure duplication here. */
   .legend { display: none; }
-  /* Absolute inside a short stage, this landed on top of the ring. */
-  .caption { position: static; max-width: 100%; margin: 6px 2px 0; }
+  .caption { position: static; max-width: 100%; margin: 6px 2px 0; } /* stops covering a now-short ring */
 
-  .keygrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); max-height: 260px; }
-
-  /* Touch targets. 4px of padding is a ~24px-tall button — under the ~44px that a
-     finger can hit reliably, and these are the buttons the whole demo turns on. */
-  .nrow { padding: 7px 9px; gap: 6px; }
-  .nrow .id { min-width: 40px; }
-  .nrow .meta { font-size: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .nrow button, .btns button { padding: 9px 12px; font-size: 12px; }
-  button { padding: 9px 13px; font-size: 12.5px; }
-
-  /* 16px is the threshold below which iOS Safari zooms the page in on focus and leaves
-     it zoomed — the single most common way a mobile form feels broken. */
-  input { font-size: 16px; padding: 10px 11px; }
-
-  .log { max-height: 60vh; }
-  /* A long node id or key list should wrap rather than widen the card. */
-  .ev { flex-wrap: wrap; }
-  .ev .rollup { margin-left: auto; }
-
-  /* Everything inside the SVG is in viewBox units, so the same 0.5 scale that made the
-     key labels illegible applies to all of it: a 14-unit node id lands at 7px. Scale the
-     text that survived back up. Safe where the key labels were not — there are five node
-     markers, they are far apart, and nothing here can collide. */
+  /* The node ids suffered the same halving for no such reason — five markers, far apart,
+     nothing to collide with — so they scale back up instead. */
   .nodeg .label { font-size: 26px; }
   .nodeg .sub { font-size: 15px; }
   .center-badge { font-size: 52px; }
   .center-sub { font-size: 18px; }
-  /* A 5-unit dot is 2.5px of screen — a speck. These are the keys; they should read. */
-  .keydot { r: 8; }
-  @keyframes underpulse { 0%, 100% { r: 8; filter: drop-shadow(0 0 2px var(--danger)); } 50% { r: 12; filter: drop-shadow(0 0 8px var(--danger)); } }
+  .keydot { r: 8; } /* a 5-unit dot is 2.5px of screen: a speck. These are the keys. */
+  @keyframes underpulse {
+    0%, 100% { r: 8; filter: drop-shadow(0 0 2px rgb(var(--danger))); }
+    50% { r: 12; filter: drop-shadow(0 0 8px rgb(var(--danger))); }
+  }
+
+  .keygrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); max-height: 260px; }
+
+  /* Touch targets: 4px of padding is a ~24px button, under the ~44px a finger hits
+     reliably — and these are the buttons the whole demo turns on. */
+  .nrow { padding: 7px 9px; gap: 6px; }
+  .nrow .id { min-width: 40px; }
+  .nrow .meta { font-size: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button, .nrow button { padding: 9px 12px; font-size: 12px; }
+  /* 16px is the threshold below which iOS Safari zooms in on focus and stays zoomed. */
+  input { font-size: 16px; padding: 10px 11px; }
+
+  .log { max-height: 60vh; }
+  .ev { flex-wrap: wrap; }
 }

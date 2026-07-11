@@ -1,49 +1,38 @@
 import { useState } from 'react'
-import { errMsg, getKey, seedKeys, setKey } from '../api'
+import { getKey, seedKeys, setKey } from '../api'
+import { useApiError } from '../hooks'
+import { ErrorLine } from './ErrorLine'
 
 export function KeysPanel({ onAction }: { onAction: () => void }) {
   const [k, setK] = useState('')
   const [v, setV] = useState('')
   const [readKey, setReadKey] = useState('')
   const [result, setResult] = useState<{ found: boolean; value: string } | null>(null)
-  const [err, setErr] = useState<string | null>(null)
+  const { err, run } = useApiError()
 
   const write = async () => {
     if (!k.trim()) return
-    setErr(null)
-    try {
-      await setKey(k.trim(), v)
-    } catch (e) {
-      setErr(errMsg(e)) // keep the inputs: the user will want to retry, not retype
-      return
+    // Only clear the inputs if it actually landed — after a failure the user wants to
+    // retry, not retype.
+    if (await run(() => setKey(k.trim(), v))) {
+      setK('')
+      setV('')
+      onAction()
     }
-    setK('')
-    setV('')
-    onAction()
   }
 
   // A failed read is not a miss. "no live copy" is a real answer about the cluster —
-  // every replica of this key is down — while a 500 means the request never got an
-  // answer at all. Showing the first when the second happened would be a lie about
-  // the very thing this demo is meant to prove.
+  // every replica of this key is down — while a 500 means we never got an answer at
+  // all. Showing the first when the second happened would lie about the very thing
+  // this demo exists to prove.
   const read = async () => {
     if (!readKey.trim()) return
-    setErr(null)
-    try {
-      setResult(await getKey(readKey.trim()))
-    } catch (e) {
-      setResult(null)
-      setErr(errMsg(e))
-    }
+    setResult(null)
+    await run(async () => setResult(await getKey(readKey.trim())))
   }
 
   const seed = async () => {
-    setErr(null)
-    try {
-      await seedKeys(8)
-    } catch (e) {
-      setErr(errMsg(e))
-    }
+    await run(() => seedKeys(8))
     onAction()
   }
 
@@ -57,6 +46,7 @@ export function KeysPanel({ onAction }: { onAction: () => void }) {
       <button className="primary" onClick={write}>
         Write key
       </button>
+
       <div className="spacer" />
       <div className="kv">
         <input placeholder="key to read" value={readKey} onChange={(e) => setReadKey(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && read()} />
@@ -64,20 +54,13 @@ export function KeysPanel({ onAction }: { onAction: () => void }) {
       </div>
       {result && (
         <div className={'result' + (result.found ? '' : ' miss')}>
-          {result.found ? (
-            <>
-              <b>{result.value}</b> — served
-            </>
-          ) : (
-            <>
-              <b>miss</b> — no live copy
-            </>
-          )}
+          <b>{result.found ? result.value : 'miss'}</b> — {result.found ? 'served' : 'no live copy'}
         </div>
       )}
+
       <div className="spacer" />
       <button onClick={seed}>Seed 8 more keys</button>
-      {err && <div className="api-err">⚠ {err}</div>}
+      <ErrorLine err={err} />
     </div>
   )
 }
