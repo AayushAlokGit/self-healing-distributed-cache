@@ -60,11 +60,14 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .card { background: var(--panel); border: 1px solid var(--panel-brd); border-radius: 16px; padding: 16px; backdrop-filter: blur(8px); }
 .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1.6px; color: var(--muted); }
 
-.nodes-ctl { display: flex; flex-direction: column; gap: 9px; }
-.nrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 11px; background: rgba(10, 16, 26, 0.5); border: 1px solid rgba(120, 160, 220, 0.08); transition: 0.2s; }
-.nrow .id { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; min-width: 56px; }
-.nrow .swatch { width: 11px; height: 11px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
-.nrow .meta { color: var(--muted); font-size: 11px; flex: 1; font-variant-numeric: tabular-nums; }
+/* Tightened: five rows of a known size, so there is no reason to spend height here
+   that the activity log could be using. */
+.nodes-ctl { display: flex; flex-direction: column; gap: 5px; }
+.nrow { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 9px; background: rgba(10, 16, 26, 0.5); border: 1px solid rgba(120, 160, 220, 0.08); transition: 0.2s; }
+.nrow .id { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 7px; min-width: 46px; }
+.nrow .swatch { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
+.nrow .meta { color: var(--muted); font-size: 10.5px; flex: 1; font-variant-numeric: tabular-nums; }
+.nrow button { padding: 4px 9px; font-size: 11px; }
 .nrow.dead { opacity: 0.5; filter: grayscale(0.6); }
 .nrow.paused { box-shadow: inset 0 0 0 1px #fbbf24, 0 0 14px rgba(251, 191, 36, 0.15); }
 .btns { display: flex; gap: 6px; }
@@ -91,7 +94,16 @@ input:focus { outline: none; border-color: #22d3ee; }
 .result.miss b { color: var(--danger); }
 .spacer { height: 10px; }
 
-.log { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 0; }
+/* The activity log is the only panel that grows without bound — the node panel is a
+   fixed five rows (the cluster is built as cluster.New(..., "n0" .. "n4"), so it can
+   never grow) and the key panel is three controls. So it gets the height, and the
+   two above it were tightened to hand some over.
+   Not flex-filled to the viewport: one kill fans out to four heal rows, each with its
+   keys and its cause, so a couple of kills already overflow any screen. The log has to
+   scroll regardless — better to make its box big and let the page scroll than to
+   squeeze it into whatever the ring leaves behind. */
+.log { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; gap: 0; }
+@media (max-width: 1040px) { .log { max-height: 440px; } }
 .ev { display: flex; gap: 9px; align-items: baseline; padding: 5px 2px; font-size: 12px; animation: slidein 0.35s ease; }
 @keyframes slidein { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; } }
 .ev .tag { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 6px; border-radius: 5px; white-space: nowrap; }
