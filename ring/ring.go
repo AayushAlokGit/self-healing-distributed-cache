@@ -84,6 +84,27 @@ func (r *Ring) Remove(node string) {
 	r.points = kept
 }
 
+// Point is a node's position on the ring, exported for visualization.
+type Point struct {
+	Hash uint32
+	Node string
+}
+
+// Points returns the ring's virtual points in hash order, for the dashboard to
+// draw the ring. Each physical node contributes replicas scattered points, which
+// is what a viewer needs to see to understand why load is balanced.
+func (r *Ring) Points() []Point {
+	out := make([]Point, len(r.points))
+	for i, p := range r.points {
+		out[i] = Point{Hash: p.hash, Node: p.node}
+	}
+	return out
+}
+
+// Hash exposes the ring's key→position mapping so a visualizer can place a key at
+// the same angle the ring uses to route it. The ring space is [0, 2^32).
+func Hash(s string) uint32 { return hashKey(s) }
+
 // Get returns the node that owns key: the first point clockwise from the key's
 // hash, wrapping past the top of the ring. Empty string if the ring has no nodes.
 func (r *Ring) Get(key string) string {

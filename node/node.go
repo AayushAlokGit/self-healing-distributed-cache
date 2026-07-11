@@ -165,6 +165,16 @@ func (n *Node) SetMembership(peers map[string]string) {
 	n.ring = r
 }
 
+// SetPeerAddr updates the address for one peer without resetting liveness or the
+// ring (unlike SetMembership, which rebuilds the whole view). A revived node comes
+// back on a fresh port; its peers call this so the next heartbeat can reach it and
+// re-admit it. An unknown id is simply added to the known-peers map.
+func (n *Node) SetPeerAddr(id, addr string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.peers[id] = addr
+}
+
 // SetReplication overrides the replication factor and write quorum. For tests
 // that want R and W different from the defaults.
 func (n *Node) SetReplication(replicationFactor, writeQuorum int) {
@@ -382,6 +392,10 @@ func (n *Node) heal() {
 // with a short timeout will falsely declare it dead. For the false-positive demo.
 func (n *Node) PauseHealth(paused bool) { n.healthPaused.Store(paused) }
 
+// HealthPaused reports whether this node's health replies are currently stalled,
+// for the dashboard to show the false-positive injection state.
+func (n *Node) HealthPaused() bool { return n.healthPaused.Load() }
+
 // AlivePeers is this node's current view of who is up, for tests and the
 // eventual dashboard.
 func (n *Node) AlivePeers() map[string]bool {
@@ -396,6 +410,18 @@ func (n *Node) AlivePeers() map[string]bool {
 // heals, for tests and the dashboard. A climbing count with no real death is the
 // re-replication storm — the cost of the detector guessing wrong.
 func (n *Node) HealCopies() int64 { return n.healCopies.Load() }
+
+// HeldKeys returns the keys this node physically holds right now, for the
+// dashboard to show where data actually lives (as opposed to where the ring says
+// it should). Watching a key appear on a new node here is the heal, made visible.
+func (n *Node) HeldKeys() []string {
+	snap := n.cache.Snapshot()
+	keys := make([]string, 0, len(snap))
+	for k := range snap {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // Addr is the node's bound address, e.g. "127.0.0.1:53187".
 func (n *Node) Addr() string { return n.addr }
