@@ -11,11 +11,25 @@ interface Block {
   heals: ClusterEvent[]
 }
 
+// Heals attach to the open fault — the last fault seen — and NOT merely to the block
+// immediately behind them. Those are the same thing only while nothing else can land in
+// between, which stopped being true the moment expiries and reclamations existed: an
+// expire event between a kill and its heals would take the last-block slot, and every
+// heal behind it would silently detach from the kill that caused it. Nothing would throw;
+// the log would just quietly stop showing causation, which is the one thing it is for.
+//
+// A heal with no fault ahead of it stays its own block. That is deliberate: a UI that
+// glues every heal to the nearest kill is structurally incapable of showing a heal that
+// happened without one — which is exactly what a false-positive failure detection is.
 function group(events: ClusterEvent[]): Block[] {
   const blocks: Block[] = []
+  let openFault: Block | null = null
   for (const e of events) {
-    if (e.kind === 'heal' && blocks.length > 0 && FAULTS.has(blocks[blocks.length - 1].header.kind)) {
-      blocks[blocks.length - 1].heals.push(e)
+    if (FAULTS.has(e.kind)) {
+      openFault = { header: e, heals: [] }
+      blocks.push(openFault)
+    } else if (e.kind === 'heal' && openFault) {
+      openFault.heals.push(e)
     } else {
       blocks.push({ header: e, heals: [] })
     }
@@ -49,6 +63,10 @@ function HealRow({ e }: { e: ClusterEvent }) {
   )
 }
 
+// Kinds whose keys are worth naming on the header line itself. A heal's keys live in
+// its own rows; these have no rows of their own.
+const NAMES_KEYS = new Set(['expire', 'reclaim'])
+
 export function ActivityLog({ events }: { events: ClusterEvent[] }) {
   const blocks = group(events).reverse() // newest block first
 
@@ -58,6 +76,7 @@ export function ActivityLog({ events }: { events: ClusterEvent[] }) {
       <div className="log">
         {blocks.map((b) => {
           const copies = b.heals.reduce((n, h) => n + (h.keys?.length ?? 0), 0)
+          const named = NAMES_KEYS.has(b.header.kind) ? (b.header.keys ?? []) : []
           return (
             <div className={'block' + (b.heals.length ? ' has-heals' : '')} key={b.header.id}>
               <div className="ev">
@@ -69,6 +88,15 @@ export function ActivityLog({ events }: { events: ClusterEvent[] }) {
                   </span>
                 )}
               </div>
+              {named.length > 0 && (
+                <div className="keys">
+                  {named.map((k) => (
+                    <span className="key-chip dead" key={k}>
+                      {k}
+                    </span>
+                  ))}
+                </div>
+              )}
               {b.heals.length > 0 && (
                 <div className="heals">
                   {b.heals.map((h) => (

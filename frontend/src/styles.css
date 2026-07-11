@@ -132,6 +132,12 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .ttl-custom .unit { font-size: 11px; color: var(--muted); }
 .ttl-preview { margin-left: auto; font-size: 11px; color: #8be9fd; font-variant-numeric: tabular-nums; }
 
+/* flex: 0 0 auto on the box, flex: 1 on the button: the count is short and fixed-width,
+   the label ("Seed 500 keys") is the part that should take the leftover row. */
+.seed-row { display: flex; align-items: center; gap: 7px; }
+.seed-row input { flex: 0 0 76px; padding: 6px 9px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.seed-row button { flex: 1; padding: 7px 11px; }
+
 .result { font-size: 12px; color: var(--muted); min-height: 16px; margin-top: 6px; line-height: 1.7; }
 .result b { color: rgb(var(--ok)); }
 .result.miss b { color: rgb(var(--danger)); }
@@ -173,6 +179,10 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .tag.revive { --tag: var(--ok); --tag-ink: var(--ok-ink); }
 .tag.pause, .tag.resume { --tag: var(--warn); --tag-ink: #ffe08a; }
 .tag.set, .tag.seed { --tag: var(--cyan); --tag-ink: #8be9fd; }
+/* expire is a fact about the data, reclaim is a fact about memory. Expire gets the
+   louder colour: it is the one a client can actually observe. */
+.tag.expire { --tag: var(--warn); --tag-ink: #ffd280; }
+.tag.reclaim { --tag: var(--steel); --tag-ink: var(--muted); }
 
 /* One block = one fault plus the heal copies it caused, nested under it. */
 .block { border-bottom: 1px solid rgb(var(--steel) / 0.06); padding: 3px 0; }
@@ -186,6 +196,8 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .heal-row .cause { margin-top: 4px; color: var(--muted); font-size: 10px; font-style: italic; opacity: 0.75; }
 .node-chip { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: rgba(255, 255, 255, 0.03); }
 .key-chip { font-size: 10px; font-weight: 400; color: var(--muted); padding: 1px 5px; border-radius: 4px; background: rgb(var(--steel) / 0.1); }
+.key-chip.dead { text-decoration: line-through; opacity: 0.8; }
+.block > .keys { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px 46px; }
 
 /* --- SVG ---------------------------------------------------------------------- */
 .ringbase { fill: none; stroke: rgb(var(--steel) / 0.12); stroke-width: 1.5; }

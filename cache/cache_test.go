@@ -122,3 +122,54 @@ func TestExpiredKeyIsDeletedOnRead(t *testing.T) {
 		t.Fatalf("Get should delete an entry it finds expired")
 	}
 }
+
+// The reclaim log records WHY the memory went, and a live key evicted for capacity is
+// not an expiry — logging it as one would tell a dashboard that a key a client can still
+// read is dead.
+func TestReclaimLogRecordsExpiriesOnlyAndWhy(t *testing.T) {
+	c := newWithSweepInterval(noLimit, time.Hour) // no background sweeper; we drive it
+	defer c.Close()
+
+	c.Set("lazy", "v", time.Millisecond)
+	c.Set("swept", "v", time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // both are corpses now
+
+	c.Get("lazy") // the read that reclaims it
+	c.sweepAll()  // and the sweeper takes the other
+
+	got := map[string]string{}
+	for _, r := range c.DrainReclaimed() {
+		got[r.Key] = r.Reason
+	}
+	if got["lazy"] != ReclaimLazy {
+		t.Errorf("a key reclaimed by a Get should say why: got %q want %q", got["lazy"], ReclaimLazy)
+	}
+	if got["swept"] != ReclaimSweep {
+		t.Errorf("a key reclaimed by the sweeper should say why: got %q want %q", got["swept"], ReclaimSweep)
+	}
+
+	// Drained means drained: a second call must not re-report the same reclamations, or a
+	// dashboard polling twice a second would show the same key dying forever.
+	if again := c.DrainReclaimed(); len(again) != 0 {
+		t.Errorf("DrainReclaimed must clear what it returns, second drain got %+v", again)
+	}
+}
+
+// An LRU eviction of a LIVE key is not an expiry and must never reach the reclaim log.
+func TestEvictingALiveKeyIsNotReclaimed(t *testing.T) {
+	c := newWithSweepInterval(2, time.Hour)
+	defer c.Close()
+
+	// Permanent keys, so there is no corpse to prefer: the third Set must evict a live one.
+	c.Set("a", "v", noTTL)
+	c.Set("b", "v", noTTL)
+	c.Set("c", "v", noTTL) // evicts "a" from the LRU tail
+
+	if c.Len() != 2 {
+		t.Fatalf("capacity 2 should hold 2 entries, holds %d", c.Len())
+	}
+	if got := c.DrainReclaimed(); len(got) != 0 {
+		t.Fatalf("evicting a live key for capacity is not an expiry and must not be logged "+
+			"as one — a client could still have read it. Got %+v", got)
+	}
+}

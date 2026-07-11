@@ -3,6 +3,7 @@ package cluster
 import (
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -572,5 +573,191 @@ func TestKeyWithoutTTLNeverExpires(t *testing.T) {
 	}
 	if ks.TTLMs != -1 {
 		t.Fatalf("a key with no TTL should report ttlMs=-1 (never expires), got %d", ks.TTLMs)
+	}
+}
+
+// eventsOfKind pulls one kind out of a snapshot's activity log.
+func eventsOfKind(st State, kind string) []Event {
+	var out []Event
+	for _, e := range st.Events {
+		if e.Kind == kind {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// The expiry event must be about the KEY, not about the copies.
+//
+// A key with R=3 lives on three nodes, and each frees the memory at its own arbitrary
+// later moment — lazily if a read lands on it, otherwise whenever the sampler happens to
+// draw it. Reporting the deletions would tell the viewer the replicas disagreed about
+// when the key died. They did not: SetAt gave all three the same absolute deadline, so
+// the key dies once, everywhere, and that is the one event worth showing.
+//
+// Polling State() is what detects it, so this drives State() in the wait loop rather
+// than checking once at the end.
+func TestExpiryIsOneEventPerKeyNotPerReplica(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	const key = "doomed"
+	if err := c.Set(key, "v", 150*time.Millisecond); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// It really is on three nodes: without that, "one event per key" proves nothing.
+	st := c.State()
+	ks, ok := keyState(st, key)
+	if !ok || len(ks.Holders) != 3 {
+		t.Fatalf("%q should be held by R=3 nodes before it expires, got %v", key, ks.Holders)
+	}
+
+	waitUntil(t, 3*time.Second, "the key to expire", func() bool {
+		return len(eventsOfKind(c.State(), "expire")) > 0
+	})
+
+	// Keep polling well past the deadline: a detector that re-fires would do it here.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		c.State()
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	exp := eventsOfKind(c.State(), "expire")
+	if len(exp) != 1 {
+		t.Fatalf("one key expiring on 3 replicas must be exactly 1 expire event, got %d: %+v", len(exp), exp)
+	}
+	if !slices.Contains(exp[0].Keys, key) {
+		t.Fatalf("the expire event should name the key that died, got keys=%v", exp[0].Keys)
+	}
+	if exp[0].Cause != "" {
+		t.Fatalf("an expiry is caused by the clock, not by a fault; it must carry no cause, got %q", exp[0].Cause)
+	}
+
+	// And the client agrees: gone means gone, whoever still has the bytes.
+	if res, err := c.Get(key); err != nil || res.Found {
+		t.Fatalf("an expired key must not be readable: (%+v, %v)", res, err)
+	}
+}
+
+// The bug the deadline check exists to prevent.
+//
+// State() builds its key list from the ALIVE nodes only, so killing a node makes its
+// keys vanish from that list. A detector that called "gone from the snapshot" an expiry
+// would fire on every kill — the demo's headline action would spray fake expiry events
+// for keys that are alive, well within their TTL, and still held by two other replicas.
+//
+// Gone-and-past-its-deadline is an expiry. Gone-and-not-yet-due is a node that died
+// holding it. The remembered deadline is the only thing that can tell them apart.
+//
+// ⚠️ R=3 over exactly THREE nodes, so every key is on every node and killing all three
+// strips every key of every holder. Killing one node out of five proves nothing — the key
+// still has two live replicas, so it never leaves the snapshot and the naive detector
+// stays silent for the wrong reason. (It passed against the broken code. That is how this
+// version came to exist.) Killing 3-of-5 would depend on which owners the hash handed
+// out, and a test whose result depends on a hash will flake on somebody else's machine.
+func TestKilledNodesKeysAreNotReportedAsExpired(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	// A long TTL: nothing here is allowed to expire during the test.
+	const keys = 6
+	for i := range keys {
+		if err := c.Set("live:"+strconv.Itoa(i), "v", time.Hour); err != nil {
+			t.Fatalf("set: %v", err)
+		}
+	}
+
+	st := c.State() // records the deadlines, and proves the keys were really there
+	if len(st.Keys) != keys {
+		t.Fatalf("want %d keys held before the kills, got %d", keys, len(st.Keys))
+	}
+
+	for _, id := range []string{"n0", "n1", "n2"} {
+		if err := c.Kill(id); err != nil {
+			t.Fatalf("kill %s: %v", id, err)
+		}
+	}
+
+	// Every key has now lost every holder — exactly the snapshot a naive detector reads
+	// as "6 keys expired".
+	st = c.State()
+	if len(st.Keys) != 0 {
+		t.Fatalf("with every node dead, no key can be held; got %d", len(st.Keys))
+	}
+	if exp := eventsOfKind(st, "expire"); len(exp) > 0 {
+		t.Fatalf("keys lost with the whole cluster must not be reported as expired — they are an "+
+			"hour from their deadline, so this is data loss, and calling it expiry hides it behind "+
+			"a routine event. Got %d expire event(s): %+v", len(exp), exp)
+	}
+}
+
+// Reclamation is a different fact from expiry, and the cache is the only thing that can
+// report it: the key is dead to every reader the moment its deadline passes, but the
+// bytes sit in the map until a Get lands on them or the sampler draws them.
+func TestReclaimEventNamesTheNodeAndTheReason(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	if err := c.Set("doomed", "v", 100*time.Millisecond); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// The cache's sweeper runs on a 1s tick, so give it room.
+	waitUntil(t, 6*time.Second, "the sweeper to free the expired key", func() bool {
+		return len(eventsOfKind(c.State(), "reclaim")) > 0
+	})
+
+	for _, e := range eventsOfKind(c.State(), "reclaim") {
+		if e.From == "" {
+			t.Fatalf("a reclaim must name the node whose memory was freed: %+v", e)
+		}
+		if len(e.Keys) == 0 {
+			t.Fatalf("a reclaim must name the keys it freed: %+v", e)
+		}
+		if e.Cause != "" {
+			t.Fatalf("a reclaim is caused by the clock, not a fault. A cause here would nest it "+
+				"under the last kill and tell the viewer that killing a node destroyed data. Got %q", e.Cause)
+		}
+	}
+}
+
+// A key can be born and die between two polls, and its expiry must still be reported.
+//
+// The detector notices a death by missing a key it saw alive last time — so a key it
+// never saw alive at all is one whose death it can never notice. Every TTL shorter than
+// the dashboard's poll interval would expire in silence. Set records the deadline when it
+// writes the key, rather than waiting to observe it, which is why this works.
+//
+// No State() call between the write and the deadline: that gap is the whole test.
+func TestAKeyThatDiesBetweenTwoPollsStillReportsItsExpiry(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	if err := c.Set("blink", "v", 100*time.Millisecond); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond) // it lives and dies with nobody watching
+
+	exp := eventsOfKind(c.State(), "expire")
+	if len(exp) != 1 {
+		t.Fatalf("a key whose whole life fell between two polls must still report exactly one "+
+			"expiry, got %d: %+v", len(exp), exp)
+	}
+	if !slices.Contains(exp[0].Keys, "blink") {
+		t.Fatalf("the expire event should name the key that died, got keys=%v", exp[0].Keys)
 	}
 }

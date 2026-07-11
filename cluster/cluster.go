@@ -67,12 +67,12 @@ type Cluster struct {
 // From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
-	Kind string `json:"kind"` // kill | revive | pause | resume | set | seed | info | heal
+	Kind string `json:"kind"` // kill | revive | pause | resume | set | seed | info | heal | expire | reclaim
 	Msg  string `json:"msg"`
 
-	From  string   `json:"from,omitempty"`  // heal: the node that sent the copies
-	To    string   `json:"to,omitempty"`    // heal: the node that received them
-	Keys  []string `json:"keys,omitempty"`  // heal: exactly which keys moved
+	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim: the node that freed the memory
+	To    string   `json:"to,omitempty"`    // heal: the node that received the copies
+	Keys  []string `json:"keys,omitempty"`  // heal: the keys moved. expire/reclaim: the keys that died
 	Cause string   `json:"cause,omitempty"` // heal: what the SENDER saw that made it heal
 }
 
@@ -282,6 +282,13 @@ func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 
 	c.mu.Lock()
 	if ttl > 0 {
+		// Remember the deadline HERE, and not only when a poll happens to see the key
+		// alive. A key whose whole life fits between two polls would otherwise never be
+		// observed alive, so its death could never be noticed either — every TTL shorter
+		// than the poll interval would expire in silence. The next poll overwrites this
+		// with the coordinator's authoritative instant; in-process, they differ by the
+		// length of one HTTP hop.
+		c.deadlines[key] = time.Now().Add(ttl)
 		c.logf("set", "wrote %q via a coordinator, expiring in %s", key, ttl)
 	} else {
 		c.logf("set", "wrote %q via a coordinator", key)
