@@ -50,22 +50,15 @@ type Cluster struct {
 	nextTick     uint64  // monotonic event id, so the UI can dedupe without a clock
 	seeded       int     // demo keys issued so far, so Seed appends instead of rewriting
 
-	// log is the server log, distinct from events above: events are the ~40 lines
-	// the dashboard shows a viewer, this is the durable record on stdout and disk.
-	// Discards until SetLogger, so tests stay quiet. Atomic because Set and Get read
-	// it without holding c.mu.
+	// log is the durable server log, distinct from events above. Discards until
+	// SetLogger. Atomic because Set and Get read it without holding c.mu.
 	log atomic.Pointer[slog.Logger]
 }
 
-// Event is one entry in the dashboard's activity log — heals included. Heals live
-// in the SAME list as the kills rather than a log of their own, because the
-// question a viewer actually has is "which kill caused which copies," and that is
-// a question about ORDER. One list and one counter, appended to at the moment each
-// thing happens, answers it for free: a heal entry lands after the kill that caused
-// it because that is when it happened.
+// Event is one entry in the dashboard's activity log. Kills, writes and heals share
+// one list, so its order answers "which kill caused which copies".
 //
-// From/To/Keys/Cause are set on heal events only, and omitted from the JSON
-// otherwise.
+// From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
 	Kind string `json:"kind"` // kill | revive | pause | resume | set | seed | info | heal
@@ -89,14 +82,13 @@ func New(rf, wq int, grace time.Duration, ids ...string) *Cluster {
 		addrs:        make(map[string]string, len(ids)),
 		client:       &http.Client{Timeout: 2 * time.Second},
 	}
-	c.SetLogger(nil) // discard until someone wires a real one
+	c.SetLogger(nil)
 	return c
 }
 
 // SetLogger installs the logger the cluster and every node it owns writes to. Call
-// it before Start; nodes created later (a Revive) inherit it. A nil logger
-// discards, which is the default — see node.SetLogger for why a library defaults
-// to silence.
+// it before Start; nodes created later (a Revive) inherit it. A nil logger discards,
+// which is the default.
 func (c *Cluster) SetLogger(l *slog.Logger) {
 	if l == nil {
 		l = slog.New(slog.DiscardHandler)
@@ -105,7 +97,7 @@ func (c *Cluster) SetLogger(l *slog.Logger) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, n := range c.nodes { // nodes already running, if any
+	for _, n := range c.nodes {
 		n.SetLogger(l)
 	}
 }
@@ -153,9 +145,8 @@ func (c *Cluster) wireAll() {
 	}
 }
 
-// Kill closes a node. Its peers keep it in their known-peer map and discover the
-// death themselves via heartbeat — the manager does not tell them. That delay is
-// the point: the ring reroutes, then the heal restores R a grace period later.
+// Kill closes a node. Its peers keep it in their known-peer map and must discover
+// the death themselves via heartbeat; the manager does not tell them.
 func (c *Cluster) Kill(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -165,7 +156,6 @@ func (c *Cluster) Kill(id string) error {
 		c.logger().Warn("kill: node is not running", "node", id)
 		return fmt.Errorf("node %s is not running", id)
 	}
-	// Peers are not told — they must notice the silence via heartbeat themselves.
 	c.logger().Warn("node killed (fault injected)",
 		"node", id,
 		"keys_held", len(n.HeldKeys()),
@@ -178,11 +168,9 @@ func (c *Cluster) Kill(id string) error {
 	return nil
 }
 
-// Revive starts a fresh node for a killed id on a new port and tells the live
-// peers its new address, so the next heartbeat re-admits it. It comes back empty,
-// and the heal repopulates it — including the keys it is now the *primary* of,
-// which the old primary-only heal could never deliver (see node.heal). Reads keep
-// serving throughout, from the copies the heal already placed elsewhere.
+// Revive starts a fresh node for a killed id on a new port and tells the live peers
+// its new address, so the next heartbeat re-admits it. It comes back empty and the
+// heal repopulates it; reads keep serving from the copies placed elsewhere.
 func (c *Cluster) Revive(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -205,9 +193,9 @@ func (c *Cluster) Revive(id string) error {
 	c.nodes[id] = n
 	c.addrs[id] = n.Addr()
 
-	// The fresh node gets the whole current view; the peers just get its new addr,
-	// which avoids resetting their liveness (which would wrongly re-admit any other
-	// killed node instantly).
+	// The fresh node gets the whole current view; the peers get only its new addr.
+	// Handing them the full map would reset their liveness and wrongly re-admit any
+	// other killed node instantly.
 	peers := make(map[string]string, len(c.addrs))
 	maps.Copy(peers, c.addrs)
 	n.SetRingReplicas(c.ringReplicas)
@@ -220,7 +208,6 @@ func (c *Cluster) Revive(id string) error {
 		}
 	}
 	c.logf("revive", "revived %s on a fresh port — it returns empty; reads still serve from replicas", id)
-	// Comes back with an empty cache; the heal repopulates it.
 	c.logger().Info("node revived (empty, heal will repopulate)",
 		"node", id,
 		"addr", n.Addr(),
@@ -229,10 +216,9 @@ func (c *Cluster) Revive(id string) error {
 	return nil
 }
 
-// Pause stalls (or resumes) a node's health replies without stopping it: a live
-// node that merely looks silent, so its peers falsely convict it. With a grace
-// period the heal is withheld until the node is confirmed dead — resume it in
-// time and no needless re-replication happens.
+// Pause stalls (or resumes) a node's health replies without stopping it: a live node
+// that merely looks silent, so its peers falsely convict it. Resume within the grace
+// period and no re-replication happens.
 func (c *Cluster) Pause(id string, paused bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -242,9 +228,7 @@ func (c *Cluster) Pause(id string, paused bool) error {
 		c.logger().Warn("pause: node is not running", "node", id, "paused", paused)
 		return fmt.Errorf("node %s is not running", id)
 	}
-	// n.PauseHealth logs the fault itself (it is the node's own event) — no second
-	// line for it here.
-	n.PauseHealth(paused)
+	n.PauseHealth(paused) // the node logs the fault itself
 	if paused {
 		c.logf("pause", "paused %s's health — a GC-pause stand-in; peers may falsely suspect it", id)
 	} else {
@@ -253,13 +237,11 @@ func (c *Cluster) Pause(id string, paused bool) error {
 	return nil
 }
 
-// Set writes a key through a live node (the real client path: any node
-// coordinates). A ttl of 0 means the key never expires. Returns an error if no node
-// is up.
+// Set writes a key through a live node; any node can coordinate. A ttl of 0 means
+// the key never expires. Errors if no node is up.
 //
-// The ttl travels as a duration only on this first hop. The coordinator turns it
-// into an absolute deadline and every replica — and every later heal copy — is
-// handed that same instant. See node.handleClientSet.
+// The ttl travels as a duration only on this first hop: the coordinator turns it into
+// an absolute deadline, and every replica and heal copy gets that same instant.
 func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 	start := time.Now()
 	c.mu.Lock()
@@ -272,9 +254,7 @@ func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 
 	url := "http://" + coord + "/set/" + key
 	if ttl > 0 {
-		// The duration itself ("250ms", "2m0s"), not a float of seconds: exact at any
-		// scale, and legible in a log. parseTTL still accepts bare seconds for anyone
-		// driving the node API by hand.
+		// A duration string ("250ms", "2m0s"), not a float of seconds: exact at any scale.
 		url += "?ttl=" + ttl.String()
 	}
 	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader([]byte(value)))
@@ -314,16 +294,11 @@ type ReadHop struct {
 	Outcome string `json:"outcome"` // hit | miss | unreachable | skipped
 }
 
-// ReadResult is what a read reveals about the cluster, not just about the key.
+// ReadResult is the value plus what the read revealed about the cluster.
 //
-// Coordinator is the node that took the request; ServedBy is the node the value
-// actually came from. They are usually different, and that is not a bug — any live
-// node can coordinate a read, because coordinating is just hashing the key and
-// asking its owners.
-//
-// Path is every owner of the key and what it said. It is the read fallback made
-// legible: without it, "servedBy n4" tells you a node answered but not that the two
-// owners ahead of it were asked and could not.
+// Coordinator is the node that took the request; ServedBy is the node the value came
+// from. They are usually different: any live node can coordinate a read. Path is every
+// owner of the key and what each one said.
 type ReadResult struct {
 	Value       string    `json:"value"`
 	Found       bool      `json:"found"`
@@ -333,8 +308,7 @@ type ReadResult struct {
 }
 
 // Primary is the node the ring says should hold this key: the first owner clockwise.
-// Derived from the path rather than stored, so there is exactly one source of truth
-// for who the owners were.
+// Derived from Path, so there is one source of truth for who the owners were.
 func (r ReadResult) Primary() string {
 	if len(r.Path) == 0 {
 		return ""
@@ -344,22 +318,16 @@ func (r ReadResult) Primary() string {
 
 // Fallback reports whether a replica answered because the primary could not.
 //
-// "Could not" covers two different failures, and it is worth not conflating them:
-// the primary may be UNREACHABLE (it died, and the coordinator's ring has not yet
-// caught up), or it may be perfectly healthy but simply NOT HOLD THE KEY — which is
-// exactly the state a revived node is in, since it comes back empty and the ring
-// promotes it straight back to primary of its own arcs before the heal has refilled
-// it. Both look identical to the client, and in both the replica saves the read.
-// Path is what tells them apart.
+// Two distinct causes, told apart only by Path: the primary was unreachable (dead), or
+// it answered and simply lacked the key (a revived node is reachable but empty).
 func (r ReadResult) Fallback() bool {
 	p := r.Primary()
 	return r.Found && r.ServedBy != "" && p != "" && r.ServedBy != p
 }
 
-// parseReadPath decodes the trace the coordinator stamped on the response — see
-// node.FormatReadPath. A malformed hop is dropped rather than guessed at: this is a
-// display aid, and a read that succeeded must not be reported as failed because its
-// annotation was garbled.
+// parseReadPath decodes the trace the coordinator stamped on the response (see
+// node.FormatReadPath). A malformed hop is dropped: a successful read must not be
+// reported as failed because its annotation was garbled.
 func parseReadPath(s string) []ReadHop {
 	if s == "" {
 		return nil
@@ -372,7 +340,7 @@ func parseReadPath(s string) []ReadHop {
 		}
 		role := "replica"
 		if i == 0 {
-			role = "primary" // first owner clockwise; the rest are its replicas
+			role = "primary" // first owner clockwise
 		}
 		hops = append(hops, ReadHop{Node: id, Rank: i, Role: role, Outcome: outcome})
 	}
@@ -418,8 +386,7 @@ func (c *Cluster) Get(key string) (ReadResult, error) {
 			"served_by", res.ServedBy, "fallback", res.Fallback(), "took", took)
 		return res, nil
 	case http.StatusNotFound:
-		// A miss still carries the path: every owner answered and none had the key,
-		// which is a fact about the cluster and not merely about the key.
+		// A miss still carries the path: every owner answered, none had the key.
 		c.logger().Debug("read miss", "key", key, "took", took)
 		return res, nil
 	default:
@@ -429,20 +396,16 @@ func (c *Cluster) Get(key string) (ReadResult, error) {
 	}
 }
 
-// Seed writes n *new* demo keys, kept small so the ring stays legible. The
-// cluster numbers them itself rather than taking a range from the caller: a
-// dashboard that tracked "how many have I seeded" would be remembering state it
-// does not own, and two browser tabs (or a page reload) would then hand out the
-// same key numbers twice — the seed button would silently rewrite existing keys
-// instead of adding any.
+// Seed writes n *new* demo keys. The cluster numbers them itself rather than taking a
+// range from the caller: a client tracking "how many have I seeded" would be holding
+// state it does not own, so two tabs or a reload would rewrite existing keys.
 func (c *Cluster) Seed(n int) error {
 	if n <= 0 {
 		return nil
 	}
 
-	// Claim the numbers under the lock, then write outside it: Set does network
-	// I/O to the owners, and holding c.mu across that would block the dashboard's
-	// State() polls for the duration.
+	// Claim the numbers under the lock, then write outside it: Set does network I/O,
+	// and holding c.mu across that would block the dashboard's State() polls.
 	c.mu.Lock()
 	first := c.seeded
 	c.seeded += n
@@ -450,8 +413,7 @@ func (c *Cluster) Seed(n int) error {
 
 	start := time.Now()
 	for i := first; i < first+n; i++ {
-		// Seeded keys are permanent: they are the demo's furniture, and a ring that
-		// quietly emptied itself mid-demo would be a worse bug than no TTL at all.
+		// ttl 0: seeded keys are permanent, so the ring never empties itself mid-demo.
 		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i), 0); err != nil {
 			c.logger().Error("seed stopped early: a write failed",
 				"key", fmt.Sprintf("key:%d", i), "seeded_so_far", i-first, "err", err)
@@ -497,21 +459,16 @@ func (c *Cluster) anyLiveAddrLocked() string {
 	return c.addrs[live[0]]
 }
 
-// logf appends an event to the dashboard's activity strip, trimming to the last
-// maxEvents. Caller holds c.mu.
-//
-// It mirrors the event into the server log at Debug — deliberately not Info, since
-// each call site already logs the same fact there with far more context. The
-// mirror exists so the file can be lined up against what a viewer actually saw on
-// screen (a screenshot's event strip is now findable in the log).
+// logf appends an event to the dashboard's activity strip, and mirrors it into the
+// server log at Debug (each call site already logs the same fact at Info, with more
+// context). Caller holds c.mu.
 func (c *Cluster) logf(kind, format string, args ...any) {
 	c.appendEvent(Event{Kind: kind, Msg: fmt.Sprintf(format, args...)})
 }
 
-// appendEvent stamps an event with the next id and files it. Every event — a kill,
-// a write, a heal — goes through here and shares ONE counter, which is what makes
-// the log's order a faithful record of what happened in what order. Caller holds
-// c.mu.
+// appendEvent stamps an event with the next id and files it, trimming to the last
+// maxEvents. Every event goes through here and shares ONE counter, which is what makes
+// the log's order a faithful record. Caller holds c.mu.
 func (c *Cluster) appendEvent(e Event) {
 	c.nextTick++
 	e.ID = c.nextTick

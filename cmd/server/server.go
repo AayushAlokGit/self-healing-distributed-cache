@@ -19,9 +19,8 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 	})
 
 	mux.HandleFunc("POST /api/set", func(w http.ResponseWriter, r *http.Request) {
-		// Milliseconds, to match the ttlMs that KeyState reports back: one unit for a
-		// key's lifetime in both directions, so a value read off the dashboard can be
-		// typed straight back into it. <= 0 (or absent) means the key never expires.
+		// Milliseconds, matching the ttlMs KeyState reports back. <= 0 or absent means
+		// the key never expires.
 		var body struct {
 			Key, Value string
 			TTLMs      int64 `json:"ttlMs"`
@@ -99,7 +98,7 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	// A hint at the root, since the UI lives elsewhere now.
+	// A hint at the root, since the UI lives elsewhere.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"service": "self-healing-distributed-cache control API",
@@ -107,21 +106,17 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		})
 	})
 
-	// CORS so the React app (a different origin in dev via Vite's proxy, or a
-	// separate static host in prod) can call the API.
+	// CORS: the React app is a different origin in both dev and prod.
 	return withLogging(withCORS(mux), log)
 }
 
-// noisyPaths are polled by the dashboard several times a second. Logging them at
-// Info would bury every interesting line — a kill, a heal — under thousands of
-// identical polls, which is the usual way an access log becomes useless. They log
-// at Debug instead: still there when you go looking, never in the way.
+// noisyPaths are polled several times a second, so they log at Debug: at Info they
+// would bury every kill and heal under thousands of identical polls.
 var noisyPaths = map[string]bool{"/api/state": true}
 
-// withLogging records every HTTP request the frontend makes: what it asked for,
-// what it got, and how long it took. This is the outermost layer, so the duration
-// includes everything inside it (CORS, handler, the cluster's network round trips
-// to the nodes).
+// withLogging records every HTTP request: what it asked for, what it got, how long it
+// took. Outermost layer, so the duration covers CORS, the handler, and the cluster's
+// round trips to the nodes.
 func withLogging(h http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -150,17 +145,16 @@ func withLogging(h http.Handler, log *slog.Logger) http.Handler {
 	})
 }
 
-// statusRecorder wraps a ResponseWriter to remember the status code and byte count
-// the handler wrote. An http.ResponseWriter will not tell you what it sent — the
-// only way to log a response's status is to intercept the call that sets it.
+// statusRecorder wraps a ResponseWriter to remember the status code and byte count the
+// handler wrote; a ResponseWriter will not report either back.
 type statusRecorder struct {
 	http.ResponseWriter
 	status  int
 	written int
 }
 
-// WriteHeader records the status on the way through. Note the handler may never
-// call it: a bare Write implies 200, which is why status is seeded to 200 above.
+// WriteHeader records the status on the way through. A handler may never call it (a
+// bare Write implies 200), which is why status is seeded to 200 at construction.
 func (s *statusRecorder) WriteHeader(status int) {
 	s.status = status
 	s.ResponseWriter.WriteHeader(status)
@@ -172,8 +166,8 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// withCORS allows any origin to call the control API — fine for a demo whose
-// whole point is to be poked at. Answers preflight OPTIONS directly.
+// withCORS allows any origin to call the control API, and answers preflight OPTIONS
+// directly.
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

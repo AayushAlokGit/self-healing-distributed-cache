@@ -54,9 +54,9 @@ func TestGetClockwiseNPrimaryMatchesGet(t *testing.T) {
 	}
 }
 
-// The reason GetClockwiseN exists: R copies on R distinct machines, or a single death
-// takes every copy. The next points clockwise are often the same machine's
-// virtual nodes, so a naive "next R points" would return duplicates.
+// R copies must land on R distinct machines, or one death takes every copy. The next
+// points clockwise are often the same machine's virtual nodes, so a naive "next R
+// points" would return duplicates.
 func TestGetClockwiseNReturnsDistinctPhysicalNodes(t *testing.T) {
 	const nodes = 8
 	r := New()
@@ -131,15 +131,12 @@ func spread(counts map[string]int, nodes, keys int) (float64, float64) {
 	return max / ideal, min / ideal
 }
 
-// The naive ring's remaining flaw, isolated. With a good hash the node points no
-// longer cluster, but ten single points still cut the circle into uneven arcs,
-// so load is lumpy even with no failures. Recorded run, 10 nodes, 100k keys:
+// One point per node cuts the circle into uneven arcs, so load is lumpy even with a good
+// hash and no failures. No hash fixes this; virtual nodes do. Recorded run, 10 nodes,
+// 100k keys (ideal 10,000 each):
 //
 //	per-node [378 5609 6757 7652 8848 10841 11310 11647 12499 24459]
 //	busiest 2.4x fair share, quietest 0.04x  -> 65x span
-//
-// Ideal is 10,000 keys each. No hash fixes this; virtual nodes do, by giving
-// each node many points so the arc sizes average out.
 func TestNaiveRingIsLumpy(t *testing.T) {
 	const (
 		nodes = 10
@@ -165,20 +162,17 @@ func TestNaiveRingIsLumpy(t *testing.T) {
 	t.Logf("busiest %.2fx fair share, quietest %.2fx  (%.1fx span)", hi, lo, hi/lo)
 }
 
-// The payoff: each physical node owns many small arcs, so its total load is the
-// sum of many random pieces and concentrates around the average. The span
-// collapses as replicas rise. Recorded run, 10 nodes, 100k keys:
+// With many small arcs per node, each node's load is a sum of many random pieces and
+// concentrates around the average. Recorded run, 10 nodes, 100k keys:
 //
 //	  1 replica    busiest 2.45x  quietest 0.04x   64.7x span
 //	 10 replicas   busiest 1.75x  quietest 0.46x    3.8x span
 //	 50 replicas   busiest 1.24x  quietest 0.83x    1.5x span
 //	150 replicas   busiest 1.23x  quietest 0.85x    1.4x span
 //
-// The excess over fair share shrinks ~1/sqrt(replicas) (the standard error of a
-// mean) in the steep part, then plateaus: 50 -> 150 barely moves (1.24 -> 1.23),
-// because at 1500 points the residual is the finite-keyspace sampling, not arc
-// variance. So ~50 points already gets nearly all the benefit for 10 nodes;
-// more just costs storage. 150 leaves headroom for larger clusters.
+// The excess over fair share shrinks ~1/sqrt(replicas), then plateaus: past ~50 points
+// the residual is finite-keyspace sampling, not arc variance. 150 leaves headroom for
+// larger clusters.
 func TestVirtualNodesFlattenLoad(t *testing.T) {
 	const (
 		nodes = 10
@@ -203,16 +197,15 @@ func TestVirtualNodesFlattenLoad(t *testing.T) {
 	}
 }
 
-// The second reason for virtual nodes (Q8): a naive node's whole arc dumps onto
-// its one clockwise neighbour, risking a cascade. With many scattered points,
-// the dead node's keys spread across (almost) every survivor. Recorded run:
+// The second reason for virtual nodes: a naive node's whole arc dumps onto its one
+// clockwise neighbour, risking a cascade. With scattered points the dead node's keys
+// spread across nearly every survivor. Recorded run:
 //
 //	naive:  node3's keys landed on 1 survivor,  which took 100% of them
 //	vnodes: node3's keys landed on 9 survivors, busiest took 19%
 //
-// Hitting all N-1 is not guaranteed — the ceiling is min(replicas, N-1) and a
-// survivor is missed with probability ~(1-1/(N-1))^replicas — so the test only
-// asserts a wide spread, not the exact count.
+// Hitting all N-1 is not guaranteed (a survivor is missed with probability
+// ~(1-1/(N-1))^replicas), so the test asserts a wide spread, not an exact count.
 func TestFailureSpreadsLoadAcrossSurvivors(t *testing.T) {
 	const (
 		nodes = 10
@@ -264,8 +257,8 @@ func TestFailureSpreadsLoadAcrossSurvivors(t *testing.T) {
 	}
 }
 
-// The property that justifies the whole construction: removing one node moves
-// only that node's keys (~1/N), where hash%N would move ~(N-1)/N of everything.
+// Removing one node moves only that node's keys (~1/N), where hash%N would move
+// ~(N-1)/N of everything. Recorded run:
 //
 //	removing 1 of 10 nodes moved 9.7% of keys; hash%N would move ~90%
 func TestRemovingANodeMovesOnlyItsKeys(t *testing.T) {
@@ -297,8 +290,7 @@ func TestRemovingANodeMovesOnlyItsKeys(t *testing.T) {
 	t.Logf("removing 1 of %d nodes moved %.1f%% of keys; hash%%N would move ~%.0f%%",
 		nodes, fraction*100, float64(nodes-1)/float64(nodes)*100)
 
-	// Only node3's keys should move — a bit under 1/N. Assert it stayed well
-	// below what hash%N does, which is the entire point.
+	// Only node3's keys should move: a bit under 1/N, far below what hash%N does.
 	if fraction > 2.0/float64(nodes) {
 		t.Fatalf("moved %.1f%% of keys, far more than one node's ~1/N share", fraction*100)
 	}

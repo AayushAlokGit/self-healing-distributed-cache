@@ -1,9 +1,6 @@
-// Package ring places keys on nodes with consistent hashing.
-//
-// Phase 2, step 1: the naive ring — one point per node. This fixes hash%N's
-// remapping disaster (adding or removing a node moves ~1/N of keys, not ~(N-1)/N)
-// but distributes load unevenly, because a handful of random points cut the
-// circle into lumpy arcs. Step 2 fixes that with virtual nodes.
+// Package ring places keys on nodes with consistent hashing: adding or removing a
+// node moves ~1/N of the keys, not ~(N-1)/N as hash%N does. Each node contributes
+// many virtual points, which keeps the load balanced.
 package ring
 
 import (
@@ -13,22 +10,16 @@ import (
 	"strconv"
 )
 
-// Virtual points per physical node. One point per node cuts the ring into lumpy
-// arcs (measured: 20x span over 10 nodes); scattering ~150 points per node makes
-// each node's total load the sum of many small arcs, which concentrates around
-// the average. It also spreads a dead node's load across all survivors instead
-// of dumping it on one clockwise neighbour. 100-200 is the usual range.
+// Virtual points per physical node. One point per node cuts the ring into lumpy arcs
+// (measured: 65x span over 10 nodes) and dumps a dead node's whole load on one
+// neighbour. ~150 points each fixes both; 100-200 is the usual range.
 const defaultReplicas = 150
 
-// hashKey maps a string onto the 32-bit ring.
+// hashKey maps a string onto the 32-bit ring: SHA-256, truncated to 4 bytes.
 //
-// SHA-256, truncated to its first 4 bytes. Not the built-in map hash, which is
-// per-process randomized on purpose — every client must agree on the ring, so
-// the hash must be stable across processes. Not FNV-1a either: its avalanche is
-// weak, so similar node names (node0..node9) hash to a tight cluster and one
-// node ends up owning most of the ring (measured: 96% on one of ten). Every bit
-// of a crypto hash is uniformly random, so any 4-byte slice is a uniform point.
-// The cost is CPU per lookup; a hand-rolled Murmur3 is the move if it shows up hot.
+// Must be stable across processes, so not Go's map hash (per-process randomized). Not
+// FNV-1a either: its weak avalanche puts similar names (node0..node9) in a tight
+// cluster, and one node ends up owning 96% of the ring.
 func hashKey(s string) uint32 {
 	sum := sha256.Sum256([]byte(s))
 	return binary.BigEndian.Uint32(sum[:4])
@@ -40,28 +31,25 @@ type point struct {
 	node string
 }
 
-// Ring holds node points sorted by hash. Each physical node contributes
-// replicas points. Not safe for concurrent use yet; membership changes will
-// need a lock once a live cluster mutates it.
+// Ring holds node points sorted by hash, replicas points per physical node.
+// Not safe for concurrent use: callers must serialize membership changes.
 type Ring struct {
 	replicas int
 	points   []point
 }
 
+// New builds a ring with the default virtual-point count.
 func New() *Ring {
 	return NewWithReplicas(defaultReplicas)
 }
 
-// NewWithReplicas lets tests dial the virtual-point count, including down to 1
-// to see the naive ring's imbalance.
+// NewWithReplicas builds a ring with a given virtual-point count per node.
 func NewWithReplicas(replicas int) *Ring {
 	return &Ring{replicas: replicas}
 }
 
-// Add places node on the ring as replicas scattered points. The "#i" suffix
-// gives each a distinct hash; SHA-256's avalanche scatters them so one node's
-// points interleave with every other's. Re-sorts every call: fine for a handful
-// of nodes added rarely, and membership changes are not the hot path.
+// Add places node on the ring as replicas scattered points. The "#i" suffix gives each
+// a distinct hash. Re-sorts every call; membership changes are not the hot path.
 func (r *Ring) Add(node string) {
 	for i := range r.replicas {
 		h := hashKey(node + "#" + strconv.Itoa(i))
@@ -72,8 +60,8 @@ func (r *Ring) Add(node string) {
 	})
 }
 
-// Remove takes node off the ring. Filters in place; the survivors keep their
-// order, so the slice stays sorted.
+// Remove takes node off the ring. Filters in place; survivors keep their order, so the
+// slice stays sorted.
 func (r *Ring) Remove(node string) {
 	kept := r.points[:0]
 	for _, p := range r.points {
@@ -90,9 +78,7 @@ type Point struct {
 	Node string
 }
 
-// Points returns the ring's virtual points in hash order, for the dashboard to
-// draw the ring. Each physical node contributes replicas scattered points, which
-// is what a viewer needs to see to understand why load is balanced.
+// Points returns the ring's virtual points in hash order, for the dashboard to draw.
 func (r *Ring) Points() []Point {
 	out := make([]Point, len(r.points))
 	for i, p := range r.points {
@@ -101,8 +87,8 @@ func (r *Ring) Points() []Point {
 	return out
 }
 
-// Hash exposes the ring's key→position mapping so a visualizer can place a key at
-// the same angle the ring uses to route it. The ring space is [0, 2^32).
+// Hash exposes the ring's key→position mapping, so a visualizer can place a key at the
+// same angle the ring routes it by. The ring space is [0, 2^32).
 func Hash(s string) uint32 { return hashKey(s) }
 
 // Get returns the node that owns key: the first point clockwise from the key's
@@ -122,13 +108,12 @@ func (r *Ring) Get(key string) string {
 	return r.points[i].node
 }
 
-// GetClockwiseN returns up to n distinct physical nodes for key: the primary
-// (== Get) plus the next n-1 distinct nodes clockwise. Fewer than n only when the
-// ring holds fewer than n nodes — you cannot keep more copies than there are machines.
+// GetClockwiseN returns up to n distinct physical nodes for key: the primary (== Get)
+// plus the next n-1 distinct nodes clockwise. Fewer than n only when the ring holds
+// fewer than n nodes.
 //
-// Distinct *physical* nodes is the whole point: the next few points clockwise
-// are often virtual nodes of the same machine, and replicas that share a machine
-// die together. So we skip points whose node we already have.
+// Distinct *physical* nodes: the next points clockwise are often virtual nodes of the
+// same machine, and replicas that share a machine die together.
 func (r *Ring) GetClockwiseN(key string, n int) []string {
 	if n <= 0 || len(r.points) == 0 {
 		return nil

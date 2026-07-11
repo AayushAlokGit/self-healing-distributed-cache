@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// waitUntil polls f until true or the deadline, so the test waits on an event
-// whose timing is only bounded, not exact.
+// waitUntil polls f until true or the deadline, for events whose timing is bounded but
+// not exact.
 func waitUntil(t *testing.T, within time.Duration, what string, f func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -31,8 +31,7 @@ func keyState(st State, key string) (KeyState, bool) {
 	return KeyState{}, false
 }
 
-// outcomes reads a read path back as "n0:hit,n4:skipped,n2:skipped" for a failure
-// message you can actually diagnose from.
+// outcomes renders a read path as "n0:hit,n4:skipped,n2:skipped" for failure messages.
 func outcomes(res ReadResult) string {
 	var b []string
 	for _, h := range res.Path {
@@ -41,14 +40,12 @@ func outcomes(res ReadResult) string {
 	return strings.Join(b, ",")
 }
 
-// A read reports not just WHICH node answered but what that node was to the key and
-// what every other owner said. The three facts the trace has to get right:
+// The read trace must get three facts right:
 //
-//  1. A healthy read stops at the primary. The other owners are never asked — R=3 is
-//     how many copies exist, not how many nodes a read touches.
-//  2. A dead owner is UNREACHABLE. Never "miss": that would say the node answered.
-//  3. A key nobody ever wrote is a miss at EVERY owner — all alive, none holding it.
-//     Told apart from (2) only by the trace; the value is absent either way.
+//  1. A healthy read stops at the primary; the other owners are never asked.
+//  2. A dead owner is "unreachable", never "miss" — a miss says the node answered.
+//  3. An unwritten key is a miss at every owner. Only the trace tells that apart from
+//     (2); the value is absent either way.
 func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -83,13 +80,10 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 		}
 	}
 
-	// (2) A key nobody wrote: every owner is alive and says so, and none has it. This is
-	// the case the value alone cannot distinguish from "everyone is dead".
+	// (2) A key nobody wrote: every owner is alive, answers, and has no copy.
 	//
-	// Checked BEFORE the kill, deliberately: afterwards, an owner of THIS key may happen
-	// to be the node we killed, and it would report unreachable rather than miss. The
-	// assertion would then fail or pass on which key the ring handed us — a test whose
-	// result depends on a hash is a test that will flake on somebody else's machine.
+	// Must run BEFORE the kill: afterwards an owner of this key could be the dead node,
+	// which reports unreachable, and the assertion would pass or fail on a hash.
 	miss, err := c.Get("key:never-written")
 	if err != nil {
 		t.Fatalf("get on a missing key should be a clean miss, not an error: %v", err)
@@ -104,9 +98,7 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 		}
 	}
 
-	// (3) Kill the primary. It must now show as unreachable — the read walks past it to
-	// a replica, and the trace is what proves the walk happened rather than merely that
-	// a value came back.
+	// (3) Kill the primary: the read must walk past it to a replica.
 	primary := res.Path[0].Node
 	if err := c.Kill(primary); err != nil {
 		t.Fatalf("kill %s: %v", primary, err)
@@ -115,10 +107,9 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 	if err != nil || !res.Found {
 		t.Fatalf("get %q after killing its primary should still serve: (%+v, %v)", key, res, err)
 	}
-	// The coordinator's ring drops a silent peer within a heartbeat or so, after which
-	// the dead node stops being an owner at all and leaves the path entirely. Both
-	// states are correct, so assert what is true in EITHER: a dead node never answers.
-	// Pinning "path[0] is unreachable" would be pinning a race.
+	// The coordinator's ring drops a silent peer within a heartbeat, after which the dead
+	// node leaves the path entirely. Both states are correct, so assert only what holds
+	// in either: a dead node never answers. Pinning "path[0] is unreachable" pins a race.
 	for _, h := range res.Path {
 		if h.Node == primary && h.Outcome != "unreachable" {
 			t.Fatalf("killed node %s reported %q — a dead node cannot answer; path=%s",
@@ -139,9 +130,8 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 	}
 }
 
-// The whole demo loop through the manager: seed keys, snapshot god's-eye state,
-// kill an owner, watch the key drop to under-replicated then heal back to R, all
-// while reads keep serving.
+// The full loop through the manager: seed, snapshot, kill an owner, watch the key drop
+// to under-replicated then heal back to R, all while reads keep serving.
 func TestClusterDemoFlow(t *testing.T) {
 	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -184,10 +174,8 @@ func TestClusterDemoFlow(t *testing.T) {
 		t.Fatalf("kill %s: %v", primary, err)
 	}
 
-	// Reads keep serving immediately (fallback), even while under-replicated. Now that
-	// a read reports who answered, assert the fallback actually happened rather than
-	// inferring it from the value coming back: a read served by the dead node's
-	// replacement is the whole claim, and it used to be untestable from out here.
+	// Reads keep serving immediately via fallback, even while under-replicated. Assert
+	// who answered, not just that a value came back.
 	res, err = c.Get(victimKey)
 	if err != nil || !res.Found {
 		t.Fatalf("get %q right after kill should still serve via fallback: (%+v, %v)", victimKey, res, err)
@@ -215,7 +203,6 @@ func TestClusterDemoFlow(t *testing.T) {
 	})
 	t.Logf("heal restored R=3 for %q after killing its primary %s", victimKey, primary)
 
-	// Total heal copies climbed — the manager saw the re-replication happen.
 	if st := c.State(); st.TotalHealCopies == 0 {
 		t.Fatalf("expected heal copies after a kill, got 0")
 	}
@@ -224,11 +211,9 @@ func TestClusterDemoFlow(t *testing.T) {
 	}
 }
 
-// Seed must ADD keys, not rewrite key:0..key:n-1 every call. The dashboard's
-// "seed 8 more keys" button calls Seed(8) repeatedly, and when Seed numbered from
-// zero each click silently overwrote keys that already existed — the button was a
-// no-op and the ring never changed. TestClusterDemoFlow could not catch this: it
-// calls Seed exactly once, and the bug only appears on the second call.
+// Guards the seed-appends bug: Seed must ADD keys, not rewrite key:0..key:n-1 on every
+// call, or the dashboard's repeated "seed more" clicks are silent no-ops. Only shows up
+// on the second call, which TestClusterDemoFlow never makes.
 func TestSeedAppendsRatherThanRewrites(t *testing.T) {
 	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -239,7 +224,7 @@ func TestSeedAppendsRatherThanRewrites(t *testing.T) {
 	if err := c.Seed(12); err != nil { // what the server does at startup
 		t.Fatalf("seed: %v", err)
 	}
-	if err := c.Seed(8); err != nil { // what the dashboard button does
+	if err := c.Seed(8); err != nil { // what the dashboard button does, repeatedly
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -258,9 +243,8 @@ func TestSeedAppendsRatherThanRewrites(t *testing.T) {
 	}
 }
 
-// The dashboard's heal log must name what actually moved: which keys, from which
-// node, to which node. The copy *counter* can only say "24 copies happened"; this
-// is the evidence behind that number, and it is the money moment made legible.
+// The heal log must name what actually moved: which keys, from which node, to which.
+// The copy counter alone can only say "24 copies happened".
 func TestHealLogNamesTheKeysThatMoved(t *testing.T) {
 	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -271,19 +255,18 @@ func TestHealLogNamesTheKeysThatMoved(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Nothing has died, so nothing should have moved: a healthy cluster logs no heals.
-	// (A heal that copies nothing must not file a record.)
+	// A healthy cluster logs no heals: a heal that copies nothing must file no record.
 	if h := healEvents(c.State()); len(h) != 0 {
 		t.Fatalf("no death yet, want no heal events, got %v", h)
 	}
 
-	killID := lastEventID(c.State()) // everything after this is a consequence of...
+	killID := lastEventID(c.State())
 	if err := c.Kill("n2"); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 
-	// Detection (~500ms) + grace (500ms) + the copies themselves. State() is what
-	// drains the nodes' records, so polling it is also what builds the log.
+	// Detection (~500ms) + grace (500ms) + the copies. State() is what drains the nodes'
+	// records, so polling it is also what builds the log.
 	waitUntil(t, 5*time.Second, "a heal event to be logged", func() bool {
 		return len(healEvents(c.State())) > 0
 	})
@@ -292,9 +275,8 @@ func TestHealLogNamesTheKeysThatMoved(t *testing.T) {
 	live := map[string]bool{"n0": true, "n1": true, "n3": true, "n4": true}
 	seen := map[string]bool{}
 	for _, h := range healEvents(st) {
-		// Ordering is the whole point of merging heals into the activity log: a heal
-		// must be logged AFTER the kill that caused it, so a viewer reading top-down
-		// sees cause then effect without the UI having to reconstruct anything.
+		// A heal must be logged AFTER the kill that caused it: the log's order is the
+		// only thing that makes it causal.
 		if h.ID <= killID {
 			t.Errorf("heal %d was logged before the kill (id %d) that caused it — the log's order is not causal", h.ID, killID)
 		}
@@ -307,8 +289,7 @@ func TestHealLogNamesTheKeysThatMoved(t *testing.T) {
 		if len(h.Keys) == 0 {
 			t.Errorf("heal %d: %s -> %s recorded with no keys", h.ID, h.From, h.To)
 		}
-		// The sender must say what IT saw that made it heal — not what the manager
-		// did. Those are different facts, and only the node can report the first.
+		// The sender reports what IT saw, not what the manager did. Only the node knows.
 		if !strings.Contains(h.Cause, "n2") {
 			t.Errorf("heal %d: cause is %q, want it to name the peer (n2) whose silence the sender observed", h.ID, h.Cause)
 		}
@@ -342,8 +323,7 @@ func healEvents(st State) []Event {
 	return out
 }
 
-// lastEventID is the newest event id, so a test can assert that later events came
-// after it.
+// lastEventID is the newest event id.
 func lastEventID(st State) uint64 {
 	if len(st.Events) == 0 {
 		return 0
@@ -351,14 +331,10 @@ func lastEventID(st State) uint64 {
 	return st.Events[len(st.Events)-1].ID
 }
 
-// notOnItsOwners names every key that some OWNER of it does not hold.
-//
-// This is the real replication invariant, and it is strictly stronger than
-// UnderReplicated (holders < R). A key can have R holders and still be broken: after
-// a kill/revive cycle the survivors keep leftover copies of keys they no longer own,
-// and those leftovers pad the holder count while a genuine owner sits empty. Waiting
-// on UnderReplicated alone therefore lets a test proceed before the heal has
-// converged — which is exactly the flake this replaced.
+// notOnItsOwners names every key that some OWNER of it does not hold. This is the real
+// replication invariant, and it is stronger than UnderReplicated (holders < R):
+// leftover copies on non-owners pad the holder count while a true owner sits empty.
+// Waiting on UnderReplicated instead lets a test proceed before the heal converges.
 func notOnItsOwners(st State) []string {
 	var out []string
 	for _, k := range st.Keys {
@@ -372,18 +348,10 @@ func notOnItsOwners(st State) []string {
 	return out
 }
 
-// THE STRANDED-KEY BUG. The heal used to say "only the PRIMARY of a key pushes it,"
-// which quietly requires one node to be both the primary AND a holder. Kill enough
-// nodes that the survivors end up holding keys they do not own, then revive
-// everything: the revived nodes are promoted straight back to primary of their own
-// arcs while holding NOTHING. The primary then has nothing to send, and the nodes
-// that do have the key are not the primary, so they stand down. Nobody is both, and
-// the key stays under-replicated forever — no further membership change is coming
-// to retrigger anything.
-//
-// The fix ties the right to push to the DATA rather than to the ring position: the
-// healer is the first owner, in ring order, that actually holds the key. Exactly one
-// sender (no duplicate copies) and a sender always exists (nothing is stranded).
+// Guards the stranded-key bug: if only a key's PRIMARY may push it, a revived node
+// promoted back to primary while holding nothing has nothing to send, the nodes that do
+// hold the key stand down, and it stays under-replicated forever. So the healer is the
+// first owner in ring order that actually HOLDS the key: exactly one sender, always.
 func TestReviveRestoresFullReplication(t *testing.T) {
 	c := New(3, 1, 300*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -394,8 +362,8 @@ func TestReviveRestoresFullReplication(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Down to two nodes: with R=3 and 2 alive, the survivors end up holding every
-	// key, including many they are not owners of once the others return.
+	// Down to two nodes: with R=3 and 2 alive, the survivors hold every key, including
+	// many they will not own once the others return.
 	for _, victim := range []string{"n1", "n2", "n3"} {
 		if err := c.Kill(victim); err != nil {
 			t.Fatalf("kill %s: %v", victim, err)
@@ -412,9 +380,9 @@ func TestReviveRestoresFullReplication(t *testing.T) {
 		}
 	}
 
-	// Every key must get back onto all R of its owners with NO client writes — the
-	// heal alone. Wait on the same invariant the assertions below check, or the wait
-	// can exit early on leftover copies and the test flakes.
+	// Every key must get back onto all R of its owners with no client writes. Wait on the
+	// same invariant the assertions below check: a weaker predicate exits early on
+	// leftover copies and the test flakes.
 	waitUntil(t, 20*time.Second, "every key to land on all of its owners after the revives", func() bool {
 		return len(notOnItsOwners(c.State())) == 0
 	})
@@ -427,8 +395,8 @@ func TestReviveRestoresFullReplication(t *testing.T) {
 		if len(k.Holders) < 3 {
 			t.Errorf("key %q: %d holders %v, want 3 (owners %v)", k.Key, len(k.Holders), k.Holders, k.Owners)
 		}
-		// And the owners must be the holders: a key parked on two leftover nodes that
-		// do not own it is "replicated" only by accident, and the next kill loses it.
+		// Owners must be holders: a key parked only on leftover non-owners is replicated
+		// by accident, and the next kill loses it.
 		for _, o := range k.Owners {
 			if !slices.Contains(k.Holders, o) {
 				t.Errorf("key %q: owner %s does not hold it (holders %v) — stranded", k.Key, o, k.Holders)
@@ -448,10 +416,8 @@ func nodeKeyCount(st State, id string) int {
 	return -1
 }
 
-// A revived node comes back empty, but the check-first heal repopulates it: once
-// it rejoins the ring as an owner of some ranges, the primaries of those ranges
-// notice it is missing the keys and push them over. Without this, a returned node
-// stays empty until new writes happen to land on it.
+// A revived node comes back empty, and the check-first heal must repopulate it. Without
+// that, a returned node stays empty until new writes happen to land on it.
 func TestRevivedNodeRepopulates(t *testing.T) {
 	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -476,11 +442,9 @@ func TestRevivedNodeRepopulates(t *testing.T) {
 	if err := c.Revive(victim); err != nil {
 		t.Fatalf("revive: %v", err)
 	}
-	// It returns empty…
 	if kc := nodeKeyCount(c.State(), victim); kc != 0 {
 		t.Fatalf("a revived node should return empty, got %d keys", kc)
 	}
-	// …then the heal repopulates it as peers notice it owns keys it lacks.
 	waitUntil(t, 6*time.Second, "revived node repopulates via the check-first heal", func() bool {
 		return nodeKeyCount(c.State(), victim) > 0
 	})
@@ -525,17 +489,10 @@ func TestClusterGraceAbsorbsFalsePositive(t *testing.T) {
 	t.Logf("grace period absorbed the false positive: 0 heal copies")
 }
 
-// A TTL'd key must die on schedule even if the cluster re-replicated it in the
-// meantime. This is the bug the whole absolute-deadline design exists to prevent:
-// the heal copies a key by reading it from a holder and writing it to a new owner,
-// and if that write carried a *duration* (or no deadline at all, which is what the
-// wire format used to do) the fresh copy would start its life over. The key would
-// then outlive its own expiry on the very replica that rescued it — and a read,
-// falling back to that replica, would serve a value that should have been gone.
-//
-// So: write a key with a short TTL, kill its primary to force a heal, let the heal
-// copy it, then wait out the ORIGINAL deadline and demand the key be gone from
-// everywhere. The heal must not have extended its life.
+// A TTL'd key must die on schedule even if the cluster re-replicated it meanwhile. This
+// is what the absolute-deadline wire format buys: if a heal copy carried a *duration*
+// instead, the fresh copy would restart the key's life, and a read falling back to that
+// replica would serve a value that should be gone.
 func TestHealDoesNotResurrectAnExpiringKey(t *testing.T) {
 	c := New(3, 1, 200*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
 	if err := c.Start(); err != nil {
@@ -563,8 +520,8 @@ func TestHealDoesNotResurrectAnExpiringKey(t *testing.T) {
 		t.Fatalf("kill %s: %v", primary, err)
 	}
 
-	// Wait for the heal to actually place a copy on a node that did not have one,
-	// so we are genuinely testing a *healed* copy and not just the originals.
+	// Wait for the heal to place a copy on a node that did not have one, so this tests a
+	// *healed* copy and not just the originals.
 	before := map[string]bool{}
 	for _, h := range ks.Holders {
 		before[h] = true
@@ -582,8 +539,7 @@ func TestHealDoesNotResurrectAnExpiringKey(t *testing.T) {
 		return false
 	})
 
-	// Now wait out the ORIGINAL deadline. If the healed copy was given a fresh TTL,
-	// it is still alive here and the read below will happily serve it.
+	// Wait out the ORIGINAL deadline. A healed copy given a fresh TTL is still alive here.
 	time.Sleep(time.Until(writtenAt.Add(ttl)) + 750*time.Millisecond)
 
 	res, err := c.Get(key)

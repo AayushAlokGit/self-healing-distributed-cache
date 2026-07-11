@@ -39,13 +39,8 @@ type KeyState struct {
 	UnderReplicated bool     `json:"underReplicated"`
 
 	// TTLMs is the key's remaining life in milliseconds; -1 means it never expires.
-	//
-	// Remaining time, not the deadline itself, and computed here rather than in the
-	// browser on purpose: an absolute instant would have to be read against the
-	// *browser's* clock, which is not the server's. A countdown that renders "expires
-	// in 4s" on one laptop and "expired 20s ago" on another would be blamed on the
-	// cache rather than on the clock. Shipping the remainder makes the skew irrelevant
-	// — the dashboard re-polls several times a second, so it just re-reads it.
+	// A remainder, not a deadline: an absolute instant would be read against the
+	// browser's clock, and any skew would look like a cache bug.
 	TTLMs int64 `json:"ttlMs"`
 }
 
@@ -55,10 +50,9 @@ type VNode struct {
 	Node  string  `json:"node"`
 }
 
-// State assembles the snapshot: ground-truth liveness from the manager, intended
-// ownership from a ring of the alive nodes, and actual placement by asking each
-// live node what it holds. The difference between Owners and Holders is exactly
-// the heal in flight.
+// State assembles the snapshot: liveness from the manager, intended ownership from a
+// ring of the alive nodes, and actual placement by asking each live node what it holds.
+// The difference between Owners and Holders is the heal in flight.
 func (c *Cluster) State() State {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -69,9 +63,8 @@ func (c *Cluster) State() State {
 	}
 	sort.Strings(aliveIDs)
 
-	// Authoritative ring of the currently-alive nodes: where keys *should* live.
-	// Same virtual-point count the nodes use, so the owners shown here match what
-	// the nodes actually compute for routing and heal.
+	// Where keys *should* live. Must use the same virtual-point count as the nodes, or
+	// the owners shown here would not match the ones the nodes route and heal by.
 	r := ring.NewWithReplicas(c.ringReplicas)
 	for _, id := range aliveIDs {
 		r.Add(id)
@@ -87,21 +80,15 @@ func (c *Cluster) State() State {
 		totalHeal += n.HealCopies()
 		for k, e := range n.HeldEntries() {
 			holdersByKey[k] = append(holdersByKey[k], id)
-			// Every replica of a key should carry the same deadline — that is what
-			// shipping an absolute instant buys. Take the latest of them anyway: if a
-			// bug ever did let them drift, the dashboard would show the key living as
-			// long as its longest-lived copy, which is what a reader would actually
-			// observe (the read falls back to whichever replica still has it).
+			// Replicas should all carry the same deadline. Take the latest anyway: if they
+			// ever drifted, a reader would still see the key while any copy holds it.
 			if e.Expires.After(expiresByKey[k]) {
 				expiresByKey[k] = e.Expires
 			}
 		}
-		// Collect what this node re-replicated since the last poll and file it in the
-		// SAME activity log as the kills. The node is the only one that knows what it
-		// copied, and only IT can say why (its own heartbeat saw the peer go silent) —
-		// the manager just appends. Because the append happens now, and the kill's
-		// append happened earlier, the heal lands after its cause with no ordering
-		// logic anywhere: the list IS the causality.
+		// File this node's heals into the SAME log as the kills. Only the node knows what
+		// it copied and why, and appending now (after the kill's append) makes the list
+		// itself causal, with no ordering logic anywhere.
 		for _, hc := range n.DrainHealLog() {
 			c.appendEvent(Event{
 				Kind:  "heal",
@@ -114,9 +101,8 @@ func (c *Cluster) State() State {
 		}
 	}
 
-	// Non-nil empty slices, not nil: a nil slice marshals to JSON null, and the
-	// frontend does keys.filter(...) / vnodes.map(...) — null crashes it. This
-	// matters exactly when everything is dead (no keys, no ring points).
+	// Non-nil empty slices: a nil slice marshals to JSON null, and the frontend's
+	// keys.filter(...) / vnodes.map(...) crash on null (i.e. when everything is dead).
 	st := State{
 		RF:              c.rf,
 		AliveCount:      len(aliveIDs),
@@ -127,8 +113,8 @@ func (c *Cluster) State() State {
 		Events:          append([]Event{}, c.events...),
 	}
 
-	// Nodes: every known id, alive or not. A dead node keeps its angle so it stays
-	// put on the ring (greyed out) instead of vanishing.
+	// Every known id, alive or not: a dead node keeps its angle so it stays put on the
+	// ring instead of vanishing.
 	for _, id := range c.ids {
 		n, alive := c.nodes[id]
 		ns := NodeState{
@@ -156,7 +142,7 @@ func (c *Cluster) State() State {
 		holders := holdersByKey[k]
 		sort.Strings(holders)
 
-		ttlMs := int64(-1) // -1: no deadline at all
+		ttlMs := int64(-1)
 		if exp := expiresByKey[k]; !exp.IsZero() {
 			ttlMs = max(exp.Sub(now).Milliseconds(), 0)
 		}
@@ -171,8 +157,7 @@ func (c *Cluster) State() State {
 		})
 	}
 
-	// Virtual points, colored by node, so a viewer can see the scattered arcs that
-	// make load balanced. Only for alive nodes (the ring routes to those).
+	// Virtual points, alive nodes only — the ring routes to those.
 	for _, p := range r.Points() {
 		st.VNodes = append(st.VNodes, VNode{Angle: angleOf(p.Hash), Node: p.Node})
 	}

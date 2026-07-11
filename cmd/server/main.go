@@ -18,9 +18,9 @@ import (
 	"github.com/AayushAlokGit/self-healing-distributed-cache/logging"
 )
 
-// main does nothing but call run and report. os.Exit skips deferred functions, so
-// anything that must run on the way out (draining the cluster, closing the log
-// file) has to live where a plain return unwinds it — not behind an os.Exit.
+// main calls run and reports. os.Exit skips deferred functions, so everything that
+// must run on the way out (draining the cluster, closing the log file) lives in run,
+// where a plain return unwinds it.
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
@@ -37,9 +37,6 @@ func run() error {
 	logSource := flag.Bool("log-source", false, "attach file:line of the log call site to every record")
 	flag.Parse()
 
-	// Console (text) and file (JSON) both get every record. This also redirects the
-	// standard log package through the same handler, so a stray log.Printf — or one
-	// from inside net/http — lands in the file too.
 	log, closeLogs, err := logging.Setup(logging.Options{
 		File:      *logFile,
 		Level:     *logLevel,
@@ -73,18 +70,17 @@ func run() error {
 
 	srv := &http.Server{Addr: *addr, Handler: routes(c, log)}
 
-	// Serve until an interrupt (or a serve failure), then drain: stop the users,
-	// then stop the cluster.
+	// Serve until an interrupt (or a serve failure), then drain: stop the users, then
+	// stop the cluster.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Buffered so the goroutine never blocks if nobody is reading (the interrupt
-	// path takes the other branch), and so main can read the error without racing.
+	// Buffered so the goroutine never blocks when the interrupt path takes the other
+	// branch and nobody reads this.
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("API listening", "url", "http://localhost"+*addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// Almost always "address already in use": another instance is running.
 			log.Error("API server could not serve", "addr", *addr, "err", err)
 			serveErr <- err
 			stop() // unblock main so it takes the normal shutdown path
@@ -97,7 +93,7 @@ func run() error {
 	log.Info("shutting down")
 	drain(srv, log)
 
-	// A failed bind must not exit 0 — CI and the shell need to see it fail.
+	// A failed bind must not exit 0.
 	if err := <-serveErr; err != nil {
 		return fmt.Errorf("serve on %s: %w", *addr, err)
 	}
