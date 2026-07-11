@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
 )
@@ -36,6 +37,16 @@ type KeyState struct {
 	Owners          []string `json:"owners"`  // intended, from the alive ring
 	Holders         []string `json:"holders"` // actual, from node caches
 	UnderReplicated bool     `json:"underReplicated"`
+
+	// TTLMs is the key's remaining life in milliseconds; -1 means it never expires.
+	//
+	// Remaining time, not the deadline itself, and computed here rather than in the
+	// browser on purpose: an absolute instant would have to be read against the
+	// *browser's* clock, which is not the server's. A countdown that renders "expires
+	// in 4s" on one laptop and "expired 20s ago" on another would be blamed on the
+	// cache rather than on the clock. Shipping the remainder makes the skew irrelevant
+	// — the dashboard re-polls several times a second, so it just re-reads it.
+	TTLMs int64 `json:"ttlMs"`
 }
 
 // VNode is one virtual point on the ring, colored by its physical node.
@@ -67,13 +78,23 @@ func (c *Cluster) State() State {
 	}
 
 	// Actual placement: union of what live nodes hold.
+	now := time.Now()
 	holdersByKey := map[string][]string{}
+	expiresByKey := map[string]time.Time{} // zero value = never expires
 	var totalHeal int64
 	for _, id := range aliveIDs {
 		n := c.nodes[id]
 		totalHeal += n.HealCopies()
-		for _, k := range n.HeldKeys() {
+		for k, e := range n.HeldEntries() {
 			holdersByKey[k] = append(holdersByKey[k], id)
+			// Every replica of a key should carry the same deadline — that is what
+			// shipping an absolute instant buys. Take the latest of them anyway: if a
+			// bug ever did let them drift, the dashboard would show the key living as
+			// long as its longest-lived copy, which is what a reader would actually
+			// observe (the read falls back to whichever replica still has it).
+			if e.Expires.After(expiresByKey[k]) {
+				expiresByKey[k] = e.Expires
+			}
 		}
 		// Collect what this node re-replicated since the last poll and file it in the
 		// SAME activity log as the kills. The node is the only one that knows what it
@@ -134,12 +155,19 @@ func (c *Cluster) State() State {
 	for _, k := range keys {
 		holders := holdersByKey[k]
 		sort.Strings(holders)
+
+		ttlMs := int64(-1) // -1: no deadline at all
+		if exp := expiresByKey[k]; !exp.IsZero() {
+			ttlMs = max(exp.Sub(now).Milliseconds(), 0)
+		}
+
 		st.Keys = append(st.Keys, KeyState{
 			Key:             k,
 			Angle:           angleOf(ring.Hash(k)),
 			Owners:          r.GetClockwiseN(k, c.rf),
 			Holders:         holders,
 			UnderReplicated: len(holders) < wantCopies,
+			TTLMs:           ttlMs,
 		})
 	}
 

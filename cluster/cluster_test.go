@@ -60,9 +60,13 @@ func TestClusterDemoFlow(t *testing.T) {
 		}
 	}
 
-	// Read a key back through the cluster.
-	if v, ok, err := c.Get(victimKey); err != nil || !ok {
-		t.Fatalf("get %q before kill: (%q, %v, %v)", victimKey, v, ok, err)
+	// Read a key back through the cluster. With every node up, its primary answers.
+	res, err := c.Get(victimKey)
+	if err != nil || !res.Found {
+		t.Fatalf("get %q before kill: (%+v, %v)", victimKey, res, err)
+	}
+	if res.Fallback() {
+		t.Fatalf("get %q with a healthy cluster should be served by its primary, not a fallback: %+v", victimKey, res)
 	}
 
 	// Kill the primary owner of the victim key.
@@ -72,9 +76,19 @@ func TestClusterDemoFlow(t *testing.T) {
 		t.Fatalf("kill %s: %v", primary, err)
 	}
 
-	// Reads keep serving immediately (fallback), even while under-replicated.
-	if v, ok, err := c.Get(victimKey); err != nil || !ok {
-		t.Fatalf("get %q right after kill should still serve via fallback: (%q, %v, %v)", victimKey, v, ok, err)
+	// Reads keep serving immediately (fallback), even while under-replicated. Now that
+	// a read reports who answered, assert the fallback actually happened rather than
+	// inferring it from the value coming back: a read served by the dead node's
+	// replacement is the whole claim, and it used to be untestable from out here.
+	res, err = c.Get(victimKey)
+	if err != nil || !res.Found {
+		t.Fatalf("get %q right after kill should still serve via fallback: (%+v, %v)", victimKey, res, err)
+	}
+	if res.ServedBy == primary {
+		t.Fatalf("get %q was served by the node we just killed (%s)", victimKey, primary)
+	}
+	if !res.Fallback() {
+		t.Fatalf("get %q after killing its primary %s should report a fallback, got %+v", victimKey, primary, res)
 	}
 
 	// The heal restores R: the key returns to 3 holders, and none is the dead node.
@@ -401,4 +415,98 @@ func TestClusterGraceAbsorbsFalsePositive(t *testing.T) {
 		t.Fatalf("grace period should have absorbed the false positive, got %d heal copies", st.TotalHealCopies)
 	}
 	t.Logf("grace period absorbed the false positive: 0 heal copies")
+}
+
+// A TTL'd key must die on schedule even if the cluster re-replicated it in the
+// meantime. This is the bug the whole absolute-deadline design exists to prevent:
+// the heal copies a key by reading it from a holder and writing it to a new owner,
+// and if that write carried a *duration* (or no deadline at all, which is what the
+// wire format used to do) the fresh copy would start its life over. The key would
+// then outlive its own expiry on the very replica that rescued it — and a read,
+// falling back to that replica, would serve a value that should have been gone.
+//
+// So: write a key with a short TTL, kill its primary to force a heal, let the heal
+// copy it, then wait out the ORIGINAL deadline and demand the key be gone from
+// everywhere. The heal must not have extended its life.
+func TestHealDoesNotResurrectAnExpiringKey(t *testing.T) {
+	c := New(3, 1, 200*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	const key, ttl = "session:abc", 3 * time.Second
+	writtenAt := time.Now()
+	if err := c.Set(key, "aayush", ttl); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	ks, ok := keyState(c.State(), key)
+	if !ok {
+		t.Fatalf("key %q missing from state right after the write", key)
+	}
+	if ks.TTLMs <= 0 {
+		t.Fatalf("key %q should report remaining life, got ttlMs=%d", key, ks.TTLMs)
+	}
+	primary := ks.Owners[0]
+
+	// Kill the primary: the survivors must re-replicate the key to a new owner.
+	if err := c.Kill(primary); err != nil {
+		t.Fatalf("kill %s: %v", primary, err)
+	}
+
+	// Wait for the heal to actually place a copy on a node that did not have one,
+	// so we are genuinely testing a *healed* copy and not just the originals.
+	before := map[string]bool{}
+	for _, h := range ks.Holders {
+		before[h] = true
+	}
+	waitUntil(t, 2*time.Second, "the heal copies the expiring key to a new holder", func() bool {
+		k, ok := keyState(c.State(), key)
+		if !ok {
+			return false
+		}
+		for _, h := range k.Holders {
+			if !before[h] {
+				return true // a node that never had this key now does: a healed copy
+			}
+		}
+		return false
+	})
+
+	// Now wait out the ORIGINAL deadline. If the healed copy was given a fresh TTL,
+	// it is still alive here and the read below will happily serve it.
+	time.Sleep(time.Until(writtenAt.Add(ttl)) + 750*time.Millisecond)
+
+	res, err := c.Get(key)
+	if err != nil {
+		t.Fatalf("get after expiry: %v", err)
+	}
+	if res.Found {
+		t.Fatalf("key %q outlived its %s TTL: the heal handed the copy on %s a new lease on life (value %q)",
+			key, ttl, res.ServedBy, res.Value)
+	}
+	if k, ok := keyState(c.State(), key); ok {
+		t.Fatalf("expired key %q is still held by %v", key, k.Holders)
+	}
+}
+
+// The counterpart: a key written with no TTL is not accidentally given one.
+func TestKeyWithoutTTLNeverExpires(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	if err := c.Set("permanent", "v", 0); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	ks, ok := keyState(c.State(), "permanent")
+	if !ok {
+		t.Fatalf("key missing from state")
+	}
+	if ks.TTLMs != -1 {
+		t.Fatalf("a key with no TTL should report ttlMs=-1 (never expires), got %d", ks.TTLMs)
+	}
 }

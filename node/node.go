@@ -10,12 +10,14 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -465,7 +467,7 @@ func (n *Node) heal() {
 	log := n.logger()
 	log.Debug("heal started", "keys_held", len(snapshot), "cause", strings.Join(causes, "; "))
 
-	for key, value := range snapshot {
+	for key, entry := range snapshot {
 		select {
 		case <-n.done:
 			log.Debug("heal aborted: node closing", "copies", len(moved))
@@ -520,7 +522,10 @@ func (n *Node) heal() {
 				log.Debug("heal: owner already has key, no copy", "key", key, "owner", o.id)
 				continue
 			}
-			if err := n.storeOn(o.addr, key, value); err != nil {
+			// entry.Expires, not a fresh TTL: the copy inherits the deadline the key
+			// already had, so a healed replica dies at the same instant as the original
+			// rather than being handed a new lease on life by its own rescue.
+			if err := n.storeOn(o.addr, key, entry.Value, entry.Expires); err != nil {
 				failed++
 				log.Warn("heal: copy failed, key still under-replicated", "key", key, "owner", o.id, "err", err)
 				continue // record only copies that actually landed
@@ -675,6 +680,10 @@ func (n *Node) HeldKeys() []string {
 	return keys
 }
 
+// HeldEntries is HeldKeys with each key's deadline attached, so the dashboard can
+// show a key's remaining life alongside where it lives. A zero Expires never dies.
+func (n *Node) HeldEntries() map[string]cache.Entry { return n.cache.Snapshot() }
+
 // Addr is the node's bound address, e.g. "127.0.0.1:53187".
 func (n *Node) Addr() string { return n.addr }
 
@@ -713,15 +722,47 @@ func (n *Node) handleGet(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, value)
 }
 
-// handlePut stores the request body as the value for {key}. No TTL over the wire
-// yet; entries are permanent until evicted.
+// expiresHeader carries a key's deadline between nodes as an absolute instant —
+// Unix milliseconds, or "0"/absent for "never expires".
+//
+// Absolute, not a duration, and that is the whole point. A replica write and a heal
+// copy are both "someone else already decided when this key dies"; re-deriving the
+// deadline from the receiver's clock would hand a healed copy a fresh full lifetime
+// and let it outlive the original. See cache.SetAt.
+const expiresHeader = "X-Expires-At"
+
+// Which node actually answered a client read, and which one the ring says should
+// have. When they differ, a replica covered for a dead primary.
+const (
+	servedByHeader = "X-Served-By"
+	primaryHeader  = "X-Primary"
+)
+
+func putExpires(h http.Header, expires time.Time) {
+	if expires.IsZero() {
+		return // absent means never
+	}
+	h.Set(expiresHeader, strconv.FormatInt(expires.UnixMilli(), 10))
+}
+
+func readExpires(h http.Header) time.Time {
+	ms, err := strconv.ParseInt(h.Get(expiresHeader), 10, 64)
+	if err != nil || ms <= 0 {
+		return time.Time{} // absent, junk, or 0: never expires
+	}
+	return time.UnixMilli(ms)
+}
+
+// handlePut stores the request body as the value for {key}, honouring the deadline
+// the sender stamped on it (see expiresHeader). This is the internal replica write:
+// the deadline was decided by whoever coordinated the original client write.
 func (n *Node) handlePut(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	n.cache.Set(r.PathValue("key"), string(body), 0)
+	n.cache.SetAt(r.PathValue("key"), string(body), readExpires(r.Header))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -763,6 +804,11 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 			} else {
 				log.Debug("read hit", "key", key, "served_by", o.id)
 			}
+			// Tell the caller WHERE the value came from, not just what it was. When the
+			// primary is down and rank>0 answered, that single fact is the whole
+			// self-healing story — and until now only the server log ever saw it.
+			w.Header().Set(servedByHeader, o.id)
+			w.Header().Set(primaryHeader, owners[0].id)
 			io.WriteString(w, v)
 			return
 		}
@@ -788,6 +834,18 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	}
 	key, value := r.PathValue("key"), string(body)
 
+	// The client sends a duration; the coordinator turns it into an instant, ONCE,
+	// and every replica is handed that same instant. If each owner converted the
+	// duration itself, the replicas would already disagree by their clock skew — and
+	// a heal, arriving later still, would disagree by far more.
+	var expires time.Time
+	if ttl, err := parseTTL(r.URL.Query().Get("ttl")); err != nil {
+		http.Error(w, "bad ttl: "+err.Error(), http.StatusBadRequest)
+		return
+	} else if ttl > 0 {
+		expires = time.Now().Add(ttl)
+	}
+
 	owners := n.ownersFor(key)
 	if len(owners) == 0 {
 		http.Error(w, "no owner for key", http.StatusServiceUnavailable)
@@ -799,11 +857,11 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	for _, o := range owners {
 		ownerIDs = append(ownerIDs, o.id)
 		if o.id == n.id {
-			n.cache.Set(key, value, 0)
+			n.cache.SetAt(key, value, expires)
 			acks++
 			continue
 		}
-		if err := n.storeOn(o.addr, key, value); err != nil {
+		if err := n.storeOn(o.addr, key, value, expires); err != nil {
 			// Not fatal on its own: the write still succeeds if enough others ack,
 			// and a later heal repairs this replica.
 			log.Warn("write: owner did not ack", "key", key, "owner", o.id, "err", err)
@@ -842,16 +900,40 @@ func (n *Node) fetchFrom(addr, key string) (value string, ok bool, err error) {
 	return string(body), true, nil
 }
 
-// storeOn PUTs key=value to another node's internal /kv endpoint.
-func (n *Node) storeOn(addr, key, value string) error {
+// storeOn PUTs key=value to another node's internal /kv endpoint, stamped with the
+// deadline the key already has. A zero expires means it never expires.
+func (n *Node) storeOn(addr, key, value string, expires time.Time) error {
 	req, err := http.NewRequest(http.MethodPut, "http://"+addr+"/kv/"+key, strings.NewReader(value))
 	if err != nil {
 		return err
 	}
+	putExpires(req.Header, expires)
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// parseTTL reads the client's ttl query parameter: a Go duration ("30s", "5m") or a
+// bare number of seconds. Empty or zero means the key never expires.
+func parseTTL(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	if secs, err := strconv.ParseFloat(s, 64); err == nil {
+		if secs < 0 {
+			return 0, fmt.Errorf("negative ttl %q", s)
+		}
+		return time.Duration(secs * float64(time.Second)), nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("not a duration or a number of seconds: %q", s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("negative ttl %q", s)
+	}
+	return d, nil
 }

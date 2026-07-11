@@ -15,6 +15,22 @@ export interface KeyState {
   owners: string[]
   holders: string[]
   underReplicated: boolean
+  // Remaining life in ms; -1 means the key never expires. The server sends the
+  // remainder rather than a deadline so the countdown never has to trust that the
+  // browser's clock agrees with the cluster's. See cluster/state.go.
+  ttlMs: number
+}
+
+// What a read reveals about the cluster, not just about the key. servedBy is the node
+// that answered; primary is the node the ring says should have. When they differ, a
+// replica covered for a primary that was down — which is the read fallback, and the
+// entire reason for replicating.
+export interface ReadResult {
+  found: boolean
+  value: string
+  servedBy?: string
+  primary?: string
+  fallback?: boolean
 }
 
 export interface VNode {
@@ -97,10 +113,12 @@ export const killNode = (id: string) => post('/api/kill', { id }, `kill ${id}`)
 export const reviveNode = (id: string) => post('/api/revive', { id }, `revive ${id}`)
 export const pauseNode = (id: string, paused: boolean) =>
   post('/api/pause', { id, paused }, `${paused ? 'pause' : 'resume'} ${id}`)
-export const setKey = (key: string, value: string) => post('/api/set', { key, value }, `write ${key}`)
+// ttlSeconds <= 0 means the key never expires.
+export const setKey = (key: string, value: string, ttlSeconds: number) =>
+  post('/api/set', { key, value, ttlSeconds }, `write ${key}`)
 export const seedKeys = (n: number) => post('/api/seed', { n }, `seed ${n} keys`)
 
-export async function getKey(key: string): Promise<{ found: boolean; value: string }> {
+export async function getKey(key: string): Promise<ReadResult> {
   const res = await ok(await fetch('/api/get?key=' + encodeURIComponent(key)), `read ${key}`)
   return res.json()
 }

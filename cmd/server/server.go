@@ -19,7 +19,11 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 	})
 
 	mux.HandleFunc("POST /api/set", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Key, Value string }
+		// TTLSeconds <= 0 (or absent) means the key never expires.
+		var body struct {
+			Key, Value string
+			TTLSeconds float64 `json:"ttlSeconds"`
+		}
 		if !readJSON(w, r, &body) {
 			return
 		}
@@ -27,7 +31,11 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 			writeErr(w, http.StatusBadRequest, "key is required")
 			return
 		}
-		if err := c.Set(body.Key, body.Value); err != nil {
+		var ttl time.Duration
+		if body.TTLSeconds > 0 {
+			ttl = time.Duration(body.TTLSeconds * float64(time.Second))
+		}
+		if err := c.Set(body.Key, body.Value, ttl); err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
@@ -40,12 +48,18 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 			writeErr(w, http.StatusBadRequest, "key is required")
 			return
 		}
-		v, found, err := c.Get(key)
+		res, err := c.Get(key)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"found": found, "value": v})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"found":    res.Found,
+			"value":    res.Value,
+			"servedBy": res.ServedBy,
+			"primary":  res.Primary,
+			"fallback": res.Fallback(),
+		})
 	})
 
 	mux.HandleFunc("POST /api/seed", func(w http.ResponseWriter, r *http.Request) {

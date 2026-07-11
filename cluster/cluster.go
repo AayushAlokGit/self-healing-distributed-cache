@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -262,8 +263,13 @@ func (c *Cluster) Pause(id string, paused bool) error {
 }
 
 // Set writes a key through a live node (the real client path: any node
-// coordinates). Returns an error if no node is up.
-func (c *Cluster) Set(key, value string) error {
+// coordinates). A ttl of 0 means the key never expires. Returns an error if no node
+// is up.
+//
+// The ttl travels as a duration only on this first hop. The coordinator turns it
+// into an absolute deadline and every replica — and every later heal copy — is
+// handed that same instant. See node.handleClientSet.
+func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 	start := time.Now()
 	c.mu.Lock()
 	coord := c.anyLiveAddrLocked()
@@ -273,7 +279,11 @@ func (c *Cluster) Set(key, value string) error {
 		return fmt.Errorf("no live node to coordinate the write")
 	}
 
-	req, err := http.NewRequest(http.MethodPut, "http://"+coord+"/set/"+key, bytes.NewReader([]byte(value)))
+	url := "http://" + coord + "/set/" + key
+	if ttl > 0 {
+		url += "?ttl=" + strconv.FormatFloat(ttl.Seconds(), 'f', -1, 64)
+	}
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader([]byte(value)))
 	if err != nil {
 		return err
 	}
@@ -290,43 +300,80 @@ func (c *Cluster) Set(key, value string) error {
 	}
 
 	c.mu.Lock()
-	c.logf("set", "wrote %q via a coordinator", key)
+	if ttl > 0 {
+		c.logf("set", "wrote %q via a coordinator, expiring in %s", key, ttl)
+	} else {
+		c.logf("set", "wrote %q via a coordinator", key)
+	}
 	c.mu.Unlock()
-	c.logger().Debug("write ok", "key", key, "coordinator", coord, "took", time.Since(start).Round(time.Millisecond))
+	c.logger().Debug("write ok", "key", key, "coordinator", coord, "ttl", ttl, "took", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 
-// Get reads a key through a live node. found is false on a clean miss; err is set
+// ReadResult is what a read reveals about the cluster, not just about the key.
+// ServedBy is the node that actually answered; Primary is the node the ring says
+// should have. When they differ, a replica covered for the primary — which is the
+// read fallback, and the whole point of having replicated the key at all.
+type ReadResult struct {
+	Value    string `json:"value"`
+	Found    bool   `json:"found"`
+	ServedBy string `json:"servedBy,omitempty"`
+	Primary  string `json:"primary,omitempty"`
+}
+
+// Fallback reports whether a replica answered because the primary could not.
+//
+// "Could not" covers two different failures, and it is worth not conflating them:
+// the primary may be UNREACHABLE (it died, and the coordinator's ring has not yet
+// caught up), or it may be perfectly healthy but simply NOT HOLD THE KEY — which is
+// exactly the state a revived node is in, since it comes back empty and the ring
+// promotes it straight back to primary of its own arcs before the heal has refilled
+// it. Both look identical to the client, and in both the replica saves the read.
+func (r ReadResult) Fallback() bool {
+	return r.Found && r.ServedBy != "" && r.Primary != "" && r.ServedBy != r.Primary
+}
+
+// Get reads a key through a live node. Found is false on a clean miss; err is set
 // only when no node could serve it.
-func (c *Cluster) Get(key string) (value string, found bool, err error) {
+func (c *Cluster) Get(key string) (ReadResult, error) {
 	start := time.Now()
 	c.mu.Lock()
 	coord := c.anyLiveAddrLocked()
 	c.mu.Unlock()
 	if coord == "" {
 		c.logger().Error("read dropped: no live node to coordinate it", "key", key)
-		return "", false, fmt.Errorf("no live node to coordinate the read")
+		return ReadResult{}, fmt.Errorf("no live node to coordinate the read")
 	}
 
 	resp, err := c.client.Get("http://" + coord + "/get/" + key)
 	if err != nil {
 		c.logger().Error("read failed: coordinator unreachable", "key", key, "coordinator", coord, "err", err)
-		return "", false, err
+		return ReadResult{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	took := time.Since(start).Round(time.Millisecond)
+
 	switch resp.StatusCode {
 	case http.StatusOK:
-		c.logger().Debug("read hit", "key", key, "took", took)
-		return string(body), true, nil
+		res := ReadResult{
+			Value:    string(body),
+			Found:    true,
+			ServedBy: resp.Header.Get("X-Served-By"),
+			Primary:  resp.Header.Get("X-Primary"),
+		}
+		if res.Fallback() {
+			c.logf("read", "read %q from %s — its primary %s could not serve it, so a replica did", key, res.ServedBy, res.Primary)
+		}
+		c.logger().Debug("read hit", "key", key, "served_by", res.ServedBy, "fallback", res.Fallback(), "took", took)
+		return res, nil
 	case http.StatusNotFound:
 		c.logger().Debug("read miss", "key", key, "took", took)
-		return "", false, nil
+		return ReadResult{}, nil
 	default:
 		c.logger().Error("read failed: all owners unreachable",
 			"key", key, "coordinator", coord, "status", resp.StatusCode, "took", took)
-		return "", false, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
+		return ReadResult{}, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
 }
 
@@ -351,7 +398,9 @@ func (c *Cluster) Seed(n int) error {
 
 	start := time.Now()
 	for i := first; i < first+n; i++ {
-		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i)); err != nil {
+		// Seeded keys are permanent: they are the demo's furniture, and a ring that
+		// quietly emptied itself mid-demo would be a worse bug than no TTL at all.
+		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i), 0); err != nil {
 			c.logger().Error("seed stopped early: a write failed",
 				"key", fmt.Sprintf("key:%d", i), "seeded_so_far", i-first, "err", err)
 			return err

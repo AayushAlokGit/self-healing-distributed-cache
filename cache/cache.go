@@ -274,11 +274,25 @@ func (c *Cache) evictLocked(now time.Time) {
 // does not grow the cache, so it never evicts.
 func (c *Cache) Set(key, value string, ttl time.Duration) {
 	// Read before the lock: no reason to hold it across a clock read.
-	now := time.Now()
 	var expires time.Time
 	if ttl > 0 {
-		expires = now.Add(ttl)
+		expires = time.Now().Add(ttl)
 	}
+	c.SetAt(key, value, expires)
+}
+
+// SetAt is Set with the deadline given as an absolute instant rather than a
+// duration. The zero Time means "never expires".
+//
+// This is the form a REPLICA must be written with, and the distinction is not
+// cosmetic. A duration is re-based against the receiver's clock every time it
+// crosses the network, so a key with 60s of life copied by a heal at t=52s would
+// get a *fresh* 60s on its new replica and outlive its own deadline — and each
+// subsequent heal would push it further out. Deciding the instant once, at the
+// coordinator, and shipping that instant means every copy of a key dies together
+// no matter when or how often it was replicated.
+func (c *Cache) SetAt(key, value string, expires time.Time) {
+	now := time.Now()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -297,30 +311,41 @@ func (c *Cache) Set(key, value string, ttl time.Duration) {
 	c.pushFront(n)
 
 	// Overwriting a TTL'd key with a permanent one must un-index it.
-	if ttl > 0 {
+	if !expires.IsZero() {
 		c.expiring[key] = n
 	} else {
 		delete(c.expiring, key)
 	}
 }
 
-// Snapshot returns a copy of every live entry as key→value, skipping the expired.
+// Entry is a live entry as seen from outside the cache: its value and the instant
+// it dies. A zero Expires means it never does.
+type Entry struct {
+	Value   string
+	Expires time.Time
+}
+
+// Snapshot returns a copy of every live entry, skipping the expired.
+//
+// It carries the deadline, not just the value, because its callers are the ones
+// that copy data between nodes — and a copy that loses the deadline is a copy that
+// never expires. See SetAt.
 //
 // It deliberately does NOT touch recency. A bulk scan for replication must not
 // look like user access: marking every key most-recently-used would be the very
 // sequential-scan pollution LRU is vulnerable to (see Phase 1) — a background
 // heal would evict the hot set it is trying to protect.
-func (c *Cache) Snapshot() map[string]string {
+func (c *Cache) Snapshot() map[string]Entry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := time.Now()
-	out := make(map[string]string, len(c.data))
+	out := make(map[string]Entry, len(c.data))
 	for k, n := range c.data {
 		if n.expired(now) {
 			continue
 		}
-		out[k] = n.value
+		out[k] = Entry{Value: n.value, Expires: n.expires}
 	}
 	return out
 }
