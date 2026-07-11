@@ -153,9 +153,8 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 
 	var h http.Handler = mux
 
-	// Push a notification when somebody opens the live dashboard — off unless the
-	// environment configures a notifier, so local development never pushes anything. The
-	// middleware only exists when it is on, so there is no disabled path to pay for.
+	// Off unless the environment configures a notifier, so local development never pushes.
+	// The middleware only exists when it is on — no disabled path to pay for.
 	if to, on := notify.FromEnv(); on {
 		log.Info("visit notifications on", "via", to)
 		h = newVisits(to, log, time.Now()).middleware(h)

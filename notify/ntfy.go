@@ -17,6 +17,10 @@ const DefaultNtfyServer = "https://ntfy.sh"
 // Turns "forgot a method" into an error here rather than at some distant call site.
 var _ Notifier = (*Ntfy)(nil)
 
+// ⚠️ Publishing to ntfy is an outbound TLS call, so the runtime image needs CA certificates.
+// A `scratch` base has none, and every push dies x509 while the health check stays green.
+// See the Dockerfile.
+
 // Ntfy publishes to an ntfy server (https://ntfy.sh/docs/publish/).
 //
 // ⚠️ The topic name is the ONLY secret ntfy has. There is no key: anyone who knows the
@@ -29,7 +33,6 @@ type Ntfy struct {
 	Client *http.Client // http.DefaultClient if nil — which has NO timeout, so set one
 }
 
-// NewNtfy returns a ready Ntfy with a bounded client.
 func NewNtfy(server, topic string) *Ntfy {
 	if server == "" {
 		server = DefaultNtfyServer
@@ -41,10 +44,9 @@ func NewNtfy(server, topic string) *Ntfy {
 	}
 }
 
-// FromEnv builds the Notifier the environment asks for: $NTFY_TOPIC turns notifications on
-// ($NTFY_SERVER optionally redirects them at a self-hosted instance). ok is false when
-// nothing is configured — the caller gets a working Nop either way, so it only needs ok to
-// decide what to log.
+// FromEnv builds the Notifier the environment asks for: $NTFY_TOPIC turns notifications on,
+// $NTFY_SERVER optionally redirects them at a self-hosted instance. The caller gets a working
+// Nop either way, so it only needs ok to decide what to log.
 func FromEnv() (n Notifier, ok bool) {
 	topic := strings.TrimSpace(os.Getenv("NTFY_TOPIC"))
 	if topic == "" {

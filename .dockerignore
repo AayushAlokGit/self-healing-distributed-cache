@@ -1,11 +1,5 @@
-# What NOT to send to the Docker build. The image ships one Go binary; everything listed
-# here is either not Go, or not needed to compile it.
-#
-# This file is what lets the Dockerfile say `COPY . .` instead of naming each package. The
-# Dockerfile used to enumerate them — cache/, cluster/, node/, ring/, cmd/ — which is a
-# second source of truth about what packages exist, and it is only ever checked in
-# production. Adding notify/ broke the deploy: the build stage could not see the directory,
-# and `go build` failed with "no required module provides package .../notify".
+# What NOT to send to the build. The image ships one Go binary; none of this compiles it.
+# This file is what lets the Dockerfile say `COPY . .` instead of naming each package.
 .git/
 .gitignore
 .dockerignore

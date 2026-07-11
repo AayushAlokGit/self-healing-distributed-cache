@@ -120,7 +120,7 @@ other**: `n0` says `n2` is dead and has re-routed; `n2` says it is fine and is s
 timed out yet and still routes to `n2`. **All three are correct.** There is no fact of the matter about
 whether `n2` is dead — ***dead* is not a property of a node, it is a belief held by an observer.**
 The honest dashboard shows a **union of beliefs**; the flickering disagreement during a failure is not a
-rendering bug, it *is* the distributed system. (→ PROGRESS, Next action (a): this is a writeup caveat.)
+rendering bug, it *is* the distributed system. (→ PROGRESS, Next action (a): a writeup caveat.)
 
 **Q6 — Why is even-spaced node placement on the dashboard honest, and what must keep its true hash
 angle? — ⊘ (taught).**
@@ -162,9 +162,9 @@ Same verdict as segmented LRU, reached the same way.
 Asked after teaching each design piece, before/around the build.
 
 **After Q1 (who heals) — 3 Q: 3 ✅.** (1) **ownership vs data** — the ring re-points owners for free; the
-heal must still *copy the bytes* to the promoted owner (redundancy restored). (2) **not a dedicated healer**
-— it would need consensus among healers (SPOF → CP), and a global keyset no node has. (3) **no election** —
-ownership is a deterministic function of (membership view, key), so nodes agree without talking.
+heal must still *copy the bytes* to the promoted owner. (2) **not a dedicated healer** — it would need
+consensus among healers (SPOF → CP), and a global keyset no node has. (3) **no election** — ownership is a
+deterministic function of (membership view, key), so nodes agree without talking.
 **Sharpened on (3):** the "if all agree on the view" precondition is load-bearing — Phase 4 gives
 *independent* views, so determinism only yields agreement *to the degree views have converged*; divergence
 (false positive/partition) makes different nodes confidently do *conflicting* heals. That "if" is exactly
@@ -178,12 +178,13 @@ with no global index), and only the *primary* pushes (else co-owners double-send
 **After the step-1 build — 2 Q: 1 ✅ · 1 ⚠️.**
 - **Q1 (why heal in its own goroutine, not inline in `heartbeatRound`) — ✅.** Copying is slow I/O; a
   synchronous heal would keep the heartbeat goroutine from pinging → it declares *more* false deaths →
-  more heals. **Self-reinforcing loop**; decoupling breaks it. (Nailed the feedback loop.)
+  more heals. **Self-reinforcing loop**; decoupling breaks it.
 - **Q2 (why `Snapshot` must not update recency) — ⚠️.** Got the direction ("recency disturbed") but the
   mechanism wrong ("random map-iteration order randomises it"). **Correct:** order is irrelevant; a heal
   touches *every* key, so promoting all of them marks the whole cache MRU at once, flattening the recency
   signal — **the Phase-1 sequential-scan LRU pollution**, and a background heal would evict the hot working
-  set it is trying to protect. **GAP: named the symptom, not the failure mode.** → re-asked cold in S9 Q0: ✅, closed.
+  set it is trying to protect. **GAP: named the symptom, not the failure mode.** → re-asked cold in S9 Q0:
+  ✅, closed.
 
 ---
 
@@ -194,10 +195,10 @@ Taken cold at session start, before any Phase 5 teaching, per the ritual. **Q4 �
 | Q | Concept | | Model answer / the gap |
 |---|---|---|---|
 | 4 | self-suspicion & split-brain | ✅ | Same question as S6 Q4 — **model answer there.** Gave both halves clean. **Sharpened:** the *conflict* isn't the loss; the loss is at **reconciliation** — LWW keeps the newer copy and **silently discards the older acked write**. Carry it one step to where the byte vanishes. |
-| 6 | reduce false positives + the universal tradeoff | ⊘ | Same question as S6 Q6. Third blank (S6 ×1, this re-ask ×1, plus an S6 note). **Taught, not attempted.** Levers: longer timeout / N-consecutive-misses / indirect probing / suspicion+refutation / phi-accrual. **The tradeoff (the actual point):** every mitigation reduces false positives by gathering more evidence or waiting longer — which delays *correct* convictions exactly as much as wrong ones, because **at decision time a slow node and a dead node are the same silence.** Detection speed and accuracy are one dial pointed opposite ways. This is the three-causes-of-silence impossibility seen from the other side. |
+| 6 | reduce false positives + the universal tradeoff | ⊘ | Same question as S6 Q6. Third blank. **Taught, not attempted.** Levers: longer timeout / N-consecutive-misses / indirect probing / suspicion+refutation / phi-accrual. **The tradeoff (the actual point):** every mitigation reduces false positives by gathering more evidence or waiting longer — which delays *correct* convictions exactly as much as wrong ones, because **at decision time a slow node and a dead node are the same silence.** Detection speed and accuracy are one dial pointed opposite ways. |
 
 Consequence carried into Phase 5: a false positive that triggers a full **re-replication storm** turns "a
-few failed hops" into "gigabytes copied for nothing." → PROGRESS, Phase 5 (the storm, and the grace period).
+few failed hops" into "gigabytes copied for nothing." → PROGRESS, Phase 5.
 
 ---
 
@@ -210,15 +211,14 @@ earlier.
 |---|---|---|---|
 | 1 | three causes of silence | ✅ | Crash, GC pause, network delay on the reply path. All three. They're indistinguishable because all produce the *identical* observation — no reply in time; there is no "I'm slow" message. |
 | 2 | the timeout knob, both ways | ⚠️ | 50ms → false positives ✅. 5s: right conclusion ("death learnt only after 5s") but **GAP: muddled mechanism** — said a dead node *"holds the connection open 5s."* A crashed node refuses the connection *instantly*; each ping fails fast. The 5s delay is the **`lastSeen` threshold** withholding the *declaration*, not a hanging ping. Real cost: the ring routes to a corpse for 5s (failed hops, under-replicated writes). A per-ping hang only happens on a node that accepts TCP but never replies. |
-| 3 | independent views vs forced agreement | ✅ | Nailed the chain: force agreement → coordinator → SPOF → a redundant coordinator needs **consensus**. Plus the availability point. Sharpened: the requirement is *consensus*, and consensus is *what makes a system CP* — it needs a majority quorum, so the minority partition must stop serving. |
+| 3 | independent views vs forced agreement | ✅ | Nailed the chain: force agreement → coordinator → SPOF → a redundant coordinator needs **consensus**. Plus the availability point. Sharpened: consensus is *what makes a system CP* — it needs a majority quorum, so the minority partition must stop serving. |
 | 4 | self-suspicion & split-brain | ⊘ | Not attempted (despite the live demo minutes before). (a) A node is the **authority on its own liveness** — suspicion comes from `lastSeen` of *inbound* replies; it never pings itself, hard-sets `alive[self]=true`; a dead node isn't running to mark itself. (b) n0-says-dead / n1-says-alive with no reconciler → if it hardens (partition), both sides serve, writes diverge → **split-brain**, and LWW silently drops a loser = data loss. |
 | 5 | scaling the detector | ⚠️ | Named "gossip or SWIM" but **GAP: not the mechanism.** The change: today n0 learns of n1's death by *directly pinging n1*; under gossip it learns **second-hand** — pings a few random peers, and the fact propagates transitively (rumor spread), O(N) not O(N²). The *label* isn't the answer; the *how* is. |
-| 6 | extend it — reduce false positives | ⊘ | Not attempted. Any one: indirect probing (SWIM), suspicion + incarnation refutation, N-consecutive-misses / longer timeout, phi-accrual. **Universal tradeoff: every false-positive mitigation slows detection of real deaths** — more evidence/waiting delays the right convictions too. (Re-asked S7, blank again → full model answer in the S7 row above.) |
+| 6 | extend it — reduce false positives | ⊘ | Not attempted. Any one: indirect probing (SWIM), suspicion + incarnation refutation, N-consecutive-misses / longer timeout, phi-accrual. **Universal tradeoff: every false-positive mitigation slows detection of real deaths.** (Re-asked S7, blank again → full model answer in the S7 row above.) |
 
 **Through-line flagged:** the two ⚠️ and the Q5 miss are one habit — **naming the label, not the
-mechanism.** "Gossip"/"SWIM" are labels; *how a node learns second-hand* is the answer. Q2 named the right
-outcome but the wrong *why*. Push for the mechanism on re-ask. The genuinely hard ones (Q1, Q3) were clean,
-so this is a *precision* gap, not a comprehension gap.
+mechanism.** The genuinely hard ones (Q1, Q3) were clean, so this is a *precision* gap, not a comprehension
+gap. Push for the mechanism on re-ask.
 
 ---
 
@@ -285,7 +285,6 @@ Phase 1, step 5. **3 ✅ · 1 ⚠️.**
 `remove(n)` **given a pointer to `n`** — not removal in general. Unlinking needs `n.prev` rewritten, and a
 singly linked node doesn't know who points at it, so you walk from the head. `prev` exists for exactly one
 reason: to make `Get`'s move-to-front O(1). (Evicting the *tail* alone would be fine.)
-Precise; named the predecessor as the cost.
 
 **Q2 — Why `map[string]*node` and not `map[string]node`? — ✅.**
 Map values are **not addressable** (`c.data[k].next = x` doesn't compile), and worse, **a rehash moves values
@@ -293,7 +292,6 @@ to new addresses**. A linked list is a web of pointers *between* nodes; if nodes
 the map would dangle every one. **Values that other values point at need stable identity, and map values have
 none.** Bonus: a `*node` is addressable, so `Get` stopped writing the entry back — `BenchmarkGet` **61.31 →
 52.52 ns**.
-Got copy-semantics and stable addresses; sharpened with the rehash and the addressability link.
 
 **Q3 — Construct a workload where option (c) (evict the tail, let the sweeper cope) serves 0% hit rate
 forever, despite the sweeper running every second. — ⚠️.**
@@ -311,8 +309,7 @@ which point it isn't a sweeper, it's `evictLocked`.
 The root is the global minimum, so `root.expires > now` proves `expires > now` for **all n entries** — an O(1)
 statement about the entire population. A sample can never do that: **absence of evidence is not evidence of
 absence.** What the alternative trades away is not space but **time and complexity** — O(1) with no per-node
-heap index, vs O(log n) plus a `heapIndex` maintained through every sift.
-Heap invariant correct; the trade was misnamed as "space."
+heap index, vs O(log n) plus a `heapIndex` maintained through every sift. (The trade was misnamed as "space.")
 
 ---
 
@@ -323,34 +320,31 @@ Phase 1, step 4. **3 ✅ · 1 ⊘.**
 **Q1 — What does LRU substitute for Bélády's future knowledge? — ✅.**
 **Temporal locality**: a key used recently is likely to be used again soon — the recent past as a proxy for
 the near future. Good proxy: sessions, hot rows, popular products. Bad proxy: a **sequential scan**, where
-each key is touched once and never again.
-Named it, gave both workloads, produced the scan counterexample *unprompted, before it was taught*.
+each key is touched once and never again. (He produced the scan counterexample *unprompted, before it was
+taught*.)
 
 **Q2 — Capacity 3, `{a,b,c}` (`a` least recent). `Get(b)`, `Set(d)`, `Get(a)`? — ✅.**
 `Get(b)` → order `a,c,b`. `Set(d)` evicts `a`. So `Get(a)` **misses**. That last line is the point:
 **eviction is not cleanup; it is a decision about which future request you are willing to lose.**
-Correct victim and reasoning; didn't state the miss.
 
 **Q3 — `lastUsed time.Time` + a scan for the minimum: what's the cost? — ✅.**
 **O(n) per eviction**, under the lock. Worse than `sweepAll`: that ran once a second on a *background*
 goroutine (2.5% of wall time). An eviction scan runs **on the write path, on every `Set`, once full** — and
 full is a cache's *normal steady state*. ~25ms per `Set` at 1M entries. Fix: hash map + doubly linked list →
 O(1) lookup / move-to-front / evict-tail.
-Got O(n) and the write-path tail latency unprompted.
 
 **Q4 — Capacity 1000: 999 corpses + 1 live key. A `Set` arrives. What's evicted? — ⊘.**
 **The live key.** Naive LRU sorts by `lastUsed`; a `Set` *is* an access, so every corpse outranks the live
 key. The cache is now **worse than empty** — 1000 slots serving nothing. Fix: **reclaim a corpse before
 evicting anything live.** Free the capacity that costs nothing to free first.
 Not attempted, but he asked exactly the right question ("does naive LRU evict only from unexpired keys?").
-It doesn't — and the instinct that expiry belongs in the eviction path was right.
 
 ### Aayush's two challenges (both changed the design)
 
 **(a) "Won't LRU evict the corpses anyway? Aren't they least-recently-used most of the time?"**
 No — **recency and expiry are independent orderings** (worked out in full → PROGRESS, Phase 1, corpse-first
-eviction; the model answer also lives in Q4 above and S5 Q8). And "usually right" is not a bound — not when
-the check costs one timestamp comparison. → expiry-aware from commit one.
+eviction). And "usually right" is not a bound — not when the check costs one timestamp comparison. → expiry-
+aware from commit one.
 
 **(b) "Why is eviction happening in `Get`? Eviction is a `Set`."**
 Correct; my trace was wrong. **Our `Get` never inserts.** This is a **cache-aside (look-aside)** store like
@@ -385,7 +379,7 @@ Sampling estimates a population; the population of concern is *expirable* keys. 
 1,000 TTL'd sessions: 20 uniform draws yield an expected **0.002** TTL'd keys. Every sample reads "nothing to
 reclaim," and the sessions rot forever. The estimator isn't noisier — it's **biased into uselessness**. Hence
 Redis's separate `db->expires` dict: **the data structure exists to serve the sampling requirement.**
-Nailed the statistical core unprompted; didn't name the failing workload or the index consequence.
+(Nailed the statistical core unprompted; didn't name the failing workload or the index consequence.)
 
 **Q3 — Why can't the Cache be GC'd while the sweeper runs, and what must the API add? — ✅ / ⊘.**
 **Every running goroutine's stack is a GC root.** The sweeper's stack holds `c`, so `c` is reachable *by
@@ -403,8 +397,7 @@ func (c *Cache) Close() {
 plus `select` on `<-ticker.C` vs `<-c.done`. **`Ticker`, not `Sleep`** — `Sleep` can't be interrupted.
 **`close()`, not send** — closing broadcasts to every receiver forever; a send wakes exactly one.
 Cost, stated plainly: **`Cache` is now a resource, not a value**, and no compiler, vet check, or race detector
-will catch a caller who forgets `Close()`.
-First half exact; second half taught.
+will catch a caller who forgets `Close()`. (First half exact; second half taught.)
 
 ---
 
@@ -416,7 +409,6 @@ Phase 1, step 3. **2 ✅ · 1 ❌ · 1 ⊘.**
 The duration version needs a second field `setAt`, and every read then costs `setAt + ttl` before the compare.
 Storing `expires` does that addition **once, at write time**. Caches are read-heavy — that's the right place
 to pay.
-Got both the extra state and the sufficiency of `now > expires`.
 
 **Q2 — The naive one-timer-per-key bug on overwrite. — ❌.**
 `Set("k","a",30s)`, then at t=2s `Set("k","b",10min)`.
@@ -441,21 +433,18 @@ is plainly on the heap; (2) **introspection** — `Len()`, `Keys()`, a stats end
 Lazy expiry silently sabotages the eviction policy.
 The honest statement: **lazy expiry is correct w.r.t. *value* semantics and wrong w.r.t. *resource*
 semantics.** That seam is exactly where the sweeper goes.
-Flagged as unsure, correctly; the hardest of the four.
 
 **Q4 — A workload that grows unboundedly under lazy expiry alone. — ✅.**
 A **session cache**: 1,000 logins/sec, `session:<uuid>` with a 30-min TTL, read a few times and never again.
 ~50,000 live at any instant; the map grows 1,000/sec **forever** — 86M/day, 99.9% corpses no `Get` will ever
-touch. Logically 50k keys; physically 86M.
-Right mechanism. Later measured: **40.9 MB for 200k keys, surviving a forced GC.**
+touch. Logically 50k keys; physically 86M. (Later measured: **40.9 MB for 200k keys, surviving a forced GC.**)
 
 ---
 
 ## Session 4 — 2026-07-09 · Concurrency, races, and the mutex
 
 Phase 1, step 2. **2 ✅ · 2 ⚠️ · 2 ⊘** (Q5–Q6 taught rather than attempted).
-*(Tally corrected 2026-07-11: long recorded as "4 ✅ · 2 ⊘", but Q2 and Q4 each name a real gap below —
-recognition-vs-recall, and deadlock called starvation. The entries were right; the count wasn't.)*
+*(Tally corrected 2026-07-11: long recorded as "4 ✅ · 2 ⊘", but Q2 and Q4 each name a real gap below.)*
 
 **Q1 — Why do disjoint keys still race? — ✅.**
 100 goroutines write `k0-*`, `k1-*`, … — no key is shared. The *value slots* aren't shared; the map's
@@ -464,7 +453,6 @@ recognition-vs-recall, and deadlock called starvation. The entries were right; t
 goroutines 9 and 11 collided on the same address `0x00c000030780` despite disjoint keys. That address is
 bookkeeping, not a value.
 **A map's invariants span all its entries, so writing disjoint keys still mutates common state.**
-Sharpened to say *which part* of the map.
 
 **Q2 — Data race vs race condition. — ⚠️.**
 A **data race** needs all three: (1) two goroutines touch **the same memory location**, (2) ≥1 is a **write**,
@@ -486,8 +474,7 @@ check-then-act as a **category**; **produced no code — recognition vs recall.*
 The definition needs **at least one** writer, not two. A locked `Set` racing an unlocked `Get` satisfies all
 three conditions — it is a data race, full stop. It is not *caution*, it is *required*. And the consequence is
 worse than staleness: an unlocked read during a **rehash** can follow a bucket pointer into the array being
-torn down. Garbage or a crash.
-Named the mid-expansion rehash unprompted.
+torn down. Garbage or a crash. (Named the mid-expansion rehash unprompted.)
 
 **Q4 — What breaks without `defer`? — ⚠️.**
 ```go
@@ -549,22 +536,26 @@ couldn't take an `RLock` anyway.)
    ever** — the primary has nothing to send and the holders stand down. Looking for the fix too: **permission
    follows the DATA, not the ring position** (the healer is the first owner, in ring order, that actually
    holds the key).
-4. **The deadline's frame of reference** (NEW, from the Session 10 bug — **not yet asked at all**;
-   Session 10 was build-only, no quiz). Re-ask cold: *"A key has 10s of its TTL left. Its primary dies at
-   t=9s, and the heal copies the key onto a new replica at t=11s. What deadline should that copy carry —
-   and what goes wrong if the TTL travels between nodes as a **duration** instead of an **instant**?"*
-   Looking for: the copy must carry **the same absolute instant** the key already had. As a duration, each
-   hop **re-bases** it against the receiver's now — so every heal pushes the deadline further out and a
-   **frequently healed key never dies**. The heal silently defeats the TTL, and the more reliable the
-   healing, the more thoroughly it preserves what should have died. Follow-up if that lands: *"why send the
-   **browser** a remaining duration rather than that same instant?"* (Because the browser would have to read
-   an instant against **its own** clock, and a countdown that disagrees between two laptops gets blamed on
-   the cache. The frame of reference is the whole point in both directions.)
+4. **The deadline's frame of reference** (from the Session 10 bug — **not yet asked at all**). Re-ask cold:
+   *"A key has 10s of its TTL left. Its primary dies at t=9s, and the heal copies the key onto a new replica
+   at t=11s. What deadline should that copy carry — and what goes wrong if the TTL travels between nodes as a
+   **duration** instead of an **instant**?"* Looking for: the copy must carry **the same absolute instant** the
+   key already had. As a duration, each hop **re-bases** it against the receiver's now — so every heal pushes
+   the deadline further out and a **frequently healed key never dies**. Follow-up if that lands: *"why send the
+   **browser** a remaining duration rather than that same instant?"* (Because the browser reads an instant
+   against **its own** clock, and a countdown that disagrees between two laptops gets blamed on the cache. The
+   frame of reference is the whole point in both directions.)
+5. **Why a delete cannot address the owners** (Session 11 — never asked). *"A delete goes to the R nodes the
+   ring names for the key. Name two ways the key survives it. What would a real system add?"* Answer:
+   leftovers from an old ring; a paused holder that heals it back. A **tombstone**.
+6. **Cleanup's ordering** (Session 13 — never asked). *"A node holds a key it does not own. Why may it not just
+   delete it? What must it check first, and why is 'unreachable' not the same answer as 'no'?"* Answer: a
+   surplus copy and the last copy alive are indistinguishable from there. Confirm all R owners hold it. Silence
+   is not consent.
 
 **Retired 2026-07-10 at Aayush's request — do not re-ask.** The Phase 1 carry-forward list (check-then-act,
 compare-don't-remember, starvation mechanism, happens-before, resource semantics, expiry-aware eviction,
-admission control) is closed. The concepts remain taught and are recorded in the session logs above; several
-were also *demonstrated in code* during Phase 1 (expiry-aware eviction in `evictLocked`, resource semantics
-in `Close`, admission control as the reason segmented LRU was deferred). If any resurfaces as a real gap
-during Phase 2+, treat it as new material then, not as a debt to collect. Start a fresh carry-forward list
-from Phase 2 quizzes.
+admission control) is closed. The concepts remain taught and are recorded above; several were also
+*demonstrated in code* during Phase 1 (expiry-aware eviction in `evictLocked`, resource semantics in `Close`,
+admission control as the reason segmented LRU was deferred). If any resurfaces as a real gap during Phase 2+,
+treat it as new material then, not as a debt to collect.

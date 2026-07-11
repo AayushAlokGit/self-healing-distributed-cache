@@ -1,8 +1,6 @@
-// Package notify sends notifications out of the process to a human.
-//
-// The interface is the point. Callers hold a Notifier and describe *what happened*; they
-// never learn how it gets delivered. ntfy is today's transport (ntfy.go) — a mail or Slack
-// sender is a new type in this package and not one line changed anywhere else.
+// Package notify sends notifications out of the process to a human. Callers describe *what
+// happened* and never learn how it is delivered: a mail or Slack sender is a new type in
+// this package and not one line changed anywhere else.
 package notify
 
 import (
@@ -10,7 +8,7 @@ import (
 	"fmt"
 )
 
-// Priority maps onto ntfy's 1..5. Default is the zero value, so a Notification that never
+// Priority maps onto ntfy's 1..5, with Default as the zero value — a Notification that never
 // mentions priority still sends correctly.
 type Priority int
 
@@ -22,8 +20,6 @@ const (
 	Max
 )
 
-// ntfyLevel converts to the 1..5 an ntfy server expects. Kept here (not in ntfy.go) only
-// because it is the one place the mapping is defined.
 func (p Priority) ntfyLevel() int {
 	switch p {
 	case Min:
@@ -39,8 +35,7 @@ func (p Priority) ntfyLevel() int {
 	}
 }
 
-// A Notification is what happened, not how it is delivered. A transport that has no notion
-// of Tags or Click is free to ignore them.
+// A Notification is what happened. A transport with no notion of Tags or Click may ignore them.
 type Notification struct {
 	Title string
 	Body  string
@@ -49,25 +44,22 @@ type Notification struct {
 	Priority
 }
 
-// Notifier delivers a Notification. One method, because that is all any caller needs —
-// a wide interface would force every future transport to implement things nobody calls.
-//
-// Notify must respect ctx, and its error is informational: nothing in this project fails a
-// request because a notification failed.
+// Notifier delivers a Notification. Notify must respect ctx, and its error is informational:
+// nothing in this project fails a request because a notification failed.
 type Notifier interface {
 	Notify(ctx context.Context, n Notification) error
 }
 
-// Nop discards everything. It exists so an unconfigured notifier is still a *usable*
-// Notifier: callers hold a Nop instead of a nil, and no call site needs a nil check.
+// Nop discards everything, so an unconfigured notifier is still a *usable* Notifier: callers
+// hold a Nop rather than a nil, and no call site needs a nil check.
 type Nop struct{}
 
 func (Nop) Notify(context.Context, Notification) error { return nil }
 
 func (Nop) String() string { return "off" }
 
-// Multi sends to every Notifier and reports the first failure, after trying them all —
-// one dead transport must not silence the others.
+// Multi reports the first failure only after trying them all — one dead transport must not
+// silence the others.
 type Multi []Notifier
 
 func (m Multi) Notify(ctx context.Context, n Notification) error {

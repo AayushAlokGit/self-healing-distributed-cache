@@ -11,14 +11,7 @@ we first used it.
 ## Zero values: usable, except when they're not
 
 Go zeroes every variable, and several stdlib types are built so the zero value is usable with **no
-constructor**:
-
-```go
-var mu sync.Mutex       // ready
-var wg sync.WaitGroup   // ready
-var once sync.Once      // ready
-var t time.Time         // valid instant (Jan 1, year 1)
-```
+constructor**: `var mu sync.Mutex`, `var wg sync.WaitGroup`, `var once sync.Once`, `var t time.Time`.
 
 ⚠️ **Channels and maps are the exception.** Their zero value is `nil`:
 
@@ -38,8 +31,8 @@ c := &Cache{
 // mu, closeOnce, wg deliberately left as zero values
 ```
 
-⚠️ **`time.Time`'s zero is a valid instant**, so it works as a "never" sentinel only if you test it
-with `IsZero()` — compare it against `now` and "never" reads as "expired 2000 years ago."
+⚠️ **`time.Time`'s zero is a valid instant** (Jan 1, year 1), so it works as a "never" sentinel only if
+you test it with `IsZero()` — compare it against `now` and "never" reads as "expired 2000 years ago."
 → `entry.expired`
 
 ---
@@ -73,7 +66,8 @@ forever**. That's a *deadlock*, not starvation:
    whoever `Lock`s next
 
 That second half is the *publication barrier*. Atomicity alone doesn't give it: an atomic pointer
-store can publish a pointer to a struct whose fields aren't visible yet.
+store can publish a pointer to a struct whose fields aren't visible yet. (Full argument →
+`QUIZZES.md` S5 Q3.)
 
 ⚠️ **Never copy a mutex** (or a struct containing one). The copies stop excluding each other. Always
 `*Cache`, never `Cache`. `go vet`'s `copylocks` catches it — but **`go test` does not run
@@ -81,7 +75,7 @@ store can publish a pointer to a struct whose fields aren't visible yet.
 
 ### `sync.Once`
 `once.Do(f)` runs `f` exactly once, ever, across all goroutines. Needed because closing a closed
-channel panics (see Channels) and `Close()` gets called twice in real code. → `Cache.Close`
+channel panics and `Close()` gets called twice in real code. → `Cache.Close`
 
 ### `atomic.Pointer[T]`: a field you can swap without taking the lock
 ```go
@@ -324,17 +318,9 @@ it — so TTLs survive an NTP correction or a VM resume, for free.
 drivers. After that you're silently doing wall-clock arithmetic again, and clock jumps come back.
 Matters wherever we serialize entries across nodes.
 
-**`math/rand/v2`.** `rand.New(rand.NewPCG(seed, seed))` for a deterministic generator — a test that
-uses the global `rand` is a test whose failures you can't reproduce. `r.IntN(n)` for a uniform draw,
-`rand.NewZipf(r, s, v, imax)` for a power law.
-
-⚠️ **`rand.NewZipf` returns `nil` when `s <= 1`**, and panics only later, when you *draw* from it.
-The constructor reports the error by handing you something that looks fine. → `hitrate_test.go`
-
 ⚠️ **`time.Now()` has terrible *resolution*, whatever its precision.** It reports nanoseconds and
 advances in ~541µs jumps on this Windows box: **13,397 consecutive calls returned the identical
-instant.** A `Set` is ~100ns, so ~5,400 back-to-back `Set`s share one timestamp. (Same clock seen
-from the other side — you cannot *time* one fast operation — under Testing below.)
+instant.** A `Set` is ~100ns, so ~5,400 back-to-back `Set`s share one timestamp.
 
 Consequence: **you cannot order events by asking a clock.** `lastUsed time.Time` + `Before()` made
 LRU pick its victim *at random* among tied entries (and `range` randomizes the order, so the
@@ -343,6 +329,14 @@ tie-break is random too). The test failed 5 runs in 10 — flakiness, not a clea
 events tie only if they *are* the same event. Costs an increment instead of a clock read, and it is
 the single-node case of the **Lamport clock** problem, where wall clocks on different machines
 disagree and can run backwards. → `Cache.tickLocked`
+(Same clock seen from the measurement side — *you cannot time one fast operation* — under Testing.)
+
+**`math/rand/v2`.** `rand.New(rand.NewPCG(seed, seed))` for a deterministic generator — a test that
+uses the global `rand` is a test whose failures you can't reproduce. `r.IntN(n)` for a uniform draw,
+`rand.NewZipf(r, s, v, imax)` for a power law.
+
+⚠️ **`rand.NewZipf` returns `nil` when `s <= 1`**, and panics only later, when you *draw* from it.
+The constructor reports the error by handing you something that looks fine. → `hitrate_test.go`
 
 **A `time.Duration` round-trips through a string.** `d.String()` gives `"250ms"` / `"2m0s"`;
 `time.ParseDuration` reads it back. Put *that* on the wire, not a float of seconds: `0.001` loses
@@ -400,10 +394,9 @@ sends the body; the first write implies `200`, so call `w.WriteHeader(code)` *be
 want another. `http.Error(w, msg, code)` does both.
 
 **`ServeMux` with method+path patterns (Go 1.22+).** `mux.HandleFunc("GET /kv/{key}", h)` — the method
-is part of the pattern, and `{key}` is a wildcard read back with `r.PathValue("key")`. Before 1.22 you
-parsed the method and path yourself. `"DELETE /kv"` and `"DELETE /kv/{key}"` are two different patterns:
-the first matches `/kv` exactly and does **not** swallow `/kv/foo`. That is how one verb serves both
-"delete this key" and "wipe everything". → `node.New`
+is part of the pattern, and `{key}` is a wildcard read back with `r.PathValue("key")`. `"DELETE /kv"`
+and `"DELETE /kv/{key}"` are two different patterns: the first matches `/kv` exactly and does **not**
+swallow `/kv/foo`. That is how one verb serves both "delete this key" and "wipe everything". → `node.New`
 
 ⚠️ **A `nil` slice marshals to JSON `null`, not `[]`.** `var xs []string` → `null`; `xs := []string{}`
 → `[]`. So a Go API that "returns a list" hands JS a `null` the moment the list is empty, and the first
@@ -418,10 +411,10 @@ via `ln.Addr()` — essential for tests, no port collisions. → `node.Start`
 resource-not-value lesson as the cache sweeper: an `http.Server` owns a goroutine and must be stopped.
 
 ⚠️ **Always `resp.Body.Close()`** on a client response, even if you ignore the body — the connection
-leaks otherwise. `defer resp.Body.Close()` right after the error check. **Close is not enough to *reuse*
-it**: the transport only returns a connection to the keep-alive pool once the body is read to EOF, so a
-response you don't care about still wants `io.Copy(io.Discard, resp.Body)` before the Close. Skip it and
-every call dials a fresh TCP connection. → `notify.Ntfy.Notify`
+leaks otherwise. **Close is not enough to *reuse* it**: the transport only returns a connection to the
+keep-alive pool once the body is read to EOF, so a response you don't care about still wants
+`io.Copy(io.Discard, resp.Body)` before the Close. Skip it and every call dials a fresh TCP connection.
+→ `notify.Ntfy.Notify`
 
 ⚠️⚠️ **`*http.Request` is dead the moment the handler returns, and so is its context.** Two separate traps,
 both fatal to fire-and-forget work (`go doSomething(r)`):
@@ -607,8 +600,6 @@ result in `var sink any` measures the allocator:
 ```go
 var sink any
 sink = time.Now()          // 55 ns/op  ← 8 ns of clock + 47 ns of allocator
-```
-```go
 var sinkTime time.Time
 sinkTime = time.Now()      // 8 ns/op, 0 allocs/op
 ```
@@ -631,13 +622,9 @@ holds. But the algorithm said *constant* and the hardware said *nearly*. **Measu
 `gofmt -l ./cache/` **l**ists files that aren't canonically formatted, printing nothing when clean — a
 check, not a fix. `gofmt -w f.go` **w**rites the fix in place. (`go fmt ./...` wraps `-l -w`.)
 
-**Zero configuration**, unlike `clang-format`'s hundreds of knobs: tabs, sorted imports, aligned struct
-fields, blank lines between declarations. Adding `lastUsed` to `entry` re-aligned the other two fields,
-because `gofmt` aligns a block around its longest name.
-
-It catches **nothing** — layout only; correctness is `go vet` and `-race`. The payoff for giving up the
-knobs: since the output is canonical, **every diff in a Go review is a semantic diff.** No line ever
-changes for style.
+**Zero configuration**, unlike `clang-format`'s hundreds of knobs. It catches **nothing** — layout only;
+correctness is `go vet` and `-race`. The payoff for giving up the knobs: since the output is canonical,
+**every diff in a Go review is a semantic diff.** No line ever changes for style.
 
 ### `runtime` introspection
 ```go
