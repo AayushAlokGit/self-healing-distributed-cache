@@ -16,9 +16,14 @@ Where we are, what's been taught, and what each thing earned. Update at the end 
 
 ## Current status
 
-**Phases 0–6 COMPLETE.** The demo is built, tested under `-race`, and browser-verified. Go 1.26.5;
-HLD **APPROVED**, all six §10 decisions locked. Run it: `go run ./cmd/server` (:8080) and
-`cd frontend && npm run dev` (:5173).
+**Phases 0–6 COMPLETE, and SHIPPED.**
+[Dashboard](https://self-healing-distributed-cache.vercel.app/) (Vercel) ·
+[API](https://self-healing-cache-api.onrender.com/api/state) (Render). Kill→heal→revive verified
+against the live deployment, not just locally: killing `n2` cost **0 keys**, the survivors pushed the
+copies back to R=3, and the revived node came back empty and was repopulated by the heal alone.
+
+The demo is built, tested under `-race`, and browser-verified. Go 1.26.5; HLD **APPROVED**, all six §10
+decisions locked. Run it locally: `go run ./cmd/server` (:8080) and `cd frontend && npm run dev` (:5173).
 
 **Locked decisions** (HLD §10): (1) nodes are goroutines in one process, talking **real HTTP** over
 localhost ports; (2) primary-only write ack, with a W knob added in Phase 3; (3) all-to-all
@@ -26,12 +31,10 @@ heartbeats; (4) HTTP/JSON transport; (5) dashboard polish is a **priority** (it 
 money moment) and must stay static-hostable and free; (6) **R=3**, configurable.
 
 ### Next action — pick one
-- **(a) Deploy** — *config is committed, the clicking is not done.* Backend → **Render** (free, no card,
-  `render.yaml` + `Dockerfile` in the repo); frontend → **Vercel**, root `frontend/`, with
-  `VITE_API_URL` pointing at the Render URL. Then the **writeup**, which should carry two honesty
-  caveats: **cluster-in-a-box** (only the *topology* is collapsed — the protocol is real) and S9 Q5's
-  **no god's-eye view exists** (the dashboard's omniscient state is impossible in a real deployment,
-  because *dead* is a **belief**, not a property; an honest dashboard would show N disagreeing views).
+- **(a) The writeup** ← *recommended; deployment is DONE.* It should carry two honesty caveats:
+  **cluster-in-a-box** (only the *topology* is collapsed — the protocol is real) and S9 Q5's **no
+  god's-eye view exists** (the dashboard's omniscient state is impossible in a real deployment, because
+  *dead* is a **belief**, not a property; an honest dashboard would show N disagreeing views).
 - **(b) Versioned values + read-repair** — the highest-value *code* change. S9 Q4 named why:
   **presence ≠ version.** The heal asks *"do you have key k?"* and a `200` means "somebody has **a**
   value," not "**the** value" — so a divergent key is **skipped and the conflict preserved forever.**

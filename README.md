@@ -1,5 +1,10 @@
 # Self-Healing Distributed Cache
 
+### ▶ **[Live demo](https://self-healing-distributed-cache.vercel.app/)** · [API](https://self-healing-cache-api.onrender.com/api/state)
+
+> ⏳ The backend sleeps when idle on its free tier, so **the first load can take ~30–60 s** while the
+> cluster wakes. The dashboard says so instead of looking broken. Everything after that is instant.
+
 A distributed, replicated in-memory cache built in Go, hand-rolling the core distributed-systems
 algorithms — **consistent hashing, replication, failure detection, and self-healing** — rather than
 importing them. It ships with a live dashboard so you can *see it heal*.
