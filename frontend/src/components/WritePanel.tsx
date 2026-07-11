@@ -12,6 +12,9 @@ const TTLS = [
   { label: '2m', ms: 120_000 },
 ]
 
+// The server rejects a bigger batch than this; keep the two in step (cmd/server/server.go).
+const MAX_SEED = 5000
+
 // parseCustomMs returns the ms, or an error string. Junk is rejected here because
 // Number('') is 0, which would silently write a permanent key instead of an expiring one.
 function parseCustomMs(raw: string): { ms?: number; error?: string } {
@@ -24,13 +27,29 @@ function parseCustomMs(raw: string): { ms?: number; error?: string } {
   return { ms: Math.round(ms) }
 }
 
+// parseSeedCount returns how many keys to seed, or an error string. Number('') is 0 here
+// too, and the server turns an n of 0 into a default batch of 12 — so an empty box would
+// seed 12 keys while the button claimed otherwise. Reject it instead.
+function parseSeedCount(raw: string): { n?: number; error?: string } {
+  const s = raw.trim()
+  if (s === '') return { error: 'enter how many keys to seed' }
+  const n = Number(s)
+  if (!Number.isInteger(n)) return { error: `"${s}" is not a whole number of keys` }
+  if (n < 1) return { error: 'seed at least one key' }
+  if (n > MAX_SEED) return { error: `${MAX_SEED} keys is the most one batch will seed` }
+  return { n }
+}
+
 export function WritePanel({ onAction }: { onAction: () => void }) {
   const [k, setK] = useState('')
   const [v, setV] = useState('')
   const [ttl, setTtl] = useState(0) // ms; 0 = never
   const [custom, setCustom] = useState(false)
   const [customMs, setCustomMs] = useState('')
+  const [seedCount, setSeedCount] = useState('8')
   const { err, run, fail } = useApiError()
+
+  const seedN = parseSeedCount(seedCount)
 
   const write = async () => {
     if (!k.trim()) return
@@ -54,7 +73,13 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
   }
 
   const seed = async () => {
-    await run(() => seedKeys(8))
+    if (seedN.error !== undefined) {
+      fail(seedN.error)
+      return
+    }
+    // Refresh even if the seed failed: Seed stops at the first bad write, so some of the
+    // batch may already be on the ring.
+    await run(() => seedKeys(seedN.n!))
     onAction()
   }
 
@@ -117,7 +142,21 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
       </button>
 
       <div className="spacer" />
-      <button onClick={seed}>Seed 8 more keys</button>
+      <div className="seed-row">
+        <input
+          type="number"
+          min={1}
+          max={MAX_SEED}
+          step={1}
+          value={seedCount}
+          onChange={(e) => setSeedCount(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && seed()}
+          aria-label="number of keys to seed"
+        />
+        <button onClick={seed}>
+          {seedN.error !== undefined ? 'Seed keys' : `Seed ${seedN.n} ${seedN.n === 1 ? 'key' : 'keys'}`}
+        </button>
+      </div>
       <ErrorLine err={err} />
     </div>
   )

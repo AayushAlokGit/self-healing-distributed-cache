@@ -2,12 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
 )
+
+// maxSeed bounds one POST /api/seed batch. The dashboard stops the user lower
+// (MAX_SEED in frontend/src/components/WritePanel.tsx), but this is the copy that
+// enforces anything at all, since a client can curl the API directly.
+const maxSeed = 5000
 
 // routes wires the control API. The UI is the React app in frontend/, served
 // separately (Vite in dev, a static host in prod) and talking to this API.
@@ -72,6 +78,13 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		}
 		if body.N <= 0 {
 			body.N = 12
+		}
+		// Seed writes the whole batch synchronously before replying, so an unbounded n is a
+		// request that never returns. Refuse rather than clamp: seeding fewer keys than the
+		// caller asked for, without saying so, reads as a bug from the other side.
+		if body.N > maxSeed {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("seed n=%d exceeds the limit of %d keys per batch", body.N, maxSeed))
+			return
 		}
 		if err := c.Seed(body.N); err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
