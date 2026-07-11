@@ -1,18 +1,14 @@
 package main
 
 import (
-	"embed"
 	"encoding/json"
-	"io/fs"
 	"net/http"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
 )
 
-//go:embed web
-var webFS embed.FS
-
-// routes wires the control API and the static dashboard.
+// routes wires the control API. The UI is the React app in frontend/, served
+// separately (Vite in dev, a static host in prod) and talking to this API.
 func routes(c *cluster.Cluster) http.Handler {
 	mux := http.NewServeMux()
 
@@ -83,11 +79,32 @@ func routes(c *cluster.Cluster) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	// Static dashboard, served from the embedded web/ directory at the root.
-	sub, _ := fs.Sub(webFS, "web")
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	// A hint at the root, since the UI lives elsewhere now.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"service": "self-healing-distributed-cache control API",
+			"ui":      "run the React app in frontend/ (npm run dev), or see /api/state",
+		})
+	})
 
-	return mux
+	// CORS so the React app (a different origin in dev via Vite's proxy, or a
+	// separate static host in prod) can call the API.
+	return withCORS(mux)
+}
+
+// withCORS allows any origin to call the control API — fine for a demo whose
+// whole point is to be poked at. Answers preflight OPTIONS directly.
+func withCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // nodeAction adapts a func(id) error (Kill/Revive) into a handler reading {id}.

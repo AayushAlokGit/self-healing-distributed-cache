@@ -345,12 +345,12 @@ var webFS embed.FS
 The directive must touch the var (no blank line), and the path is relative to the `.go` file — you
 can't reach `../`. `fs.Sub(webFS, "web")` strips the prefix so `http.FileServer(http.FS(sub))` serves
 `web/index.html` at `/`. Result: one self-contained binary, no external asset directory to ship — but
-**editing the embedded file means rebuilding**, which is the iteration cost. → `cmd/democache`
+**editing the embedded file means rebuilding**, which is the iteration cost. → `cmd/server`
 
 **`signal.NotifyContext`** turns Ctrl-C into a cancelled `context`: `ctx, stop := signal.NotifyContext(
 ctx, os.Interrupt)`, then `<-ctx.Done()` blocks until the signal. Cleaner than a raw `signal.Notify`
 channel, and the ctx composes with `srv.Shutdown(ctx)`. "Stop the users, then stop the thing they
-use": `srv.Shutdown` first, then `cluster.Close()`. → `cmd/democache/main`
+use": `srv.Shutdown` first, then `cluster.Close()`. → `cmd/server/main`
 
 ---
 

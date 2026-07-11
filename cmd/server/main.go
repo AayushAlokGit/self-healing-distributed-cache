@@ -1,6 +1,7 @@
-// Command democache runs the whole cluster-in-a-box behind a dashboard: N cache
-// nodes as goroutines in one process, an HTTP control API, and the static UI that
-// visualizes the ring and drives the failure-injection demo.
+// Command server runs the whole cluster-in-a-box behind a control API: N cache
+// nodes as goroutines in one process, plus an HTTP API the React frontend (see
+// frontend/) drives to visualize the ring and inject failures. A legacy
+// zero-dependency dashboard is embedded at / as a fallback.
 package main
 
 import (

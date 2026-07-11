@@ -12,16 +12,34 @@ keeps serving.
 > replication**, collapsed onto a single container so it's free to host. The protocol is real; only
 > the physical spread is collapsed.
 
+## Architecture
+
+- **Backend** (`cmd/server`, Go) — runs the cluster-in-a-box and exposes a JSON control API on
+  `:8080` (`/api/state`, `/api/kill`, `/api/revive`, `/api/pause`, `/api/set`, `/api/get`, `/api/seed`).
+- **Frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard, talking to the API. It builds
+  to static files, so in production the FE deploys to a free static host and the Go API to a free
+  container — the HLD's "static frontend + one backend container."
+
 ## Run the demo
 
+Two processes. **Terminal 1 — backend:**
+
 ```
-go run ./cmd/democache
+go run ./cmd/server
 ```
 
-Open **http://localhost:8080** and:
+**Terminal 2 — frontend:**
 
-1. **Kill a node.** It greys out; its keys drop to two copies (the dashboard flags them
-   *re-replicating…*) and reads keep serving from the survivors via fallback.
+```
+cd frontend
+npm install     # first time only
+npm run dev
+```
+
+Open **http://localhost:5173** (Vite proxies `/api` to the Go backend on `:8080`). Then:
+
+1. **Kill a node.** It greys out; its keys drop to two copies (the ring flags them *re-replicating…*)
+   and reads keep serving from the survivors via fallback.
 2. A grace period later the cluster **restores R=3 on its own** — the heal-copies counter climbs and
    every key is back to three holders. No data lost, no client involved.
 3. **Read a key** any time to confirm it still serves.
@@ -29,7 +47,7 @@ Open **http://localhost:8080** and:
    but the grace period withholds the expensive re-replication — resume it in time and nothing is
    copied. That's the difference between a cheap reversible reroute and an expensive irreversible copy.
 
-Flags: `-addr :8080`, `-grace 2s` (heal grace period), `-seed 12` (keys to preload).
+Backend flags: `-addr :8080`, `-grace 2s` (heal grace period), `-seed 12` (keys to preload).
 
 ## Status — complete
 
@@ -67,7 +85,8 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
 | `ring/` | Consistent-hashing ring with virtual nodes |
 | `node/` | A cache behind HTTP: coordinating role, replication, heartbeats, self-heal |
 | `cluster/` | Cluster-in-a-box manager + god's-eye state and failure-injection controls |
-| `cmd/democache/` | The dashboard: control API + embedded single-page UI |
+| `cmd/server/` | Backend: the JSON control API over the cluster |
+| `frontend/` | React + Vite + TypeScript dashboard (the animated hash-ring UI) |
 | `docs/` | Roadmap, high-level design, progress log, quizzes, Go notes |
 
 ## Tests

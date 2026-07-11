@@ -7,16 +7,17 @@ session and after each milestone. Newest entries at the top of the log.
 - **Phase:** **Phases 0–6 COMPLETE — the demo is built, working, and browser-verified.** Go 1.26.5;
   HLD APPROVED, all 6 §10 decisions LOCKED. **Session 7 (2026-07-10):** re-asked Q4 ✅ / Q6 taught;
   built the full self-heal arc (Phase 5: naive re-replication → storm demo → grace-period fix); then
-  **built Phase 6 — the dashboard** (`cluster/` cluster-in-a-box manager, `cmd/democache/` control API
-  + embedded flashy SVG ring UI). `go run ./cmd/democache` → http://localhost:8080. Both halves of the
-  money moment (kill → reroute *and* re-replicate) are visible and interactive; verified live in a
-  real browser. See the Phase 5 and Phase 6 checklists.
+  **built Phase 6 — the dashboard**: `cluster/` cluster-in-a-box manager, `cmd/server/` Go control
+  API, and a **React + Vite + TypeScript frontend** (`frontend/`) with an animated SVG hash ring.
+  Backend `go run ./cmd/server` (:8080); frontend `cd frontend && npm run dev` (:5173, proxies
+  `/api`). Both halves of the money moment (kill → reroute *and* re-replicate) are visible and
+  interactive; verified live in a real browser. See the Phase 5 and Phase 6 checklists.
 - **Locked decisions:** (1) nodes = goroutines in one process, real HTTP over localhost ports;
   (2) primary-only write ack to start, W-ack knob added in Phase 3; (3) all-to-all heartbeats;
   (4) HTTP/JSON transport; (5) dashboard — **polish is a priority** (recruiter-facing money moment);
   framework/viz-library OK if it elevates the demo, must stay static-hostable + free; (6) **R=3**,
   configurable.
-- **Next action:** **The core project and demo are COMPLETE (Phases 0–6).** `go run ./cmd/democache`.
+- **Next action:** **The core project and demo are COMPLETE (Phases 0–6).** `go run ./cmd/server`.
   **Candidate next steps (all optional polish):** (a) **milestone quizzes** for Phase 5 and Phase 6
   (the per-phase review the ritual calls for — not yet taken); (b) optimize the naive heal to copy
   only *actually under-replicated* keys to the *newcomer* (not every primary key to every co-owner);
@@ -139,8 +140,16 @@ Mark ☑ when taught AND the quick-check quiz was passed.
   node so peers still detect via heartbeat; Revive brings it back on a fresh port via
   `node.SetPeerAddr` (no liveness reset). Proven under `-race` (`cluster_test.go`): seed → kill
   primary → reads keep serving → heal restores R=3; grace absorbs a false positive.
-- ☑ Control API + static dashboard (`cmd/democache/`) — `go run ./cmd/democache` → one binary, HTTP
-  API (`/api/state|set|get|seed|kill|revive|pause`) + embedded single-page UI (`go:embed web/`).
+- ☑ Control API (`cmd/server/`, renamed from `cmd/democache`) — `go run ./cmd/server` → JSON API on
+  :8080 (`/api/state|set|get|seed|kill|revive|pause`), now **API-only** with permissive CORS. (First
+  shipped an embedded `go:embed` vanilla dashboard; that was removed once the React app landed.)
+- ☑ **React frontend** (`frontend/`, React + Vite + TypeScript) — the dashboard migrated out of the
+  Go binary into its own app that talks to the API (Vite proxies `/api`→:8080 in dev; builds to
+  static files for free hosting = HLD's "static FE + one backend container"). Componentized:
+  `useClusterState` polling hook (keeps prev for animation diffing), `RingViz` (declarative SVG +
+  an imperative particle layer for packets/shockwaves), `Stats`/`NodePanel`/`KeysPanel`/`ActivityLog`.
+  **Verified live in-browser**: renders identically, kill→heal (0→24 copies, 0 data lost) + activity
+  log, read serves "v0", no app console errors.
 - ☑ Ring viz + failure-injection controls — dark control-room SVG ring: per-node neon colors, ~150
   virtual-point ticks (the real load spread), evenly-spaced node markers with heartbeat halos, key
   dots on true hash angles with ownership links, **red pulse on under-replicated keys**, **packets

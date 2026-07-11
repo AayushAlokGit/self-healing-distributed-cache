@@ -1,0 +1,33 @@
+// Ring geometry and the per-node color palette, shared across components.
+
+import type { NodeState } from './api'
+
+export const CX = 360
+export const CY = 360
+export const RING = 250
+export const NODE_R = 298 // node markers, just outside the ring
+export const KEY_R = 205 // key dots, just inside
+
+export const COLORS: Record<string, string> = {
+  n0: '#22d3ee',
+  n1: '#a78bfa',
+  n2: '#fb7185',
+  n3: '#fbbf24',
+  n4: '#34d399',
+}
+export const colorFor = (id: string) => COLORS[id] ?? '#8ea3c4'
+
+// angleDeg is measured clockwise from the top (12 o'clock).
+export function xy(angleDeg: number, r: number): [number, number] {
+  const a = (angleDeg * Math.PI) / 180
+  return [CX + r * Math.sin(a), CY - r * Math.cos(a)]
+}
+
+// Node markers are spread evenly for legibility. A physical node has ~150
+// scattered ring points (the ticks show the real spread), so no single angle is
+// "true" — even spacing is the honest, readable choice.
+export function markerAngles(nodes: NodeState[]): Record<string, number> {
+  const m: Record<string, number> = {}
+  nodes.forEach((n, i) => (m[n.id] = (i / nodes.length) * 360))
+  return m
+}
