@@ -12,12 +12,9 @@ func fillExpiring(c *Cache, n int, ttl time.Duration) {
 	}
 }
 
-// The point of the rewrite, against TestSweepStallsReaders' 751x:
-//
-//	gets in 500ms:  no sweep = 6,606,691   during sampling = 3,362,694   (2.0x)
-//
-// The residual 2.0x is not a stall — this sweeps flat out, so two goroutines
-// split one mutex. The real sweepLoop costs ~7µs/s, 0.0007% of wall time.
+// Counterpart to TestSweepStallsReaders' 751x. The residual ~2x here is not a stall:
+// this sweeps flat out, so two goroutines split one mutex, where the real sweepLoop
+// costs ~7µs/s.
 func TestSampleSweepDoesNotStallReaders(t *testing.T) {
 	const (
 		keys   = 1_000_000
@@ -57,14 +54,9 @@ func TestSampleSweepDoesNotStallReaders(t *testing.T) {
 	}
 }
 
-// Sampling is never exactly clean, but must converge:
-//
-//	reclaimed 50000 corpses in 2 sampleSweep calls, Len()=0
-//
-// A sample that comes back 100% expired fails expiredThreshold and passes again
-// immediately, so the reclaim rate tracks the expiry rate — 20 keys per pass is
-// not 20 keys per interval. A healthy cache's first sample is clean and
-// sampleSweep returns in ~1µs.
+// Sampling is never exactly clean, but must converge: a sample that comes back 100%
+// expired fails expiredThreshold and passes again immediately, so the reclaim rate
+// tracks the expiry rate — 20 keys per pass is not 20 keys per interval.
 func TestSampleSweepReclaimsCorpses(t *testing.T) {
 	const keys = 50_000
 
@@ -92,9 +84,8 @@ func TestSampleSweepReclaimsCorpses(t *testing.T) {
 	}
 }
 
-// Without the expiring index, 20 keys drawn from 100k permanent + 100 expiring
-// would find an expired one almost never, and the sampler would idle while the
-// 100 rot.
+// Without the expiring index, 20 keys drawn from 100k permanent + 100 expiring would
+// find an expired one almost never, and the sampler would idle while the 100 rot.
 func TestSampleSweepIgnoresPermanentKeys(t *testing.T) {
 	const (
 		permanent = 100_000
@@ -125,8 +116,8 @@ func TestSampleSweepIgnoresPermanentKeys(t *testing.T) {
 	}
 }
 
-// data and expiring must agree. Three sites mutate data, so three must mutate
-// the index — including Set overwriting a TTL'd key with a permanent one.
+// data and expiring must agree. Three sites mutate data, so three must mutate the
+// index — including Set overwriting a TTL'd key with a permanent one.
 func TestExpiringIndexStaysConsistent(t *testing.T) {
 	c := newWithSweepInterval(noLimit, time.Hour)
 	defer c.Close()
@@ -150,20 +141,9 @@ func TestExpiringIndexStaysConsistent(t *testing.T) {
 	}
 }
 
-// Sampling vs the full scan (BenchmarkSweep), same sizes:
-//
-//	1k        553.7 ns  vs      24,380 ns      44x
-//	10k       533.4 ns  vs     242,371 ns     454x
-//	100k      750.0 ns  vs   2,351,620 ns   3,136x
-//	1M      2,105   ns  vs  27,489,911 ns  13,059x
-//
-// The pause is NOT constant, as once claimed: 3.8x growth over 1000x the data.
-// It touches exactly sampleSize keys at every size; what changes is what a touch
-// costs, as every random bucket probe becomes a cache and TLB miss. The full
-// scan grew 1,128x over the same range. Flat-ish vs linear, not constant.
-//
-// Was 952.9 / 1,049 / 1,756 / 7,064 ns before expiring became a map to *node:
-// the pass no longer looks each sampled key up in data a second time.
+// The pause is not constant: it touches exactly sampleSize keys at every size, but a
+// random bucket probe becomes a cache and TLB miss as the map grows. Flat-ish, not
+// constant — and still ~13,000x cheaper than BenchmarkSweep at 1M keys.
 func BenchmarkSamplePass(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000, 1_000_000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {

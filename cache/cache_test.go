@@ -32,8 +32,8 @@ func TestMiss(t *testing.T) {
 	}
 }
 
-// A key deliberately storing "" must be a hit, so callers can tell an empty
-// value from a missing key.
+// A key deliberately storing "" must be a hit, so callers can tell an empty value
+// from a missing key.
 func TestEmptyValueIsAHit(t *testing.T) {
 	c := New(noLimit)
 	defer c.Close()
@@ -48,9 +48,6 @@ func TestEmptyValueIsAHit(t *testing.T) {
 	}
 }
 
-// Sleeping in tests is a smell: it's slow and it flakes on a loaded machine.
-// The sweeper (step 3b) will want an injectable clock so we can advance time
-// instead of waiting for it.
 func TestTTLExpires(t *testing.T) {
 	c := New(noLimit)
 	defer c.Close()
@@ -67,8 +64,8 @@ func TestTTLExpires(t *testing.T) {
 	}
 }
 
-// Guards the ttl <= 0 sentinel: without it, a zero ttl would compute
-// expires = now and the key would die on its own birth.
+// Guards the ttl <= 0 sentinel: without it, a zero ttl would compute expires = now
+// and the key would die on its own birth.
 func TestZeroTTLNeverExpires(t *testing.T) {
 	c := New(noLimit)
 	defer c.Close()
@@ -81,14 +78,8 @@ func TestZeroTTLNeverExpires(t *testing.T) {
 	}
 }
 
-// The bug the naive one-timer-per-key design had: the first Set's timer would
-// fire at t=300ms and delete the *second* Set's value, which still had most of
-// its life left. Storing a deadline to compare, rather than scheduling an event
-// to remember, makes that unrepresentable.
-//
-// Both halves are asserted: the old deadline stops applying, and the new one
-// starts. Checking only the first would pass even if overwrite wrongly made the
-// key permanent.
+// Both halves are asserted: the old deadline must stop applying and the new one must
+// start. Checking only the first would pass even if overwrite made the key permanent.
 func TestOverwriteResetsDeadline(t *testing.T) {
 	c := New(noLimit)
 	defer c.Close()
@@ -112,8 +103,8 @@ func TestOverwriteResetsDeadline(t *testing.T) {
 	}
 }
 
-// Delete-on-read is invisible through Get — an expired key reads as a miss
-// whether or not it was removed — so this reaches into c.data directly.
+// Delete-on-read is invisible through Get — an expired key reads as a miss whether
+// or not it was removed — so this reaches into c.data directly.
 func TestExpiredKeyIsDeletedOnRead(t *testing.T) {
 	c := New(noLimit)
 	defer c.Close()

@@ -50,8 +50,8 @@ func TestNoLimitNeverEvicts(t *testing.T) {
 	}
 }
 
-// Guards the bug where Set evicts unconditionally: at capacity 2,
-// c.Set("a", ...) would evict "a" itself.
+// Guards the bug where Set evicts unconditionally: at capacity 2, c.Set("a", ...)
+// would evict "a" itself.
 func TestOverwriteDoesNotEvict(t *testing.T) {
 	c := newWithSweepInterval(2, time.Hour)
 	defer c.Close()
@@ -88,8 +88,8 @@ func TestEvictsLeastRecentlyUsed(t *testing.T) {
 	has(t, c, "d")
 }
 
-// Every corpse here was Set after the live key was last touched, so plain LRU
-// evicts the one entry worth keeping and holds on to 999 dead ones.
+// Every corpse here was Set after the live key was last touched, so plain LRU evicts
+// the one entry worth keeping and holds on to 999 dead ones.
 func TestEvictsCorpseBeforeLiveKey(t *testing.T) {
 	const capacity = 1000
 
@@ -145,22 +145,14 @@ func TestRecencyListMatchesMap(t *testing.T) {
 	}
 }
 
-// The claim in evictLocked, measured against 1-(1-density)^evictProbeSize:
+// Checks evictLocked's probe against 1-(1-density)^evictProbeSize. Only the ends are
+// asserted: at density 0.99 the probe must never miss, since a miss there evicts the
+// one live key; at 0.001 it almost always misses, and that costs one wasted slot in a
+// thousand.
 //
-//	density 0.001   probe hit   2%   (theory   2%)
-//	density 0.010   probe hit  16%   (theory  18%)
-//	density 0.100   probe hit  88%   (theory  88%)
-//	density 0.500   probe hit 100%   (theory 100%)
-//	density 0.990   probe hit 100%   (theory 100%)
-//
-// Only the ends matter. At 0.99 the probe never misses — that is quiz S4d Q4,
-// where missing means evicting the one live key and keeping 999 corpses. At
-// 0.001 it almost always misses, and the miss costs one wasted slot in a
-// thousand, which the sweeper collects within the second.
-//
-// The live keys go in first, so the LRU tail is always live and the fallback
-// always costs a real entry. Deadlines are backdated rather than slept through:
-// a 1ns TTL is not expired until the clock ticks, and it does so every 541µs.
+// The live keys go in first, so the LRU tail is always live and the fallback always
+// costs a real entry. Deadlines are backdated rather than slept through: a 1ns TTL is
+// not expired until the clock ticks, and it does so every 541µs.
 func TestEvictionProbeTracksCorpseDensity(t *testing.T) {
 	const (
 		keys   = 1_000
@@ -234,19 +226,6 @@ func TestEvictsLiveKeyWhenNoCorpseExists(t *testing.T) {
 	}
 }
 
-// The victim scan, before and after the recency list:
-//
-//	         scan for min lastUsed   unlink the tail
-//	  1k          22,843 ns/op          410.1 ns/op       56x
-//	 10k         223,358 ns/op          489.3 ns/op      456x
-//	100k       2,010,846 ns/op          452.4 ns/op    4,445x
-//	  1M      25,608,480 ns/op          579.4 ns/op   44,199x
-//
-// The scan cost 23 ns/key — BenchmarkSweep's 27.5 ns/key, because it was the
-// same loop, moved onto the caller's goroutine and run on every Set. The list
-// is flat: 1.4x over 1000x the data, which is cache and TLB misses, not work.
-//
-// The 2 allocs/op are the node and the key string, not the eviction.
 func BenchmarkSetAtCapacity(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000, 1_000_000} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {

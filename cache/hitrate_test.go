@@ -1,6 +1,3 @@
-// Hit rate, not latency, is the metric for an eviction policy: a cache that
-// instantly evicts exactly the wrong key has excellent latency. Numbers below
-// are measured, not predicted; nothing asserts on them exactly.
 package cache
 
 import (
@@ -15,7 +12,6 @@ const capacity = 1_000
 // request is the cache-aside read path: on a miss the application queries the
 // database and fills the cache. The cache never chooses to admit a key — it is
 // handed one ordinary Set, with no flag saying "this came from a batch job."
-// That is how a scan pollutes a cache that never agreed to hold it.
 func request(c *Cache, key string) bool {
 	if _, ok := c.Get(key); ok {
 		return true
@@ -35,7 +31,7 @@ func hitRate(c *Cache, next func() string, requests int) float64 {
 }
 
 // zipfKeys models real traffic: the k-th most popular key is requested ~1/k^s as
-// often as the first. A few keys carry most of the load.
+// often as the first.
 //
 // ⚠️ rand.NewZipf returns nil for s <= 1, and panics only when you draw from it.
 func zipfKeys(keyspace uint64, s float64) func() string {
@@ -43,15 +39,15 @@ func zipfKeys(keyspace uint64, s float64) func() string {
 	return func() string { return "hot:" + strconv.FormatUint(z.Uint64(), 10) }
 }
 
-// uniformKeys models a flat working set: every key equally likely, so every
-// cached entry is worth exactly as much as every other.
+// uniformKeys models a flat working set: every key equally likely, so every cached
+// entry is worth exactly as much as every other.
 func uniformKeys(working int) func() string {
 	r := rand.New(rand.NewPCG(1, 1))
 	return func() string { return "hot:" + strconv.Itoa(r.IntN(working)) }
 }
 
-// loopKeys walks a working set in order, forever — a report, a nightly job, a
-// table scan repeated every hour.
+// loopKeys walks a working set in order, forever — a report, a nightly job, a table
+// scan repeated every hour.
 func loopKeys(working int) func() string {
 	i := 0
 	return func() string {
@@ -62,8 +58,8 @@ func loopKeys(working int) func() string {
 }
 
 // interleave runs a user workload while a batch job scans, one scan request per
-// perScan user requests, and returns the hit rate of the USER traffic alone —
-// the scan's own requests always miss and are not the application's problem.
+// perScan user requests, and returns the hit rate of the USER traffic alone: the
+// scan's own requests always miss and are not the application's problem.
 func interleave(c *Cache, next func() string, requests, perScan int) float64 {
 	hits, scanned := 0, 0
 	for i := range requests {
@@ -84,20 +80,9 @@ func warm(next func() string) (*Cache, float64) {
 	return c, hitRate(c, next, 20_000)
 }
 
-// LRU does not degrade. It falls off a cliff.
-//
-//	cyclic loop over  900 keys (capacity 1000)   100.0%
-//	cyclic loop over 1100 keys (capacity 1000)     0.0%
-//
-// A 22% wider working set turns a perfect cache into a useless one. Every key is
-// evicted exactly one request before it is wanted again: by the time the loop
-// comes back to key 0, keys 1..1000 have pushed it off the tail. This is LRU's
-// bet on temporal locality losing outright — a loop has locality, just at a
-// distance one entry beyond what the cache can hold.
-//
-// Bélády's optimal policy would keep 1000 of the keys and cycle the remaining
-// 100, scoring ~91%. MRU — evict the *most* recent — would score ~91% here too.
-// Nothing about a smaller cache is the problem; the policy is.
+// LRU does not degrade, it falls off a cliff: a cyclic working set 100 keys wider
+// than the cache goes from 100% hits to 0%. Every key is evicted exactly one request
+// before it is wanted again.
 func TestLRUFallsOffACliffWhenTheWorkingSetGrows(t *testing.T) {
 	for _, working := range []int{capacity - 100, capacity + 100} {
 		c, steady := warm(loopKeys(working))
@@ -113,19 +98,9 @@ func TestLRUFallsOffACliffWhenTheWorkingSetGrows(t *testing.T) {
 	}
 }
 
-// The scan that costs money: a batch job running while user traffic continues.
-// Every scan request evicts a working-set key, which the next user request must
-// reload, which evicts another. The cache thrashes for the job's whole duration.
-//
-//	uniform working set 900, capacity 1000
-//	  no batch job                 100.0%
-//	  1 scan request per 10 user    89.2%
-//	  1 scan request per  4 user    76.0%
-//	  1 scan request per  1 user    47.7%
-//
-// A flat working set is the vulnerable shape: every cached entry is worth as
-// much as every other, so a stolen slot is a lost hit. Compare
-// TestZipfTrafficShrugsOffAScan, where it barely registers.
+// A batch job running alongside user traffic thrashes a FLAT working set: every scan
+// request evicts a working-set key, which the next user request must reload. This is
+// the shape scan resistance would have to fix. Compare TestZipfTrafficShrugsOffAScan.
 func TestScanStarvesAFlatWorkingSet(t *testing.T) {
 	const working = 900
 
@@ -148,24 +123,10 @@ func TestScanStarvesAFlatWorkingSet(t *testing.T) {
 	}
 }
 
-// The negative result, and the reason we are NOT building segmented LRU yet.
-//
-//	zipf s=1.1 over 10k keys, capacity 1000
-//	  no batch job                  78.2%
-//	  1 scan request per 10 user    75.4%
-//	  1 scan request per  4 user    72.7%
-//	  1 scan request per  1 user    65.6%
-//
-// Real traffic is a power law, and a power law's working set is tiny. The top
-// hundred keys carry most of the load, get re-requested every few operations,
-// and never drift near the tail. The scan's keys, touched once, sink to the tail
-// immediately and evict EACH OTHER. The scan chews on a slice of the cache and
-// leaves the hot core alone.
-//
-// A batch job issuing as many requests as every user combined costs 12.6 points.
-// Real, and not the collapse this project asserted for four sessions before
-// measuring it. Scan resistance is earned by TestScanStarvesAFlatWorkingSet, not
-// by this workload.
+// The negative result, and the reason segmented LRU is not being built: a power law's
+// working set is tiny, so the hot core never drifts near the tail and the scan's keys
+// evict each other. A scan at parity with all user traffic costs ~12 points, not a
+// collapse.
 func TestZipfTrafficShrugsOffAScan(t *testing.T) {
 	const (
 		keyspace = 10_000
