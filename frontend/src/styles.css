@@ -49,6 +49,8 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted); }
 .stat .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
 .stat .v.pop { animation: pop 0.5s ease; }
+/* Surplus copies are not an error — the cluster is serving fine — just a debt cleanup owes. */
+.stat .v.surplus { color: rgb(var(--warn)); }
 @keyframes pop { 0% { transform: scale(1); } 35% { transform: scale(1.28); color: rgb(var(--cyan)); } 100% { transform: scale(1); } }
 
 .grid { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(330px, 0.85fr); gap: 20px; align-items: start; }
@@ -200,6 +202,9 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
    louder colour: it is the one a client can actually observe. */
 .tag.expire { --tag: var(--warn); --tag-ink: #ffd280; }
 .tag.reclaim { --tag: var(--steel); --tag-ink: var(--muted); }
+/* cleanup is heal running backwards — the surplus copies a heal left behind — so it takes
+   heal's green, muted: no client can observe it, and nothing is lost. */
+.tag.cleanup { --tag: var(--ok); --tag-ink: var(--ok-ink); }
 
 /* One block = one fault plus the heal copies it caused, nested under it. */
 .block { border-bottom: 1px solid rgb(var(--steel) / 0.06); padding: 3px 0; }

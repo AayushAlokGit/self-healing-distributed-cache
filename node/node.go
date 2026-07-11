@@ -86,16 +86,22 @@ type Node struct {
 	// membership changes schedules exactly one heal pass.
 	healTrigger chan struct{}
 
-	// healCopies counts key copies pushed during heals, cumulative.
-	healCopies atomic.Int64
+	// healCopies counts key copies pushed during heals, cumulative. cleanupDropped is its
+	// mirror image: surplus copies discarded, the only thing that stops heal being a ratchet.
+	healCopies     atomic.Int64
+	cleanupDropped atomic.Int64
 
 	// healLog records what each heal pass moved; the manager drains it. The heal
 	// goroutine must not call back up into the manager: Kill holds the manager's lock
 	// while Close waits for this goroutine, so a callback would invert lock order and
 	// deadlock.
+	//
+	// cleanupLog is the same contract for the cleanup pass, and shares healLogMu: both are
+	// written only by the heal goroutine and drained only by the manager.
 	healLogMu  sync.Mutex
 	healLog    []HealCopy
-	healCauses []string // membership changes seen since the last heal pass
+	cleanupLog [][]string // one entry per pass: the keys it dropped
+	healCauses []string   // membership changes seen since the last heal pass
 
 	// healthPaused stalls this node's /health responses without stopping the rest of
 	// it: a live node that looks dead to peers, for the false-positive demo.
@@ -534,7 +540,127 @@ func (n *Node) heal() {
 	}
 
 	n.recordHeal(moved, causes)
+
+	// After the copying, never before: cleanup asks the owners whether they hold a key, and
+	// a key this pass is about to copy to them is one they do not hold *yet*.
+	n.cleanup()
 }
+
+// cleanup drops the copies this node holds but no longer owns — the counterweight to heal,
+// which only ever COPIES. Without it every kill/revive leaves surplus copies behind for good
+// and R creeps toward N: the sharding given away one outage at a time.
+//
+// ⚠️ Confirm, THEN drop. A copy goes only if every one of the key's R owners answers that it
+// holds the key; an owner that says no, or cannot be reached, ends the matter. A surplus copy
+// and the last copy alive look identical from here — asking is the only thing that tells them
+// apart, and reversing the order makes this a data-loss bug.
+// See TestCleanupDropsOnlyWhatEveryOwnerConfirms.
+//
+// Two non-owners dropping the same key concurrently is safe: neither is an owner and each
+// drops only after all R owners confirm, so the count cannot fall below R however they
+// interleave. An owner never reaches the drop, so the owners cannot clean each other up.
+//
+// ⚠️ It assumes the dropped copy is no fresher than the owners'. Writes go to owners, so that
+// holds — except for a write a *down* owner missed, which heal's presence check will not
+// repair. Cleanup can therefore discard a fresher copy and keep a staler one. No client can
+// observe it (reads only ask owners), but it is presence≠version, and only versions close it.
+func (n *Node) cleanup() {
+	start := time.Now()
+	log := n.logger()
+
+	dropped := make([]string, 0, 8)
+	var kept int
+
+	for key := range n.cache.Snapshot() {
+		select {
+		case <-n.done:
+			return
+		default:
+		}
+
+		owners := n.ownersFor(key)
+		if len(owners) == 0 {
+			continue // no ring, or nobody alive: not the moment to be discarding data
+		}
+		if slices.ContainsFunc(owners, func(o owner) bool { return o.id == n.id }) {
+			continue // I own this key. Holding it is the point.
+		}
+
+		// I am not an owner. Every owner must confirm it holds the key before I let go.
+		confirmed := true
+		for _, o := range owners {
+			_, has, err := n.fetchFrom(o.addr, key)
+			if err != nil || !has {
+				confirmed = false
+				log.Debug("cleanup: keeping a key I do not own — an owner cannot confirm it",
+					"key", key, "owner", o.id, "reachable", err == nil, "has", has)
+				break
+			}
+		}
+		if !confirmed {
+			kept++
+			continue
+		}
+
+		if n.cache.Delete(key) {
+			dropped = append(dropped, key)
+		}
+	}
+
+	// A key kept because an owner could not confirm it is not settled, just deferred — and
+	// nothing else will come back for it, since cleanup only runs inside a heal and heals
+	// only run on a membership change. Without this, a copy whose owner was still being
+	// repopulated at the moment we asked stays stranded until the next kill. Re-arming is
+	// self-limiting: the retry that confirms it leaves kept == 0 and the loop stops.
+	if kept > 0 {
+		select {
+		case n.healTrigger <- struct{}{}:
+			log.Debug("cleanup: re-arming, some copies could not be confirmed yet", "kept_unconfirmed", kept)
+		default:
+		}
+	}
+
+	if len(dropped) == 0 {
+		log.Debug("cleanup: nothing to drop", "kept_unconfirmed", kept, "took", time.Since(start).Round(time.Millisecond))
+		return
+	}
+
+	slices.Sort(dropped)
+	n.cleanupDropped.Add(int64(len(dropped)))
+	n.recordCleanup(dropped)
+	log.Info("cleanup: dropped copies this node no longer owns",
+		"count", len(dropped),
+		"keys", strings.Join(dropped, ","),
+		"kept_unconfirmed", kept,
+		"cleanup_dropped_total", n.cleanupDropped.Load(),
+		"took", time.Since(start).Round(time.Millisecond),
+	)
+}
+
+// recordCleanup files what a pass dropped. Bounded, like the heal log.
+func (n *Node) recordCleanup(keys []string) {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	n.cleanupLog = append(n.cleanupLog, keys)
+	if over := len(n.cleanupLog) - maxHealLog; over > 0 {
+		n.cleanupLog = slices.Delete(n.cleanupLog, 0, over)
+	}
+}
+
+// DrainCleanupLog returns the key batches dropped since the last drain, and clears it.
+func (n *Node) DrainCleanupLog() [][]string {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	if len(n.cleanupLog) == 0 {
+		return nil
+	}
+	out := n.cleanupLog
+	n.cleanupLog = nil
+	return out
+}
+
+// CleanupDropped is how many surplus copies this node has discarded, cumulative.
+func (n *Node) CleanupDropped() int64 { return n.cleanupDropped.Load() }
 
 // HealCopy is one heal pass's worth of keys pushed to a single target, for the
 // dashboard.

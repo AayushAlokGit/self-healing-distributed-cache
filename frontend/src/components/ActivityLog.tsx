@@ -65,7 +65,7 @@ function HealRow({ e }: { e: ClusterEvent }) {
 
 // Kinds whose keys are worth naming on the header line itself. A heal's keys live in
 // its own rows; these have no rows of their own.
-const NAMES_KEYS = new Set(['expire', 'reclaim'])
+const NAMES_KEYS = new Set(['expire', 'reclaim', 'cleanup'])
 
 export function ActivityLog({ events }: { events: ClusterEvent[] }) {
   const blocks = group(events).reverse() // newest block first

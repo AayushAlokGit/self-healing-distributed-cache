@@ -56,6 +56,10 @@ money moment) and must stay static-hostable and free; (6) **R=3**, configurable.
 5. **Why a delete cannot address the owners** (S11, never asked) — *"a delete goes to the R nodes the
    ring names for the key. Name two ways the key survives it. What would a real system add?"*
    (Answer: leftovers from an old ring; a paused holder that heals it back. A **tombstone**.)
+6. **Cleanup's ordering** (S13, never asked) — *"a node holds a key it does not own. Why may it not just
+   delete it? What must it check first, and why is 'unreachable' not the same answer as 'no'?"*
+   (Answer: a surplus copy and the last copy alive are indistinguishable from there. Confirm all R
+   owners hold it. Silence is not consent.)
 
 ### Deferred on purpose, with reasons
 - **`sync.RWMutex`** — measured: the *uncontended* mutex is **40% of a 67 ns `Get`** (26.9 ns), with
@@ -478,6 +482,42 @@ re-replicate.
 
 ## Session log
 What happened, in order. The detail lives in the checklist above; this is the narrative and the surprises.
+
+### Session 13 — 2026-07-11 · Cleanup: heal was a ratchet
+**Build only, no quiz.** Aayush's question — *"when the killed node is restored, is the copy the other
+node gained deleted?"* — and the answer was **no.** **Heal only ever COPIES.** Kill a node, its keys are
+re-replicated onto whoever owns them now; revive it, the ring snaps back, and those copies just **stay**
+on nodes that no longer own them. Measured on 6 keys: one kill+revive went **18 copies → 22**, and R
+crept toward N. The sharding the ring exists to provide, given away one outage at a time.
+
+Built `cleanup` (Cassandra calls it `nodetool cleanup`; Dynamo avoids the problem with *hinted handoff*,
+where the temporary copy is a hint that is deleted on handback). It runs at the end of each heal pass:
+drop the copies I hold but no longer own.
+
+⚠️ **Confirm, THEN drop** — a surplus copy and the last copy alive look identical from the holder's
+side, and asking every owner is the only thing that tells them apart. Reverse the order and it is a
+data-loss bug. Two apparent races are safe by construction: two non-owners can drop concurrently (the
+count cannot fall below R, since neither is an owner and both confirmed), and an owner never reaches the
+drop, so owners cannot clean each other up.
+
+**Two things the tests taught, both by failing:**
+1. **A cluster-level safety test PASSED against a deliberately broken (drop-without-asking) cleanup.**
+   It was passing for the wrong reason: below R=3 live nodes *every* survivor owns *every* key, so
+   cleanup returns at the ownership check and the confirm path never runs. Renamed to what it actually
+   proves (`TestShrinkingClusterKeepsEveryKey`) and written properly at node level, driving `cleanup`
+   directly and controlling what each owner answers. **A test that cannot fail is not a test.**
+2. **Cleanup left one copy stranded anyway.** A node cleaned up *while the revived node was still being
+   repopulated*, so an owner could not confirm and the copy was correctly kept — but cleanup only runs
+   inside a heal, and heals only run on a membership change, so nothing ever came back for it. A **kept
+   copy is deferred, not settled**: it now re-arms the heal trigger, which is self-limiting. 22 → 19
+   without the retry; 22 → **18** with it.
+
+⚠️ Still open, and now written down twice: cleanup assumes the copy it drops is no fresher than the
+owners'. A write a *down* owner missed leaves that owner stale, and heal's presence check will not
+repair it — so cleanup can discard the fresher copy. No client can see it (reads only ask owners), but
+it is **presence ≠ version** again.
+
+New dashboard metric: **copies stored vs keys × R**, amber when there is a surplus.
 
 ### Session 12 — 2026-07-11 · Deployment, and the host that would have broken the demo
 **Build only, no quiz.** Split deploy wired up: `$PORT` (container hosts choose the port and inject it —

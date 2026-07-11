@@ -281,6 +281,41 @@ side unavailable), which is out of scope (§9).
 - ⚠️ All `POST`, including the deletes: CORS here allows GET/POST only, so a real `DELETE` verb would
   fail the browser's preflight. The **node↔node** protocol does use real `DELETE`.
 
+### Cleanup — why heal alone is a ratchet
+
+**Heal only ever COPIES.** Kill a node and its keys are re-replicated onto whoever owns them *now*;
+revive it and the ring snaps back — but those copies stay on nodes that no longer own them. Nothing
+removed them, so **every kill/revive cycle permanently raised the copy count**, and R crept toward N:
+the sharding the ring exists to provide, given away one outage at a time. Measured on a 6-key cluster:
+one kill+revive took it from 18 copies to **22**.
+
+`cleanup` is the counterweight, and runs at the end of each heal pass: *drop the copies I hold but no
+longer own.*
+
+⚠️ **Confirm, then drop.** A copy goes only if **every** one of the key's R owners answers that it holds
+the key. An owner that says no, or that cannot be reached, ends the matter and the copy stays — because
+**a surplus copy and the last copy alive look identical from here**, and asking is the only thing that
+tells them apart. Reverse the order and this is a data-loss bug, not a memory optimisation.
+
+Two apparent races that are not: two non-owners dropping the same key concurrently is safe (neither is
+an owner, and each drops only after all R owners confirm, so the count cannot fall below R however they
+interleave — no coordination needed); and an owner never reaches the drop, so the owners cannot clean
+each other up.
+
+⚠️ **A kept copy is deferred, not settled.** Cleanup only runs inside a heal, and heals only run on a
+membership change — so a copy whose owner was still being repopulated when we asked would stay stranded
+until the next kill. It re-arms the heal trigger when anything was kept, which is self-limiting: the
+retry that confirms it leaves nothing kept, and the loop stops.
+
+⚠️ **What it does not fix.** It assumes the dropped copy is no fresher than the owners'. Writes go to
+owners, so that holds — *except* for a write a **down** owner missed, which heal's presence check will
+not repair. So cleanup can discard a fresher copy and keep a staler one. No client can observe the
+difference (reads only ask owners), but it is **presence ≠ version** again, and only versioned values
+close it.
+
+The metric is on the dashboard: **copies stored vs keys × R**. Equal is healthy; the gap is cleanup's
+debt.
+
 ### Why delete broadcasts instead of addressing the owners
 
 The ring says where a copy *should* be; a delete must erase it wherever one *is*, and nothing in this

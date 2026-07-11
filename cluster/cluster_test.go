@@ -762,6 +762,133 @@ func TestAKeyThatDiesBetweenTwoPollsStillReportsItsExpiry(t *testing.T) {
 	}
 }
 
+// copiesStored counts every copy of every key the cluster physically holds.
+func copiesStored(st State) int {
+	n := 0
+	for _, k := range st.Keys {
+		n += len(k.Holders)
+	}
+	return n
+}
+
+// Without cleanup, heal is a ratchet: it only ever COPIES. Kill a node and its keys are
+// re-replicated onto whoever owns them now; revive it and the ring snaps back, but those
+// copies stay put. Nothing removes them, so every kill/revive cycle permanently raises the
+// copy count and R creeps toward N — giving away the sharding one outage at a time.
+//
+// So after the ring is whole again, every key must be held by exactly its owners, and the
+// total copies must be back to keys × R. This test fails against a heal with no cleanup.
+func TestCleanupDropsTheCopiesTheRingNoLongerOwns(t *testing.T) {
+	c := New(3, 1, 200*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(12); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	want := 12 * 3
+	if got := copiesStored(c.State()); got != want {
+		t.Fatalf("precondition: a fresh cluster should hold %d copies, holds %d", want, got)
+	}
+
+	// The outage: n2's keys land on nodes that will not own them once n2 is back.
+	if err := c.Kill("n2"); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitUntil(t, 6*time.Second, "the heal to re-replicate n2's keys", func() bool {
+		return c.State().TotalHealCopies > 0
+	})
+	if err := c.Revive("n2"); err != nil {
+		t.Fatalf("revive: %v", err)
+	}
+
+	// Converge: every key back on all its owners (heal), and no key anywhere else (cleanup).
+	waitUntil(t, 15*time.Second, "the ring to return to exactly keys × R copies", func() bool {
+		st := c.State()
+		return len(notOnItsOwners(st)) == 0 && copiesStored(st) == want
+	})
+
+	st := c.State()
+	for _, k := range st.Keys {
+		holders := append([]string(nil), k.Holders...)
+		owners := append([]string(nil), k.Owners...)
+		sort.Strings(holders)
+		sort.Strings(owners)
+		if !slices.Equal(holders, owners) {
+			t.Errorf("key %q: held by %v but owned by %v — a surplus copy survived the cleanup",
+				k.Key, k.Holders, k.Owners)
+		}
+	}
+	if got := copiesStored(st); got != want {
+		t.Errorf("after a kill+revive the cluster should hold %d copies again, holds %d", want, got)
+	}
+	t.Logf("kill+revive settled back to %d copies (= %d keys × R=3), no leftovers", copiesStored(st), len(st.Keys))
+}
+
+// Cleanup deletes data, so the end-to-end question is whether a shrinking cluster still has
+// every key when the dust settles. Squeeze to two live nodes and then to one, and the last
+// node standing must hold everything — cleanup must never eat the copies keeping the cluster
+// alive.
+//
+// ⚠️ This does NOT prove the confirm-before-drop rule, and a version of cleanup that deletes
+// without asking anybody still passes it. The reason is worth knowing: below R=3 live nodes
+// every survivor is an owner of every key, so cleanup returns at the ownership check and the
+// confirm path never runs. The rule itself is guarded in node/cleanup_test.go, which drives
+// cleanup directly and controls what each owner answers.
+func TestShrinkingClusterKeepsEveryKey(t *testing.T) {
+	c := New(3, 1, 200*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+	if err := c.Seed(8); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before := len(c.State().Keys)
+
+	for _, victim := range []string{"n1", "n2", "n3"} {
+		if err := c.Kill(victim); err != nil {
+			t.Fatalf("kill %s: %v", victim, err)
+		}
+		time.Sleep(1200 * time.Millisecond) // detection + grace + heal + cleanup
+	}
+
+	st := c.State()
+	if st.AliveCount != 2 {
+		t.Fatalf("want 2 nodes alive, got %d", st.AliveCount)
+	}
+	if len(st.Keys) != before {
+		t.Fatalf("cleanup lost keys while the cluster shrank: %d keys, want %d", len(st.Keys), before)
+	}
+
+	// Down to one node: it is now the sole owner and sole holder of everything. A cleanup
+	// that dropped what it could not confirm would empty the cluster here.
+	if err := c.Kill("n4"); err != nil {
+		t.Fatalf("kill n4: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	st = c.State()
+	if st.AliveCount != 1 {
+		t.Fatalf("want 1 node alive, got %d", st.AliveCount)
+	}
+	if len(st.Keys) != before {
+		t.Fatalf("the last node standing must still hold every key: has %d, want %d — cleanup deleted "+
+			"copies it could not confirm anywhere else", len(st.Keys), before)
+	}
+	for _, k := range st.Keys {
+		if len(k.Holders) != 1 {
+			t.Errorf("key %q: want exactly 1 holder on a 1-node cluster, got %v", k.Key, k.Holders)
+		}
+	}
+	if res, err := c.Get("key:0"); err != nil || !res.Found {
+		t.Fatalf("key:0 must still be readable from the last node: (%+v, %v)", res, err)
+	}
+	t.Logf("survived down to 1 node with all %d keys intact — cleanup dropped nothing it could not confirm", before)
+}
+
 // A delete must take every copy, and it must STAY taken: the heal that repairs a kill
 // must not read a deleted key as a key that lost its replicas.
 func TestDeleteRemovesEveryCopyAndStaysDeleted(t *testing.T) {

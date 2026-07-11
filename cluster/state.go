@@ -104,6 +104,18 @@ func (c *Cluster) State() State {
 				Cause: hc.Cause,
 			})
 		}
+
+		// And its cleanups, in the same list: a cleanup is always the consequence of an
+		// earlier heal, and the order shows it.
+		for _, keys := range n.DrainCleanupLog() {
+			c.appendEvent(Event{
+				Kind: "cleanup",
+				Msg: fmt.Sprintf("%s dropped %d surplus cop%s — it no longer owns %s, and every owner confirmed holding it",
+					id, len(keys), plural2(len(keys), "y", "ies"), plural2(len(keys), "that key", "those keys")),
+				From: id,
+				Keys: keys,
+			})
+		}
 	}
 
 	c.noteExpiries(now, holdersByKey, expiresByKey)

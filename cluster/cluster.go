@@ -68,12 +68,12 @@ type Cluster struct {
 // From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
-	Kind string `json:"kind"` // kill | revive | pause | resume | set | read | seed | delete | clear | info | heal | expire | reclaim
+	Kind string `json:"kind"` // kill | revive | pause | resume | set | read | seed | delete | clear | info | heal | cleanup | expire | reclaim
 	Msg  string `json:"msg"`
 
-	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim: the node that freed the memory
+	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim/cleanup: the node that freed the memory
 	To    string   `json:"to,omitempty"`    // heal: the node that received the copies
-	Keys  []string `json:"keys,omitempty"`  // heal: the keys moved. expire/reclaim: the keys that died
+	Keys  []string `json:"keys,omitempty"`  // heal: the keys moved. expire/reclaim/cleanup: the keys that went
 	Cause string   `json:"cause,omitempty"` // heal: what the SENDER saw that made it heal
 }
 
@@ -616,6 +616,14 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// plural2 is plural for the words that do not just take an "s".
+func plural2(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // angleOf maps a ring hash to degrees [0, 360).

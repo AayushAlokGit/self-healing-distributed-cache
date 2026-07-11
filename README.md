@@ -48,8 +48,12 @@ Open **http://localhost:5173** (Vite proxies `/api` to the Go backend on `:8080`
    and reads keep serving from the survivors via fallback.
 2. A grace period later the cluster **restores R=3 on its own** — the heal-copies counter climbs and
    every key is back to three holders. No data lost, no client involved.
-3. **Read a key** any time to confirm it still serves.
-4. **Delete a key** (the ✕ on its chip), or **Delete all**. A delete goes to *every* node, not the
+3. **Revive it**, and watch the **copies** counter. The heal only ever *copies*, so reviving would leave
+   surplus copies stranded on nodes that no longer own those keys — R quietly creeping toward N, one
+   outage at a time. A `cleanup` pass drops them, but only once **every** owner confirms it holds the
+   key: from a non-owner's side, a surplus copy and the last copy alive look identical.
+4. **Read a key** any time to confirm it still serves.
+5. **Delete a key** (the ✕ on its chip), or **Delete all**. A delete goes to *every* node, not the
    three the ring names — otherwise a heal quietly puts the key back. See
    [the HLD](docs/HLD.md#why-delete-broadcasts-instead-of-addressing-the-owners).
 
