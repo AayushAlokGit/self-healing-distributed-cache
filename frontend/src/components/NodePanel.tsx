@@ -6,8 +6,7 @@ import { ErrorLine } from './ErrorLine'
 export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: () => void }) {
   const { err, run } = useApiError()
 
-  // Refresh whether or not the call worked: on failure that re-syncs the UI with the
-  // truth instead of leaving a stale guess on screen.
+  // Refresh even when the call failed, so the UI re-syncs instead of showing a stale guess.
   const act = async (fn: () => Promise<void>) => {
     await run(fn)
     onAction()
@@ -20,7 +19,7 @@ export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: (
         {nodes.map((n) => (
           <div className={'nrow' + (!n.alive ? ' dead' : n.paused ? ' paused' : '')} key={n.id}>
             <div className="id">
-              {/* one colour in, and CSS derives both the fill and the glow from it */}
+              {/* CSS derives fill and glow from currentColor, so only `color` is set here. */}
               <span className="swatch" style={{ color: colorFor(n.id) }} />
               {n.id}
             </div>

@@ -1,13 +1,11 @@
 import type { ClusterEvent } from '../api'
 import { NodeChip } from './NodeChip'
 
-// Faults are the events that move ownership, so they are the ones a heal can be a
-// consequence of. Everything else (a write, a seed) just sits in the timeline.
+// Only a fault moves ownership, so only a fault can be the cause of a heal.
 const FAULTS = new Set(['kill', 'revive', 'pause', 'resume'])
 
-// A block is one fault and the heal copies that followed it. The backend appends
-// heals to the same list as the kills at the moment they happen, so the order is
-// already causal — grouping here is just reading that order, not reconstructing it.
+// A block is one fault plus the heal copies that followed it. Events arrive in causal
+// order from the backend, so grouping only reads that order rather than reconstructing it.
 interface Block {
   header: ClusterEvent
   heals: ClusterEvent[]
@@ -17,7 +15,6 @@ function group(events: ClusterEvent[]): Block[] {
   const blocks: Block[] = []
   for (const e of events) {
     if (e.kind === 'heal' && blocks.length > 0 && FAULTS.has(blocks[blocks.length - 1].header.kind)) {
-      // Attach to the fault above it: that is the one it followed.
       blocks[blocks.length - 1].heals.push(e)
     } else {
       blocks.push({ header: e, heals: [] })
@@ -45,8 +42,8 @@ function HealRow({ e }: { e: ClusterEvent }) {
           </span>
         ))}
       </div>
-      {/* The sender's OWN reason for healing — not the manager's. Two nodes can
-          disagree about who died, and this is where that would show. */}
+      {/* The sender's own reason for healing, not the manager's: two nodes can disagree
+          about who died, and this is where that shows. */}
       {e.cause && <div className="cause">because {e.from} saw {e.cause}</div>}
     </div>
   )

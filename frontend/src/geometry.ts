@@ -1,5 +1,4 @@
-// Ring geometry and the per-node colour palette. Everything positional lives here so
-// RingViz can stay a view: it maps over what these functions return and draws it.
+// Ring geometry and the per-node colour palette.
 
 import type { KeyState, NodeState } from './api'
 
@@ -24,9 +23,8 @@ export function xy(angleDeg: number, r: number): [number, number] {
   return [CX + r * Math.sin(a), CY - r * Math.cos(a)]
 }
 
-// Node markers are spread evenly for legibility. A physical node has ~150 scattered
-// ring points (the arcs show the real spread), so no single angle is "true" — even
-// spacing is the honest, readable choice.
+// Marker angles are display-only, spread evenly. A node has ~150 scattered ring points,
+// so no single angle is its real position; the ownership arcs show the true spread.
 export function markerAngles(nodes: NodeState[]): Record<string, number> {
   const m: Record<string, number> = {}
   nodes.forEach((n, i) => (m[n.id] = (i / nodes.length) * 360))
@@ -41,9 +39,8 @@ function arcPath(a1: number, a2: number, r: number): string {
   return `M ${x1} ${y1} A ${r} ${r} 0 ${delta > 180 ? 1 : 0} 1 ${x2} ${y2}`
 }
 
-// ownershipArcs: the segment from one virtual point to the next clockwise belongs to
-// the node the *next* point belongs to — so the ring literally shows whose slice is
-// whose. vnodes arrive sorted by angle.
+// The segment from one virtual point to the next clockwise belongs to the NEXT point's
+// node. Requires vnodes sorted by angle.
 export function ownershipArcs(vnodes: { angle: number; node: string }[]) {
   return vnodes.map((v, i) => {
     const next = vnodes[(i + 1) % vnodes.length]
@@ -65,19 +62,9 @@ export interface Label {
   leader?: { x1: number; y1: number; x2: number; y2: number }
 }
 
-// keyLabels places each key's name on its own radial spoke.
-//
-// Drawn horizontally, "key:12" is ~34 units wide — ~9 degrees of arc at this radius,
-// while keys hashed at random average only ~15 degrees apart, so nearly every label
-// overlapped its neighbour. Rotated onto a spoke, a label's angular footprint is its
-// *height* (~2.5 degrees) and most collisions simply vanish.
-//
-// The survivors — keys hashing within a few degrees of each other — step inward a tier
-// at a time, with a leader line back to the dot. That is honest: on this ring only the
-// angle carries meaning (it *is* the hash), so radius is free real estate.
-//
-// A label on the left half would come out upside-down, so it is flipped and anchored
-// from the other end; both halves then read left-to-right, inward.
+// keyLabels places each key's name on its own radial spoke. Keys closer than MIN_SEP_DEG
+// step inward a tier, with a leader line back to the dot; labels past 180 degrees are
+// flipped and re-anchored so they don't read upside-down.
 export function keyLabels(keys: KeyState[]): Label[] {
   const sorted = [...keys].sort((a, b) => a.angle - b.angle)
   let prevAngle = -Infinity

@@ -1,6 +1,4 @@
-/* Colours are declared once as space-separated RGB triples so any alpha can be mixed
-   from them with rgb(... / a). Before this, the same five colours were re-typed as ~25
-   different rgba() literals and a tweak meant a find-and-replace. */
+/* Colours are space-separated RGB triples so any alpha can be mixed with rgb(... / a). */
 :root {
   --steel: 120 160 220; /* the blue-grey of every border, hairline and neutral fill */
   --danger: 255 84 112;
@@ -42,10 +40,6 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .card, .stat, .stage { background: var(--panel); border: 1px solid var(--panel-brd); backdrop-filter: blur(8px); }
 .card { border-radius: 16px; padding: 16px; }
 .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1.6px; color: var(--muted); }
-/* One line under a heading saying what the panel actually does to the cluster. Now that
-   SET and GET are separate cards, each has room to say it — and the difference between
-   them (a write goes to all R owners; a read stops at the first owner that answers) is
-   the thing worth knowing before you touch either. */
 .panel-hint { margin: -4px 0 12px; font-size: 11px; line-height: 1.5; color: var(--muted); opacity: 0.85; }
 
 .stats { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -58,15 +52,13 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .grid { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(330px, 0.85fr); gap: 20px; align-items: start; }
 @media (max-width: 1040px) { .grid { grid-template-columns: 1fr; } }
 
-/* min-width: 0 on BOTH columns, or one blows out the screen: a `1fr` track is really
-   minmax(auto, 1fr), and that `auto` floor is the item's min-content width — so a
-   single unshrinkable child sets the width of the whole column. */
+/* min-width: 0 on BOTH columns. A `1fr` track is really minmax(auto, 1fr), and that `auto`
+   floor is the item's min-content width, so one unshrinkable child blows out the column. */
 .left, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
 .stage { position: relative; border-radius: 20px; padding: 8px; overflow: hidden; background-image: radial-gradient(600px 600px at 50% 46%, rgba(30, 44, 70, 0.35), transparent 70%); }
-/* touch-action: manipulation, NOT none. The ring is the tallest thing on a phone, so a
-   finger swiping to scroll almost always starts on it, and `none` swallows that swipe —
-   which reads as a frozen page. Nothing here handles gestures. */
+/* touch-action: manipulation, NOT none: `none` swallows a scroll swipe that starts on the
+   ring, which reads as a frozen page. Nothing here handles gestures. */
 svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display: block; margin: 0 auto; touch-action: manipulation; }
 .caption { position: absolute; left: 16px; bottom: 12px; color: var(--muted); font-size: 11.5px; max-width: 60%; line-height: 1.5; }
 .legend { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
@@ -80,9 +72,7 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .muted-note { color: var(--muted); font-size: 12px; }
 .spacer { height: 10px; }
 
-/* A chip is a small rounded label. Everything below is one, differing only in colour:
-   the owner ids in the key panel, the node ids in a heal row, the key names, the event
-   tags. The shared shape lives here once. */
+/* Shared chip shape: owner ids, node ids, key names, event tags. */
 .oid, .node-chip, .key-chip, .tag {
   font-weight: 700;
   border-radius: 5px;
@@ -95,18 +85,15 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
 .keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
 .keychip .owners { display: flex; gap: 4px; align-items: center; }
-/* Primary is a solid pill, its replicas outlined — so R=3 reads without a legend. */
 .oid { font-size: 10.5px; line-height: 1.5; padding: 0 5px; }
 .oid.primary { box-shadow: 0 0 8px rgba(255, 255, 255, 0.14); }
 .keychip.under { border-color: rgb(var(--danger) / 0.5); box-shadow: 0 0 12px rgb(var(--danger) / 0.12); }
 .keychip .warn { color: rgb(var(--danger)); font-size: 12px; animation: healpulse 1.15s ease-in-out infinite; }
-/* Remaining life. Goes red under 10s — the last ticks are the ones worth watching. */
 .keychip .ttl { margin-left: auto; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .keychip .ttl.soon { color: var(--danger-ink); font-weight: 700; }
 .keychip .owners { flex-shrink: 0; }
 
-/* Five rows of a known size (the cluster is built as cluster.New(..., "n0" .. "n4"), so
-   this panel can never grow) — no reason to spend height the activity log could use. */
+/* The cluster is fixed at five nodes, so this list never needs to scroll. */
 .nodes-ctl { display: flex; flex-direction: column; gap: 5px; }
 .nrow { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 9px; background: var(--well); border: 1px solid var(--hair); transition: 0.2s; }
 .nrow .id { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 7px; min-width: 46px; }
@@ -116,8 +103,7 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .nrow.paused { box-shadow: inset 0 0 0 1px rgb(var(--warn)), 0 0 14px rgb(var(--warn) / 0.15); }
 .btns { display: flex; gap: 6px; }
 
-/* Every button is the same button in a different colour, so the colour is the only
-   thing a variant sets. --btn defaults to steel; :hover just raises the alpha. */
+/* --btn is the only thing a variant sets; :hover just raises its alpha. */
 button {
   --btn: var(--steel);
   font-family: inherit; cursor: pointer; border: none; border-radius: 9px;
@@ -137,8 +123,6 @@ button.primary:hover { filter: brightness(1.1); }
 input { flex: 1; min-width: 0; background: rgba(10, 16, 26, 0.7); border: 1px solid var(--panel-brd); border-radius: 9px; color: var(--ink); padding: 8px 11px; font-family: inherit; font-size: 13px; }
 input:focus { outline: none; border-color: rgb(var(--cyan)); }
 
-/* TTL presets. A segmented control rather than a text box: the useful TTLs here are
-   the ones short enough to sit and watch a key die. */
 .ttl-row { display: flex; align-items: center; gap: 5px; margin-bottom: 9px; flex-wrap: wrap; }
 .ttl-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-right: 2px; }
 .ttl-opt { padding: 4px 9px; font-size: 11px; }
@@ -146,26 +130,19 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .ttl-custom { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
 .ttl-custom input { flex: 0 1 130px; padding: 6px 9px; font-size: 12.5px; }
 .ttl-custom .unit { font-size: 11px; color: var(--muted); }
-/* Echo the TTL back in the same words the key panel will count it down in, so a typo
-   is caught before the write rather than after the key has quietly vanished. */
 .ttl-preview { margin-left: auto; font-size: 11px; color: #8be9fd; font-variant-numeric: tabular-nums; }
 
 .result { font-size: 12px; color: var(--muted); min-height: 16px; margin-top: 6px; line-height: 1.7; }
 .result b { color: rgb(var(--ok)); }
 .result.miss b { color: rgb(var(--danger)); }
 .result .headline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-/* What the answering node was to this key. A replica answering IS the fallback — the
-   thing this whole cluster exists to do — so it is the one that gets the colour. */
 .served-role { font-size: 10.5px; color: var(--muted); }
 .served-role.fallback { color: var(--ok-ink); font-weight: 600; }
 
-/* The coordinator took the request but owns nothing here: it is greyed and set apart
-   from the trace below, because it is not one of the owners the read walked. */
+/* The coordinator is not one of the owners the read walked, so it is set apart from the trace. */
 .coord { margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: 10.5px; color: var(--muted); opacity: 0.8; }
 
-/* The read path: one row per owner, in ring order. The left rule carries the verdict,
-   so the shape of a fallback is legible before a word of it is read — a red bar, then
-   an amber bar, then a green one. */
+/* One row per owner, in ring order. The left rule carries the outcome. */
 .read-path { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
 .read-path .hop { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; background: var(--well); border-left: 2px solid rgb(var(--steel) / 0.35); }
 .read-path .role { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -175,36 +152,29 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .read-path .hop.hit .outcome { color: var(--ok-ink); font-weight: 600; }
 .read-path .hop.unreachable { border-left-color: rgb(var(--danger)); }
 .read-path .hop.unreachable .outcome { color: var(--danger-ink); }
-/* Alive but empty. Amber, not red, and the distinction is the point: this node is fine,
-   it simply has no copy yet — exactly where a revived node sits before the heal lands. */
+/* Alive but empty (a revived node before the heal lands): amber, not red — not a failure. */
 .read-path .hop.miss { border-left-color: rgb(var(--warn)); }
 .read-path .hop.miss .outcome { color: rgb(var(--warn)); }
-/* Never asked, because someone ahead of it already answered: R=3 is how many COPIES
-   exist, not how many nodes a read touches. Faded, because nothing happened here. */
+/* Never asked, because an owner ahead of it answered first. */
 .read-path .hop.skipped { opacity: 0.42; }
-/* A request that failed outright — distinct from a cache miss, which is a real answer
-   about the cluster rather than a broken call. */
+/* A request that failed outright, as opposed to a cache miss. */
 .api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }
 
-/* The activity log is the only panel here that grows without bound, so it gets the
-   height. Not flex-filled to the viewport: one kill fans out to four heal rows, each
-   with its keys and its cause, so a couple of kills overflow any screen and the log
-   must scroll regardless. A big box plus a scrolling page beats a small box that fits. */
+/* The log grows without bound, so it scrolls. */
 .log { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; }
 .ev { display: flex; gap: 9px; align-items: baseline; padding: 5px 2px; font-size: 12px; animation: slidein 0.35s ease; }
 @keyframes slidein { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; } }
 .ev .msg { color: var(--muted); }
 .ev .rollup { margin-left: auto; color: rgb(var(--ok)); font-size: 10.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
-/* Same story as the buttons: one tag, recoloured per event kind. */
+/* Like the buttons: one tag, recoloured per event kind via --tag. */
 .tag { --tag: var(--steel); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 6px; background: rgb(var(--tag) / 0.2); color: var(--tag-ink, var(--muted)); }
 .tag.kill { --tag: var(--danger); --tag-ink: var(--danger-ink); }
 .tag.revive { --tag: var(--ok); --tag-ink: var(--ok-ink); }
 .tag.pause, .tag.resume { --tag: var(--warn); --tag-ink: #ffe08a; }
 .tag.set, .tag.seed { --tag: var(--cyan); --tag-ink: #8be9fd; }
 
-/* One block = one fault plus the heal copies it caused, nested under it. The nesting is
-   the whole point: cause on top, consequences beneath, in the order they happened. */
+/* One block = one fault plus the heal copies it caused, nested under it. */
 .block { border-bottom: 1px solid rgb(var(--steel) / 0.06); padding: 3px 0; }
 .block.has-heals { background: rgb(var(--ok) / 0.04); border-radius: 8px; padding: 4px 6px; margin: 3px 0; }
 .heals { margin: 4px 0 2px 10px; padding-left: 10px; border-left: 2px solid rgb(var(--ok) / 0.35); display: flex; flex-direction: column; gap: 7px; }
@@ -220,9 +190,9 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 /* --- SVG ---------------------------------------------------------------------- */
 .ringbase { fill: none; stroke: rgb(var(--steel) / 0.12); stroke-width: 1.5; }
 .varc { fill: none; stroke-width: 16; opacity: 0.9; transition: stroke 0.5s ease; filter: saturate(1.1); }
-/* Radius stays an SVG attribute (r={5}), not a CSS declaration: CSS `r` is not
-   universally supported, and a browser that ignores it would render r=0 — no dots at
-   all. The media query below overrides it where it is supported, which degrades safely. */
+/* Radius stays an SVG attribute (r={5}), never a CSS `r` declaration: CSS `r` is not
+   universally supported, and a browser that ignores it renders r=0 — no dots at all. The
+   phone override below only enlarges it where it works, so it degrades safely. */
 .keydot { stroke: #0b1220; stroke-width: 1.5; transition: cx 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), cy 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
 .keydot.under { animation: underpulse 1s ease-in-out infinite; }
 @keyframes underpulse {
@@ -259,34 +229,30 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 
 /* --- Phones. Last, so these win on source order rather than !important. --------- */
 @media (max-width: 700px) {
-  .wrap { padding: 14px 12px 28px; } /* 52px of a 390px screen was going to margins */
+  .wrap { padding: 14px 12px 28px; }
   .grid { gap: 14px; }
   .card, .stage { padding: 12px; border-radius: 14px; }
 
   header { gap: 12px; margin-bottom: 12px; }
   .title h1 { font-size: 18px; }
   .title p { font-size: 11px; line-height: 1.45; }
-  /* Four tiles across a phone is ~90px each: the label wraps and the number shrinks. */
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
   .stat { min-width: 0; padding: 7px 11px; }
   .stat .v { font-size: 18px; }
 
-  /* The ring renders at a 0.5 scale on a 720-unit viewBox, so everything inside halves.
-     A 10-unit key label lands at 5px — illegible, and a dozen collide into fuzz. Drop
-     the names: the ring still shows the arcs, the ownership colours and the keys flying
-     on a heal, and the key panel below already names every owner. */
+  /* The ring halves at phone scale, so a 10-unit key label lands at ~5px: illegible.
+     Drop the names; the key panel below still names every owner. */
   .keylabel, .keyleader { display: none; }
-  /* Each node's id is drawn on its own marker, so the legend is pure duplication here. */
+  /* Each node's id is drawn on its own marker, so the legend is duplication here. */
   .legend { display: none; }
-  .caption { position: static; max-width: 100%; margin: 6px 2px 0; } /* stops covering a now-short ring */
+  .caption { position: static; max-width: 100%; margin: 6px 2px 0; }
 
-  /* The node ids suffered the same halving for no such reason — five markers, far apart,
-     nothing to collide with — so they scale back up instead. */
+  /* Node ids halve with the viewBox but have nothing to collide with, so scale them back up. */
   .nodeg .label { font-size: 26px; }
   .nodeg .sub { font-size: 15px; }
   .center-badge { font-size: 52px; }
   .center-sub { font-size: 18px; }
-  .keydot { r: 8; } /* a 5-unit dot is 2.5px of screen: a speck. These are the keys. */
+  .keydot { r: 8; } /* 5 units is ~2.5px of screen here. */
   @keyframes underpulse {
     0%, 100% { r: 8; filter: drop-shadow(0 0 2px rgb(var(--danger))); }
     50% { r: 12; filter: drop-shadow(0 0 8px rgb(var(--danger))); }
@@ -294,8 +260,7 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 
   .keygrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); max-height: 260px; }
 
-  /* Touch targets: 4px of padding is a ~24px button, under the ~44px a finger hits
-     reliably — and these are the buttons the whole demo turns on. */
+  /* Touch targets: 4px of padding gives a ~24px button, under the ~44px a finger hits reliably. */
   .nrow { padding: 7px 9px; gap: 6px; }
   .nrow .id { min-width: 40px; }
   .nrow .meta { font-size: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

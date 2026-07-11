@@ -2,14 +2,7 @@ import type { KeyState } from '../api'
 import { ttlText } from '../format'
 import { colorFor } from '../geometry'
 
-// KeyTable shows the precise key -> owner-nodes mapping, keeping that detail off
-// the ring (which now shows only nodes, ownership arcs, and key movement).
-//
-// Owners are named, not just coloured: a row of dots forces you to look the colour
-// up in the legend before you can say *which* node holds a key. The id is the fact
-// you actually want; the colour just ties it back to the ring. The primary (the
-// first node clockwise) is a solid pill, its replicas outlined — so replication
-// factor is readable at a glance without a key.
+// owners[0] is the primary (the first node clockwise); the rest are its replicas.
 export function KeyTable({ keys }: { keys: KeyState[] }) {
   const sorted = [...keys].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))
   const expiring = keys.filter((k) => k.ttlMs >= 0).length
@@ -27,8 +20,6 @@ export function KeyTable({ keys }: { keys: KeyState[] }) {
           {sorted.map((k) => (
             <div className={'keychip' + (k.underReplicated ? ' under' : '')} key={k.key}>
               <span className="kname">{k.key}</span>
-              {/* Under 10s left, it turns red: the last few ticks before a key dies are
-                  the ones worth watching, and this is a demo about watching. */}
               {k.ttlMs >= 0 && (
                 <span
                   className={'ttl' + (k.ttlMs < 10_000 ? ' soon' : '')}

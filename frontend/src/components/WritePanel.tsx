@@ -4,12 +4,7 @@ import { ttlText } from '../format'
 import { useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
 
-// Presets for the common case — the point of a TTL here is to *watch* a key die, so
-// the useful values are the ones short enough to sit through — plus "custom" for an
-// exact figure. "never" is the default, because it is what every other write does.
-//
-// Milliseconds throughout, matching the ttlMs the dashboard reports back: a lifetime
-// read off the key panel can be typed straight back into this box.
+// TTL presets, in ms to match the ttlMs the dashboard reports back. 0 = never expires.
 const TTLS = [
   { label: 'never', ms: 0 },
   { label: '10s', ms: 10_000 },
@@ -17,9 +12,8 @@ const TTLS = [
   { label: '2m', ms: 120_000 },
 ]
 
-// parseCustomMs returns the ms, or an error string. Rejecting junk here rather than
-// letting Number('') quietly become 0 — which would silently write a permanent key
-// when the user asked for an expiring one, the worst possible way to be wrong.
+// parseCustomMs returns the ms, or an error string. Junk is rejected here because
+// Number('') is 0, which would silently write a permanent key instead of an expiring one.
 function parseCustomMs(raw: string): { ms?: number; error?: string } {
   const s = raw.trim()
   if (s === '') return { error: 'enter a TTL in milliseconds, or pick a preset' }
@@ -30,10 +24,6 @@ function parseCustomMs(raw: string): { ms?: number; error?: string } {
   return { ms: Math.round(ms) }
 }
 
-// Everything that PUTS data into the cluster. Split from the read panel because the two
-// are different questions — "put this somewhere" and "where did this come from" — and
-// sharing one card made them share an error line too, so a failed write left its
-// complaint sitting above an unrelated read result.
 export function WritePanel({ onAction }: { onAction: () => void }) {
   const [k, setK] = useState('')
   const [v, setV] = useState('')
@@ -55,9 +45,7 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
       ms = parsed.ms!
     }
 
-    // Only clear the inputs if it actually landed — after a failure the user wants to
-    // retry, not retype. The TTL choice sticks, so writing several expiring keys in a
-    // row doesn't mean re-picking it every time.
+    // Only clear the inputs if the write landed, so a failure can be retried without retyping.
     if (await run(() => setKey(k.trim(), v, ms))) {
       setK('')
       setV('')
@@ -115,9 +103,6 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
             aria-label="custom TTL in milliseconds"
           />
           <span className="unit">ms</span>
-          {/* Say what they actually asked for, in the same words the key panel will use
-              to count it down — so a typo is caught before the key is written, not after
-              it has already quietly vanished. */}
           <span className="ttl-preview">
             {(() => {
               const p = parseCustomMs(customMs)

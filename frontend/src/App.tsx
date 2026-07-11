@@ -32,9 +32,6 @@ export default function App() {
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
-            {/* SET and GET are separate cards: they ask different questions, and a
-                write's error has no business sitting above a read's result.
-                ReadPanel takes no onAction — a read changes nothing to go and fetch. */}
             <WritePanel onAction={refresh} />
             <ReadPanel />
             <ActivityLog events={state.events} />

@@ -2,9 +2,8 @@ import { useEffect, useMemo, useRef } from 'react'
 import type { State } from '../api'
 import { COLORS, colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, ownershipArcs } from '../geometry'
 
-// Deliberately unhurried: a viewer has to *see* a key leave one node and arrive at
-// another — at 750ms it read as a flicker. Packets are staggered so a heal reads as a
-// stream rather than a burst, and the stagger is capped so a big heal still ends promptly.
+// Slow enough that a key is visibly seen travelling between nodes; the stagger is capped
+// so a large heal still finishes promptly.
 const PACKET_MS = 1900
 const PACKET_STAGGER_MS = 140
 const MAX_STAGGER_MS = 2200
@@ -12,17 +11,16 @@ const SHOCK_MS = 1100
 
 export function RingViz({ state, prev }: { state: State; prev: State | null }) {
   const layerRef = useRef<SVGGElement>(null)
-  // Memoised, and not merely for speed: `angles` is an effect dependency, so a fresh
-  // object every render would re-run the diff below and fire the same packets twice.
+  // Must stay memoised: `angles` is an effect dependency, so a fresh object each render
+  // would re-run the diff below and fire the same packets twice.
   const angles = useMemo(() => markerAngles(state.nodes), [state.nodes])
   const underCount = state.keys.filter((k) => k.underReplicated).length
   const arcs = useMemo(() => ownershipArcs(state.vnodes), [state.vnodes])
   const labels = useMemo(() => keyLabels(state.keys), [state.keys])
 
-  // Transient particle layer, driven imperatively: these elements are born, animate
-  // once and delete themselves, so React has no reason to know they exist. Diff prev
-  // against current to fly a packet when a key gains a holder (a re-replication) and
-  // pulse a shockwave when a node dies or returns.
+  // Transient particle layer, driven imperatively: these elements animate once and remove
+  // themselves, so React never has to know they exist. Diff prev against current to fly a
+  // packet when a key gains a holder, and pulse a shockwave when a node dies or returns.
   useEffect(() => {
     const layer = layerRef.current
     if (!prev || !layer) return
@@ -38,8 +36,8 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
       const [x1, y1] = xy(from, NODE_R)
       const [x2, y2] = xy(to, NODE_R)
       spawn(
-        // `color` drives the drop-shadow via currentColor; `opacity: 0` keeps a staggered
-        // packet from sitting visibly on its source node until its turn comes.
+        // `color` feeds the drop-shadow via currentColor; opacity 0 keeps a staggered packet
+        // off its source node until its turn comes.
         { cx: x1, cy: y1, r: 7, class: 'packet', fill: color, color, opacity: 0 },
         [
           { transform: 'translate(0,0)', opacity: 0 },
@@ -96,17 +94,16 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
 
         <circle className="ringbase" cx={360} cy={360} r={RING} />
 
-        {/* the ring, as arcs coloured by the node owning each slice */}
         {arcs.map((a, i) => (
           <path key={i} className="varc" d={a.d} stroke={colorFor(a.owner)} />
         ))}
 
-        {/* leaders first, so dots and names sit on top of them */}
+        {/* Leaders first: SVG paints in document order, so dots and names sit on top. */}
         {labels.map(
           (l) => l.leader && <line key={l.key} className="keyleader" {...l.leader} />,
         )}
 
-        {/* key dots on their true hash angle, coloured by primary owner */}
+        {/* Key dots sit at their true hash angle, unlike the node markers. */}
         {state.keys.map((k) => {
           const [cx, cy] = xy(k.angle, KEY_R)
           return (
@@ -128,7 +125,6 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
           )
         })}
 
-        {/* key names, each on its own radial spoke */}
         {labels.map((l) => (
           <text
             key={l.key}
