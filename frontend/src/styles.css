@@ -39,14 +39,23 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 @media (max-width: 1040px) { .grid { grid-template-columns: 1fr; } }
 
 .stage { position: relative; background: radial-gradient(600px 600px at 50% 46%, rgba(30, 44, 70, 0.35), transparent 70%), var(--panel); border: 1px solid var(--panel-brd); border-radius: 20px; padding: 8px; overflow: hidden; }
-svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display: block; margin: 0 auto; touch-action: none; }
+/* touch-action: manipulation, NOT none. The ring is the tallest thing on a phone, so a
+   finger swiping to scroll almost always starts on it — and `none` swallows that swipe,
+   leaving the page apparently frozen. Nothing here handles gestures, so there is nothing
+   to protect; `manipulation` still suppresses double-tap zoom. */
+svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display: block; margin: 0 auto; touch-action: manipulation; }
 .caption { position: absolute; left: 16px; bottom: 12px; color: var(--muted); font-size: 11.5px; max-width: 60%; line-height: 1.5; }
 .legend { position: absolute; right: 14px; top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
 .legend .row { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 .legend .dot { width: 9px; height: 9px; border-radius: 50%; }
 
+/* min-width: 0 on BOTH, or the column blows out the screen. A grid track of `1fr` is
+   really minmax(auto, 1fr), and that `auto` floor is the item's min-content width — so
+   one unshrinkable child sets the width of the whole column. .side had no floor of its
+   own and forced the track to 383px inside a 320px grid; body's overflow-x: hidden was
+   quietly clipping the result rather than fixing it. */
 .left { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.side { display: flex; flex-direction: column; gap: 16px; }
+.side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .muted-note { color: var(--muted); font-size: 12px; }
 
 .keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; max-height: 300px; overflow-y: auto; }
@@ -156,3 +165,63 @@ input:focus { outline: none; border-color: #22d3ee; }
 .heal-pill .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes healpulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 84, 112, 0.32); } 50% { box-shadow: 0 0 20px 3px rgba(255, 84, 112, 0.22); } }
+
+/* ---------------------------------------------------------------------------
+   Phones. Last in the file so these win on source order, not on !important.
+   --------------------------------------------------------------------------- */
+@media (max-width: 700px) {
+  /* Padding is 52px of a 390px screen — an eighth of the phone spent on margins. */
+  .wrap { padding: 14px 12px 28px; }
+  .grid { gap: 14px; }
+  .card, .stage { padding: 12px; border-radius: 14px; }
+
+  header { gap: 12px; margin-bottom: 12px; }
+  .title h1 { font-size: 18px; }
+  .title p { font-size: 11px; line-height: 1.45; }
+  /* Four tiles across a phone is ~90px each: the label wraps and the number shrinks to
+     nothing. Two rows of two, sized by the grid rather than by min-width. */
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+  .stat { min-width: 0; padding: 7px 11px; }
+  .stat .v { font-size: 18px; }
+
+  /* The ring is now ~360px wide, i.e. a 0.5 scale on a 720-unit viewBox — so a 10-unit
+     key label renders at 5px. Illegible, and 12 of them collide into fuzz. Drop the
+     names and keep the dots: the ring still shows arcs, ownership colour and the keys
+     flying on a heal, and the key panel underneath already names every owner. */
+  .keylabel, .keyleader { display: none; }
+  /* Each node's id is drawn on its own marker, so the legend is pure duplication here. */
+  .legend { display: none; }
+  /* Absolute inside a short stage, this landed on top of the ring. */
+  .caption { position: static; max-width: 100%; margin: 6px 2px 0; }
+
+  .keygrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); max-height: 260px; }
+
+  /* Touch targets. 4px of padding is a ~24px-tall button — under the ~44px that a
+     finger can hit reliably, and these are the buttons the whole demo turns on. */
+  .nrow { padding: 7px 9px; gap: 6px; }
+  .nrow .id { min-width: 40px; }
+  .nrow .meta { font-size: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nrow button, .btns button { padding: 9px 12px; font-size: 12px; }
+  button { padding: 9px 13px; font-size: 12.5px; }
+
+  /* 16px is the threshold below which iOS Safari zooms the page in on focus and leaves
+     it zoomed — the single most common way a mobile form feels broken. */
+  input { font-size: 16px; padding: 10px 11px; }
+
+  .log { max-height: 60vh; }
+  /* A long node id or key list should wrap rather than widen the card. */
+  .ev { flex-wrap: wrap; }
+  .ev .rollup { margin-left: auto; }
+
+  /* Everything inside the SVG is in viewBox units, so the same 0.5 scale that made the
+     key labels illegible applies to all of it: a 14-unit node id lands at 7px. Scale the
+     text that survived back up. Safe where the key labels were not — there are five node
+     markers, they are far apart, and nothing here can collide. */
+  .nodeg .label { font-size: 26px; }
+  .nodeg .sub { font-size: 15px; }
+  .center-badge { font-size: 52px; }
+  .center-sub { font-size: 18px; }
+  /* A 5-unit dot is 2.5px of screen — a speck. These are the keys; they should read. */
+  .keydot { r: 8; }
+  @keyframes underpulse { 0%, 100% { r: 8; filter: drop-shadow(0 0 2px var(--danger)); } 50% { r: 12; filter: drop-shadow(0 0 8px var(--danger)); } }
+}
