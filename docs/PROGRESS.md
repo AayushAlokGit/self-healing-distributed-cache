@@ -43,6 +43,10 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
   load, passes alone = a test leaning on a timing budget it does not own (a fixed `time.Sleep` where it should
   **poll for the condition**). Reproduce it with `go test -race -count=1 ./...` (the whole suite is the load), not
   by re-running `./cluster/`. A flake you tolerate is a flake that teaches you to ignore red.
+- **(f) Phase 7 — the partition / AP↔CP demo** ← *now fully designed (S16).* `docs/CAP.md` owns the reasoning
+  (lean), `docs/CAP_DEMO.md` the visual/UI spec + the scorecard. Build arc: **7A** partition (split-brain on a
+  button) → **7B** Lamport versions (the lost-update ghost) → **7C** the AP↔CP toggle (refusals, checkerboard,
+  live scorecard). Highest-value *new capability*, and 7B is where **presence ≠ version** finally gets fixed in code.
 
 ### Carried forward — re-ask cold (full text in `QUIZZES.md`)
 1. **Presence ≠ version** (S9) — the only genuine knowledge gap on the board.
@@ -481,6 +485,36 @@ re-replicate.
 
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
+
+### Session 16 — 2026-07-14 · CAP made teachable, and the doc that overstated itself
+**Teach + doc, no build, no formal quiz.** A deep pass on the Phase 7 material — partition, concurrent writes,
+versions, the AP↔CP dial — driven by Aayush's questions, then written down. Three through-lines landed:
+- **"Concurrent" means no information flowed** (happened-before), *not* "same wall-clock instant." Two writes an
+  hour apart are concurrent if no knowledge passed between them.
+- **A version does two jobs** — resolve *staleness* (CP; a real "later" exists, causally ordered) and cope with
+  *divergence* (AP; no "later" exists). Kicked off by Aayush's catch: *"if quorums prevent conflicts, why do we
+  need versions?"* The fix — a quorum makes the latest write **reachable**; only a version says **which reply it
+  is**. Overlap ≠ identification; the quorum handles divergence, not staleness (replicas lag by design at `W<R`).
+- **Lost updates survive the quorum** — *overlap ≠ serialize.* Two concurrent writes both reach `W=2` on a
+  **healthy** network and one is silently dropped; even `W=3` doesn't fix it (a serialization problem, not a
+  quorum-size one — only consensus does). And CP's *refused* writes are AP's *divergent/lost* writes — the same
+  conflicts, moved from **silent to loud**.
+
+**The doc overstated itself; a critical pass caught six claims.** Rewrote `CAP.md` lean (466 → ~230 lines, one
+example per idea), then reviewed it adversarially. Worst was an internal contradiction: §9 said Lamport *"only
+ever arbitrates staleness"* while §10 says CP still loses genuinely concurrent writes. Also fixed *"exactly one
+side under any cut"* (only true for a 2-way cut), *"zero lost writes"* (scoped to the partition scenario), and
+*"only because W=1"* (the shrinking ring is the co-cause). Then Aayush flagged *"quorums prevent conflicts"* as
+**itself** the confusing bit → removed it everywhere; the divergence/staleness split carries the point without it.
+
+**New: `docs/CAP_DEMO.md`** — the visual/UI demo spec. What a stranger clicks and what the ring reflects (the
+tear, two-colored keys, red-padlock refusals on nodes that *hold the data*, the checkerboard, the lost-update
+ghost, the live scorecard), plus the scorecard with a full 5-key worked example (**AP** 100% accepted / 5
+divergent · **CP** 50% accepted / 0 divergent / 5 refused — the same five writes, refused instead of corrupted).
+Both docs committed (`19839e9`).
+
+**Debt:** `presence ≠ version` (carried #1) was taught hard here but the teaching was **doc-driven, not quizzed**
+— still deserves a cold re-ask. The `CAP.md` §12 quick-checks were reasoned through in conversation but not graded.
 
 ### Session 15 — 2026-07-11 · The deploy the notify commit broke
 **Fix only.** Render failed the build: `no required module provides package .../notify`. Green locally, red in the
