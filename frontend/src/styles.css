@@ -36,22 +36,23 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .title h1 .accent { background: linear-gradient(90deg, #22d3ee, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .title p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
 
-/* One tab per demo cluster. These pick WHICH demo, so they must not look like the panels'
-   action buttons — those are the things you're meant to click. Hence a quiet underline
-   rather than a filled pill, and no lift on hover (the base `button` rule adds one).
-   Specificity beats the `button` rules regardless of source order. */
-.tabs { display: flex; gap: 2px; margin: 9px 0 2px; }
+/* One tab per demo cluster — which demo you are looking at, so it sits second only to the
+   h1: above the 12.5px blurb, well above the 11.5px action buttons. Sized between the
+   title and the blurb (22 → 15 → 12.5) so the hierarchy reads without a box around it.
+   Still navigation, not action: a quiet underline rather than a filled pill, and no lift on
+   hover (the base `button` rule adds one). Specificity beats `button` regardless of order. */
+.tabs { display: flex; gap: 4px; margin: 11px 0 3px; }
 .tabs .tab {
   background: none; color: var(--muted);
-  border-radius: 7px 7px 0 0; padding: 5px 10px 6px;
-  font-size: 12px; letter-spacing: 0.2px;
+  border-radius: 8px 8px 0 0; padding: 8px 15px 9px;
+  font-size: 15px; font-weight: 600; letter-spacing: 0.2px;
   border-bottom: 2px solid transparent;
 }
 .tabs .tab:hover { color: var(--ink); background: rgb(var(--steel) / 0.12); transform: none; }
 .tabs .tab.active {
   color: var(--ink);
-  background: rgb(var(--cyan) / 0.07);
-  border-bottom-color: rgb(var(--cyan) / 0.85);
+  background: rgb(var(--cyan) / 0.09);
+  border-bottom-color: rgb(var(--cyan) / 0.9);
 }
 .offline-badge { color: rgb(var(--danger)); font-size: 12px; font-weight: 600; }
 /* A cold start is expected, not an error, so it must not be red. */
