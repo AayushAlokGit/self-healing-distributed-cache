@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { API_BASE, createApi } from './api'
+import { API_BASE, createApi, type State } from './api'
 import { ActivityLog } from './components/ActivityLog'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
@@ -16,21 +16,31 @@ import { ClusterProvider, useClusterState } from './hooks'
 // and a node killed there would quietly corrupt a run here.
 //
 // ⚠️ `id` must name a cluster the server knows, or every call under that tab 404s.
-const TABS = [
+//
+// blurb takes the state rather than being a string, because it describes the cluster you are
+// looking at — so it cannot be written until there is one to describe. R comes from the
+// server for the same reason it does in Stats: the number is the cluster's to report, and a
+// second hardcoded copy here is just a copy that can be wrong.
+type Tab = {
+  readonly id: string
+  readonly label: string
+  readonly blurb: (s: State) => string
+}
+
+const TABS: readonly Tab[] = [
   {
     id: 'replication',
     label: 'Replication & Self-Heal',
-    blurb: 'Consistent-hash ring · R=3 replication · heartbeat failure detection · automatic re-replication',
+    blurb: (s) =>
+      `Consistent-hash ring · R=${s.rf} replication · heartbeat failure detection · automatic re-replication`,
   },
   {
     id: 'cap',
     label: 'CAP & Partitions',
-    blurb:
+    blurb: () =>
       'The same ring, on its own cluster. Network-cut controls and the consistency dial land next — for now, kill a node here and the other tab never notices.',
   },
-] as const
-
-type Tab = (typeof TABS)[number]
+]
 
 export default function App() {
   const [activeId, setActiveId] = useState<string>(TABS[0].id)
@@ -87,7 +97,7 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
               </button>
             ))}
           </nav>
-          <p>{tab.blurb}</p>
+          {state && <p>{tab.blurb(state)}</p>}
         </div>
         {state && <Stats state={state} prev={prev} />}
       </header>
