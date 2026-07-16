@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { clearKeys, deleteKey, type KeyState } from '../api'
+import { type KeyState } from '../api'
 import { ttlText } from '../format'
 import { colorFor } from '../geometry'
-import { useApiError } from '../hooks'
+import { useApi, useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
 
 // owners[0] is the primary (the first node clockwise); the rest are its replicas.
@@ -10,6 +10,7 @@ export function KeyTable({ keys, onAction }: { keys: KeyState[]; onAction: () =>
   const sorted = [...keys].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))
   const expiring = keys.filter((k) => k.ttlMs >= 0).length
 
+  const { clearKeys, deleteKey } = useApi()
   const { err, run } = useApiError()
   const [armed, setArmed] = useState(false) // "delete all" wants a second click
   const [busy, setBusy] = useState<string | null>(null)

@@ -1,9 +1,10 @@
-import { killNode, reviveNode, type NodeState } from '../api'
+import { type NodeState } from '../api'
 import { colorFor } from '../geometry'
-import { useApiError } from '../hooks'
+import { useApi, useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
 
 export function NodePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: () => void }) {
+  const { killNode, reviveNode } = useApi()
   const { err, run } = useApiError()
 
   // Refresh even when the call failed, so the UI re-syncs instead of showing a stale guess.

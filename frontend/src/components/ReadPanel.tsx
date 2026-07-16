@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { getKey, type ReadHop, type ReadResult } from '../api'
-import { useApiError } from '../hooks'
+import { type ReadHop, type ReadResult } from '../api'
+import { useApi, useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
 import { NodeChip } from './NodeChip'
 
@@ -38,6 +38,7 @@ function ReadPath({ path }: { path: ReadHop[] }) {
 export function ReadPanel() {
   const [readKey, setReadKey] = useState('')
   const [result, setResult] = useState<ReadResult | null>(null)
+  const { getKey } = useApi()
   const { err, run } = useApiError()
 
   // A failed request is not a miss: clear the old result so an error never renders as

@@ -96,51 +96,63 @@ async function ok(res: Response, what: string): Promise<Response> {
   throw new Error(`${what} failed (${res.status})` + (reason ? `: ${reason.slice(0, 200)}` : ''))
 }
 
-export async function getState(): Promise<State> {
-  const res = await ok(await fetch(API_BASE + '/api/state'), 'state')
-  const s = await res.json()
-  // Go marshals a nil slice as null, so default every array or the UI blanks.
+// createApi binds every call to ONE cluster (the backend runs several — see demoClusters in
+// cmd/server/main.go). Nothing here can reach another cluster, because the id is captured
+// once here and never passed around afterwards: components ask for their api via useApi()
+// and cannot name a cluster at all. That is the whole isolation story on the client — a
+// component holding a clusterId string could be handed a stale or wrong one and would kill
+// a node on the wrong demo, and it would look like a real bug rather than a typo.
+//
+// ⚠️ It returns a NEW object per call, so callers must useMemo it — see App.tsx.
+export function createApi(cluster: string) {
+  const base = `${API_BASE}/api/${cluster}`
+
+  const post = async <T,>(path: string, body: unknown, what: string): Promise<T> => {
+    const res = await ok(
+      await fetch(base + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      what,
+    )
+    return res.json()
+  }
+
   return {
-    ...s,
-    nodes: s.nodes ?? [],
-    keys: s.keys ?? [],
-    vnodes: s.vnodes ?? [],
-    events: s.events ?? [],
+    cluster,
+
+    async getState(): Promise<State> {
+      const res = await ok(await fetch(base + '/state'), 'state')
+      const s = await res.json()
+      // Go marshals a nil slice as null, so default every array or the UI blanks.
+      return { ...s, nodes: s.nodes ?? [], keys: s.keys ?? [], vnodes: s.vnodes ?? [], events: s.events ?? [] }
+    },
+
+    async getKey(key: string): Promise<ReadResult> {
+      const res = await ok(await fetch(base + '/get?key=' + encodeURIComponent(key)), `read ${key}`)
+      return res.json()
+    },
+
+    killNode: (id: string) => post<void>('/kill', { id }, `kill ${id}`),
+    reviveNode: (id: string) => post<void>('/revive', { id }, `revive ${id}`),
+
+    // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs.
+    setKey: (key: string, value: string, ttlMs: number) => post<void>('/set', { key, value, ttlMs }, `write ${key}`),
+    seedKeys: (n: number) => post<void>('/seed', { n }, `seed ${n} keys`),
+
+    // POST, not DELETE: the control API allows GET/POST only, so a DELETE fails the browser's
+    // preflight. dropped is the nodes that held the key — empty means nobody did, which is a
+    // successful delete, not an error.
+    deleteKey: (key: string) => post<{ dropped: string[] }>('/delete', { key }, `delete ${key}`),
+
+    // keys, not copies: one key on three replicas counts once.
+    clearKeys: () => post<{ keys: number }>('/clear', {}, 'delete all keys'),
   }
 }
 
-async function post<T>(path: string, body: unknown, what: string): Promise<T> {
-  const res = await ok(
-    await fetch(API_BASE + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }),
-    what,
-  )
-  return res.json()
-}
-
-export const killNode = (id: string) => post<void>('/api/kill', { id }, `kill ${id}`)
-export const reviveNode = (id: string) => post<void>('/api/revive', { id }, `revive ${id}`)
-// ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs.
-export const setKey = (key: string, value: string, ttlMs: number) =>
-  post<void>('/api/set', { key, value, ttlMs }, `write ${key}`)
-export const seedKeys = (n: number) => post<void>('/api/seed', { n }, `seed ${n} keys`)
-
-// POST, not DELETE: the control API allows GET/POST only, so a DELETE fails the browser's
-// preflight. dropped is the nodes that held the key — empty means nobody did, which is a
-// successful delete, not an error.
-export const deleteKey = (key: string) =>
-  post<{ dropped: string[] }>('/api/delete', { key }, `delete ${key}`)
-
-// keys, not copies: one key on three replicas counts once.
-export const clearKeys = () => post<{ keys: number }>('/api/clear', {}, 'delete all keys')
-
-export async function getKey(key: string): Promise<ReadResult> {
-  const res = await ok(await fetch(API_BASE + '/api/get?key=' + encodeURIComponent(key)), `read ${key}`)
-  return res.json()
-}
+// Api is derived from createApi rather than declared, so the two cannot drift apart.
+export type Api = ReturnType<typeof createApi>
 
 export function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)

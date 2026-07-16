@@ -1,7 +1,6 @@
 import { useState } from 'react'
-import { seedKeys, setKey } from '../api'
 import { ttlText } from '../format'
-import { useApiError } from '../hooks'
+import { useApi, useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
 
 // TTL presets, in ms to match the ttlMs the dashboard reports back. 0 = never expires.
@@ -47,6 +46,7 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
   const [custom, setCustom] = useState(false)
   const [customMs, setCustomMs] = useState('')
   const [seedCount, setSeedCount] = useState('8')
+  const { seedKeys, setKey } = useApi()
   const { err, run, fail } = useApiError()
 
   const seedN = parseSeedCount(seedCount)
