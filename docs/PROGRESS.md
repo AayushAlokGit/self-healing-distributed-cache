@@ -43,10 +43,25 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
   load, passes alone = a test leaning on a timing budget it does not own (a fixed `time.Sleep` where it should
   **poll for the condition**). Reproduce it with `go test -race -count=1 ./...` (the whole suite is the load), not
   by re-running `./cluster/`. A flake you tolerate is a flake that teaches you to ignore red.
-- **(f) Phase 7 — the partition / AP↔CP demo** ← *now fully designed (S16).* `docs/CAP.md` owns the reasoning
-  (lean), `docs/CAP_DEMO.md` the visual/UI spec + the scorecard. Build arc: **7A** partition (split-brain on a
-  button) → **7B** Lamport versions (the lost-update ghost) → **7C** the AP↔CP toggle (refusals, checkerboard,
-  live scorecard). Highest-value *new capability*, and 7B is where **presence ≠ version** finally gets fixed in code.
+- **(f) Phase 7 — the partition / consistency-dial demo** ← *designed S16, reworked S17.* `docs/CAP.md` owns
+  the reasoning, `docs/CAP_DEMO.md` the demo spec + the scorecard. Highest-value *new capability*, and it's
+  where **presence ≠ version** finally gets fixed in code. Build arc, now **three steps**:
+  - **7.0 — a second cluster on a second tab.** The CAP demo leaves the network cut for minutes at a time;
+    it cannot share a ring with the replication demo. Verified S17 with a throwaway `-race` probe: **two
+    `cluster.Cluster` values in one process are already fully independent** — nodes bind `127.0.0.1:0` so the
+    OS assigns ports (no collision), and there is **no package-level mutable state** in `cluster/`, `node/`,
+    or `cache/`. Killing a node in A left B at 5 alive; a key written to A was invisible in B. So `cluster/`
+    needs **zero changes**; the work is `cmd/server` (~40 lines: a cluster map + an `/api/{cluster}/…` path
+    prefix) and the frontend (an api factory + tabs). Ships as an empty second tab.
+  - **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Demo:
+    both sides accept a write, the heal proves the two writes never saw each other, and **keeps both**.
+  - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
+    `Cluster.SetQuorum(w, rRead)` — `rf`/`wq` are fixed at `New()` today. **The only `cluster/` change Phase 7
+    asks for.**
+  - ⚠️ **Vector clocks, not Lamport (decided S17).** The two writes either side of a cut are *genuinely
+    concurrent* (`CAP.md` §4: no "later" one exists), so Lamport would **invent** an order and silently
+    destroy an acked write. Vector clocks detect the clash and surface it. **`CAP.md` §9 still decides
+    Lamport and needs a rewrite** — along with §10–§14; `CAP_DEMO.md` §7 lists every stale line.
 
 ### Carried forward — re-ask cold (full text in `QUIZZES.md`)
 1. **Presence ≠ version** (S9) — the only genuine knowledge gap on the board.

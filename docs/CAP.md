@@ -1,7 +1,12 @@
-# CAP, partitions, and the AP→CP dial — Phase 7 design
+# CAP, partitions, and the consistency dial — Phase 7 design
 
 **Status: taught, not built.** Turns CAP from three letters into a *button a stranger can press* and a
 *table our cluster produces* (§12). The deliverable is numbers, not a diagram.
+
+> ⚠️ **Two things this doc deliberately does not say.** It does not call the strong end of the dial **"CP"** —
+> it is Cassandra's `QUORUM`, *stronger than eventual*, not *consistent* (§13). And the version scheme is a
+> **vector clock**, not Lamport (§9, decided S17) — because the two writes either side of a cut are genuinely
+> concurrent (§4), and Lamport would invent an order that does not exist.
 
 **Running example:** 5 nodes `n0..n4`, `R=3`, key `user:1 = alice`, cut **A = {n0,n1,n2}** | **B = {n3,n4}**.
 
@@ -193,31 +198,58 @@ Stamp each write so reconciliation can order them. Three families, **not** equiv
 carol=[1,0,0,0,1]`, neither ≤ the other → detected. But detection is the ceiling: "concurrent" *means* no
 winner exists, so it hands both siblings to the **application** (union the carts, add the counters, ask a human).
 
-### Decision: **Lamport `(counter, nodeID)`**
-`c++` per write coordinated; `c = max(c, incoming) + 1` per write received; compare by counter, tie-break
-by node id. ~20 lines — the **same move as Phase 1** (`time.Now()` stood still for 541µs → replace the
-clock with a counter): *you cannot order events by asking a clock*, one machine wider.
+### Decision: **vector clock** — one counter per node, carried on the value
 
-- ✅ **Delivers what CP promises** — no stale reads, no split-brain (with the fixed ring). Resolving a
-  read quorum's replies is a *staleness* question, and staleness is causally ordered, so a causal total
-  order picks correctly.
-- ❌ **Fixes nothing about genuine concurrency** — it always names a winner, so it still silently drops
-  one of two concurrent acked writes, **including CP's own healthy-network lost updates (§10).** No clock
-  fixes that; **only consensus does (§13).** A vector clock would at least *detect* them (siblings, not
-  silent loss) — at the cost of per-writer metadata and an app merge.
-- ⚠️ **Cluster-in-a-box decides it.** Our five "nodes" share **one `time.Now()`** — no skew at all — so
-  wall-clock LWW would look flawless *because our topology deleted its failure mode.* A counter has
-  nothing to flatter. (A real LWW demo would need a "set n4 +5s" skew button.)
-- ⚠️ A **per-key** version forces a read-before-write (a round trip per write); a **per-node** counter is
-  stamped immediately — *that's why Cassandra uses wall clocks.* We dodge it.
+*(Decided S17. This section previously chose **Lamport**, for being ~20 lines. The reversal is argued below;
+`CAP_DEMO.md` is written against this choice.)*
+
+Merge, then stamp your own slot: on a write, `v[i] = max(v[i], local[i])` for every `i`, then `v[self]++`.
+Compare by **dominance** — `a` is later than `b` when `a[i] ≥ b[i]` for **every** `i` and `a[i] > b[i]` for at
+least one. If **neither** dominates, the two writes are **concurrent (§4)** and both are kept, as
+**siblings**. Still the **same move as Phase 1** (`time.Now()` stood still for 541µs → replace the clock with
+a counter): *you cannot order events by asking a clock* — one counter per machine instead of one.
+
+**Why not Lamport, which is smaller.** Because of §4. The two writes either side of a cut are *genuinely
+concurrent*: neither writer could have known about the other, so **there is no "later" one to find.** Lamport
+names one regardless — it collapses history into a single integer and takes the bigger. That is not
+*resolving* the conflict, it is **inventing a fact §4 says does not exist** and destroying an acked write on
+the strength of it, with no error to anybody. Worse, it cannot even *tell the two cases apart*: from
+`carol=6, bob=8` you cannot distinguish `carol → bob` (really later) from `carol ∥ bob` (never met). **A
+mechanism that cannot separate "these clash" from "this one is merely behind" cannot be the centrepiece of a
+demo about what happens when writes clash.**
+
+- ✅ **Does everything Lamport did for the quorum setting.** Resolving a read quorum's replies is a
+  *staleness* question (above), and staleness **is** causally ordered — so one vector genuinely dominates and
+  the current value is picked correctly. No stale reads, no split-brain (with the fixed ring).
+- ✅ **Detects real concurrency — the reason it's here.** `bob=[2,0,0,0,0] ∥ carol=[1,0,0,0,1]`: neither is
+  ≤ the other. The demo can put both vectors on screen and let a viewer *see* why no winner exists, instead
+  of taking our word for it (`CAP_DEMO.md` §3).
+- ❌ **Detection is still the ceiling.** *"Concurrent" means no winner exists*, so it hands both siblings to
+  the **application** — union the carts, add the counters, ask a human. Our cache holds opaque strings, so
+  there is **nothing to merge and no basis for the app to choose either.** That is not a hole in our
+  implementation; it is what the word means. **Only consensus prevents the collision (§10, §13).**
+- ⚠️ **Siblings accumulate.** A value is now a *set*, and nothing shrinks it but a resolution. Riak shipped
+  exactly this, and sibling explosion was its most-cursed operational failure — which is a large part of why
+  the industry took LWW's silent loss instead. Our demo has 5 keys and a human watching; a real cluster has
+  millions and nobody.
+- ⚠️ **The vector grows per writer** — one counter per node that ever wrote the key. Five nodes is five ints,
+  free. Real clusters must prune it. And a **per-key** version forces a read-before-write (a round trip per
+  write) that a **per-node wall clock** dodges — *that is why Cassandra uses wall clocks and eats the silent
+  loss.* We dodge the round trip only because the coordinator is already an owner and merges its local copy.
+  **Cluster-in-a-box makes this look cheaper than it is.**
+- ⚠️ **Cluster-in-a-box would have flattered wall-clock LWW.** Our five "nodes" share **one `time.Now()`** —
+  no skew at all — so LWW would have looked flawless here *because our topology deleted its failure mode.*
+  (A real LWW demo would need a "set n4 +5s" skew button.) Not a reason to pick vectors, but a reason never
+  to read a clean LWW run here as evidence.
 
 ---
 
-## 10. What quorums still DON'T fix: lost updates
+## 10. What quorums still DON'T fix: writes that collide
 
-The per-key quorum (fixed ring + versions) fixes **stale reads** and **split-brain** — **not lost
-updates.** The reason corrects a natural misconception: *lost updates aren't a residual of split-brain.*
-Split-brain is gone; they survive, from an independent cause needing **no partition.**
+The per-key quorum (fixed ring + versions) fixes **stale reads** and **split-brain** — but it does **not
+stop two writes colliding.** The reason corrects a natural misconception: *colliding writes aren't a
+leftover of split-brain.* Split-brain is gone; they survive, from an independent cause needing **no
+partition.**
 
 Healthy network, `user:1`, owners `{n0,n1,n2}`, `W=2`:
 
@@ -231,105 +263,163 @@ Both quorums are legitimate and **overlap** at n1 — exactly what `W+R_read>R` 
 > **Quorums OVERLAP; they don't SERIALIZE.** Overlap means a reader *touches* a recent write; it says
 > nothing about the **order** writes were applied in.
 
-The owners apply `bob` and `carol` in packet-arrival order and disagree; reconciliation (highest Lamport
-stamp) collapses them to **one**. The other acked write is **gone — `204` told, silently lost, no
-partition anywhere.**
+The owners apply `bob` and `carol` in packet-arrival order and disagree — and **neither vector dominates**
+(§9), because neither writer had heard of the other. So the pair survives as **siblings**, on a healthy
+network, at the strongest setting the dial has. **Both clients were told `204`, and both were told the
+truth.**
+
+> ⚠️ **This is what the version choice buys, and where it stops.** A **Lamport** stamp would have collapsed
+> the pair to one here and **silently destroyed an acked write** — no partition, no error, nobody told. A
+> **vector clock** cannot do that: it reports the collision instead of inventing a winner. But it cannot
+> *resolve* it either — the update is no longer **lost**, it is **unresolved**, and for an opaque string the
+> app's only move is to pick one arbitrarily and lose it knowingly. **Detection is the ceiling (§9).**
 
 ⚠️ **Bigger W doesn't help.** Even `W=3`: both writes reach all three owners, both get 3 acks, both `204`,
-reconciliation still drops one. **Lost updates are a serialization problem, not a quorum-size one.**
+and you still get the same two siblings. **Colliding writes are a serialization problem, not a quorum-size
+one.**
 
 The only fix: force all writes to a key through **one order** — a leader per key, a **compare-and-swap on
-the version** (the loser's CAS *fails* and it's *told* to retry, not silently dropped), or a replicated
-log. **That is consensus. That is Raft. Out of scope** (§13).
+the version** (the loser's CAS *fails* and it's *told* to retry, rather than being handed a sibling to sort
+out later), or a replicated log. That doesn't *resolve* the collision — **it stops the two writes from ever
+being concurrent.** That is consensus. That is Raft. **Out of scope** (§13).
 
 ---
 
-## 11. The knob map: CAP is a configuration, not an architecture
+## 11. The knob map: the dial is two numbers
 
-Not a second system: **flip one toggle and the same code behaves differently under an identical
-failure.** The difference is five numbers:
+Not a second system: **turn one dial and the same code behaves differently under an identical failure.**
+The difference is **two numbers**:
 
-| knob | **AP** (today) | **CP** (target) | where it lives |
+| the dial | **keeps both** (eventual) | **refuses one** (quorum) | where it lives |
 |---|---|---|---|
-| **R** — copies per key | 3 | 3 *(unchanged)* | `defaultReplicationFactor` |
 | **W** — acks before "done" | **1** | **2** | `defaultWriteQuorum` |
 | **R_read** — replies before a read answers | **1** *(first reachable hit)* | **2** | `handleClientGet`'s `break` |
-| **ring drops silent nodes** | **yes** — re-route | **no** — fixed denominator | `ring.Remove` in `heartbeatRound` |
-| **version on each value** | **none** — bare `string` | **Lamport `(counter, nodeID)`** | `cache.Entry` |
-| **conflict rule** | **presence** → 200 → skip | **compare versions** → newest wins + read-repair | `heal()` → `fetchFrom` |
+
+⚠️ **Not "AP → CP."** The strong end is **Cassandra's `QUORUM`**, not a CP system (§13). It is *stronger than
+eventual*; it is not *consistent*.
+
+**What rides along** — implied by the setting, never chosen beside it:
+
+| | **keeps both** | **refuses one** | why |
+|---|---|---|---|
+| **ring drops silent nodes** | **yes** — re-route | **no** — the fixed denominator | §8. Quorum needs the ring held still or `W=2` is a rubber stamp; eventual needs the shrink to stay maximally available. `ring.Remove` in `heartbeatRound` |
+
+**What is a prerequisite** — built once in 7A, and the dial never touches it:
+
+| | both settings | why |
+|---|---|---|
+| **R** — copies per key | 3 | never moves. `defaultReplicationFactor` |
+| **vector clock on each value** | **required** | quorum needs it to pick the current reply; eventual needs it to tell a clash from a lagging replica (§9). `cache.Entry` |
+| **conflict rule** | dominant vector wins; **if neither dominates, keep both** | same field, same rule, both settings. `heal()` → `fetchFrom` |
+
+> ⚠️ **A dial should only offer settings a real operator would actually pick.** "Quorum on a shrinking ring"
+> is a rubber stamp (§8). "No versions at all" is a heal that preserves divergence forever
+> (`presence ≠ version`). Neither is a consistency level — **both are bugs** — so neither gets a position on
+> the dial. Cassandra's real dial is `ONE` vs `QUORUM`, which is exactly the two settings above.
 
 It collapses to one inequality:
 
-> **AP:** `W + R_read = 2`, **not** `> R=3` → sets need not overlap → stale reads possible *by design*,
-> and both sides of a cut may write.
-> **CP:** `W + R_read = 4`, which **is** `> R=3` → sets **must** share a node → no stale reads, and only
-> one side of a cut can write.
+> **keeps both:** `W + R_read = 2`, **not** `> R=3` → sets need not overlap → stale reads possible *by
+> design*, and both sides of a cut may write.
+> **refuses one:** `W + R_read = 4`, which **is** `> R=3` → sets **must** share a node → no stale reads, and
+> only one side of a cut can write.
+
+⚠️ **Neither number does anything alone.** `W=2, R_read=1` sums to 3, and so does `W=1, R_read=2` — both
+still allow a stale read. Only the **pair** crosses `> R`. That's the readout the dashboard puts next to the
+dial (`CAP_DEMO.md` §2), so a stranger finds the threshold by clicking rather than being shown a formula.
 
 **The fixed ring (§8) is what makes the inequality mean anything** — a shrinking ring lets `W=2` be
 satisfied by an invented set, and the quorum is a rubber stamp.
 
-**AP isn't a special case in the code — it's the parameters at their most permissive:**
+**The eventual setting isn't a special case in the code — it's the parameters at their loosest:**
 
 ```
-READ:   owners := ring.Owners(key)          // fixed ring in CP, shrunk in AP
+READ:   owners := ring.Owners(key)          // held fixed at quorum, shrunk at eventual
         ask owners in ring order until R_read successes, or run out
-        if successes < R_read:  503          // CP refuses here; AP (R_read=1) never gets here
-        return the reply with the highest version
+        if successes < R_read:  503          // quorum refuses here; eventual (R_read=1) never gets here
+        return the reply whose vector dominates — or EVERY sibling, if none does
 WRITE:  owners := ring.Owners(key)
-        write to all; if acks < W: 503; else ack   // CP refuses; AP (W=1) never gets here
+        write to all; if acks < W: 503; else ack   // quorum refuses; eventual (W=1) never gets here
 ```
+
+⚠️ **Note what the read returns.** Not "the newest" — *the dominant one, or all of them.* A read is now a
+`[]Entry`, not an `Entry`, and that ripples out to the client API and the dashboard. It is the largest
+structural cost of choosing vectors over Lamport (§9), and it is not optional: **if a read could always
+return one value, we wouldn't have needed a vector clock.**
 
 Two **additions, not knobs**: the **partition mechanism** (a fault injector like Kill, under the two
-`http.Client`s) and the **version field** (a prerequisite for both modes, built once in the middle).
+`http.Client`s) and the **vector clock field** (a prerequisite for both settings, built once in 7A).
 
 ---
 
 ## 12. The build arc, and the table the cluster produces
 
-- **7A — Partition. No knobs move.** Build the link cut; let a client pick its coordinator (`via=n0` /
-  `via=n4`). The system changes *not at all*; we gain the ability to **see** split-brain — both sides
-  accept a write to the same key, both `204`, and the heal preserves the conflict forever. A complete
-  demo on its own; drags `presence ≠ version` into daylight.
-- **7B — Versions. Still AP.** Every value gains a Lamport `(counter, nodeID)`. The heal stops asking
-  *"do you have it?"* and asks ***"whose is newer?"*** — it now **detects and resolves** the conflict, and
-  shows AP's price plainly: **an acked write disappears, no error.** Closes the S9 gap; read-repair for free.
-- **7C — CP mode. The toggle.** `W=2`, `R_read=2`, fixed ring, version-picking reads. Same cut, opposite
-  behaviour: availability becomes a property of the key, **no key served on both sides**, zero divergence,
-  and — *under the partition* — zero silently-lost writes (the losing side **refuses** with `503` rather
-  than accepting then dropping)… while the node holding their data sits right there refusing.
-  ⚠️ *Not* "no lost updates ever" — healthy-network concurrency still loses one (§10).
+*(Reworked S17: three steps, not the old 7A/7B/7C. The old **7A** shipped the cut with no versions, so its
+heal preserved divergence **forever** — that isn't a consistency level, it's the `presence ≠ version` bug
+with a demo built on it. Versions are a prerequisite (§11), so they moved into 7A and the arc lost a step.
+`CAP_DEMO.md` is the demo spec.)*
 
-**The deliverable — CAP as a measurement, not a definition:**
+- **7.0 — a second cluster, a second tab. Nothing new to see.** This demo leaves the network cut for minutes
+  while you write to both sides; it cannot share a ring with the Phase 6 replication demo. **`cluster/` needs
+  no changes** — nodes already bind `127.0.0.1:0` (the OS assigns ports, so two clusters can't collide) and
+  there is **no package-level mutable state** to share (`HLD.md` §4, verified under `-race`). The work is
+  `cmd/server` (a cluster map + an `/api/{cluster}/…` prefix) and the frontend. Ships as an empty second ring.
+- **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Let a
+  client pick its coordinator (`via=n0` / `via=n4`); every value gains a vector clock (§9). The heal stops
+  asking *"do you have it?"* and starts asking ***"did these two ever see each other?"*** — it **detects the
+  clash and keeps both**, then puts the two vectors on screen and asks *you*. Closes the S9 gap; read-repair
+  for free. A complete demo on its own.
+- **7B — the dial.** `W=2`, `R_read=2`, ring held fixed. Same cut, opposite behaviour: availability becomes
+  a property of the key, **no key served on both sides**, no clash to resolve — because the losing side
+  **refuses** with a `503` rather than accepting a write it can't reconcile, while the node holding the data
+  sits right there saying no. ⚠️ *Not* "no collisions ever" — healthy-network concurrency still collides
+  (§10), which is the demo's closing move.
 
-| under an identical partition | **AP** | **CP** |
+**The deliverable — CAP as a measurement, not a definition** (worked run in `CAP_DEMO.md` §5: 5 keys, each
+written from both sides during one cut, 10 attempts):
+
+| under an identical partition | **keeps both** | **refuses one** |
 |---|---|---|
-| writes accepted | 100% | ~60% |
-| keys divergent after the heal | *n* | **0** |
-| acked writes silently lost | *n* | **0** |
-| requests refused | 0 | *m* |
+| writes accepted | **100%** (10/10) | **50%** (5/10) |
+| requests refused | **0** | **5** |
+| conflicts handed to the app | **5** | **0** |
 
-*This table measures the **partition** scenario. CP shows 0 lost writes because the losing side refuses
-rather than accepting-then-dropping — **not** because CP fixes lost updates: the §10 healthy-network case
-is separate, and CP doesn't fix it.* Reproducible by a stranger with a button.
+**The 5 refused and the 5 conflicts are the same five writes.** Neither setting destroys the collision — it
+**moves in time.** Quorum bills you at *write* time, as a `503` you can see and retry; eventual bills you at
+*read* time, as two values with nothing to choose between them.
+
+*This table measures the **partition** scenario. The strong setting shows 0 conflicts because the losing side
+refuses — **not** because quorum stops writes colliding: the §10 healthy-network case is separate, and quorum
+doesn't fix it.* Reproducible by a stranger with a button.
 
 ---
 
 ## 13. The honest limits: the consistency ladder
 
-Quorums buy **no split-brain** and **no stale reads**, but **not no lost updates** (§10). The honest
-label for 7C is **Cassandra's `QUORUM`, not "strongly consistent"** — and being able to state that
+Quorums buy **no split-brain** and **no stale reads**, but they do **not stop writes colliding** (§10). The
+honest label for 7B is **Cassandra's `QUORUM`, not "strongly consistent"** — and being able to state that
 distinction is worth more in the writeup than being able to build Raft.
 
 ```
-W=1, R_read=1, shrinking ring          →  AP                  (today)     — stale reads, split-brain, lost updates
-W=2, R_read=2, fixed ring, versions    →  QUORUM consistency  (7C target) — fixes stale reads + split-brain
-leader + CAS / replicated log          →  LINEARIZABLE        (Raft)      — fixes lost updates too, out of scope
+W=1, R_read=1, shrinking ring, vectors →  eventual consistency (7A)   — stale reads; a cut yields siblings the app must merge
+W=2, R_read=2, fixed ring,     vectors →  QUORUM consistency   (7B)   — fixes stale reads + split-brain
+leader + CAS / replicated log          →  LINEARIZABLE         (Raft) — stops writes colliding at all, out of scope
 ```
+
+⚠️ **Read the third rung carefully.** Raft doesn't *resolve* collisions better than a vector clock does —
+**it prevents them**, by making every write to a key pass through one order so no two are ever concurrent.
+That's the whole difference: rungs 1–2 argue about what to do *after* a clash; rung 3 removes the clash.
+**Detection is the ceiling of any clock (§9); only serialization is above it.**
 
 Also missing, named not hidden:
 - **Tombstones** (`HLD.md` §7) — a delete is not a value, so heal can't tell *deleted* from *missing*.
 - **Hinted handoff** — a write to a down owner is dropped, not queued.
-- **Vector clocks** — with Lamport we *detect nothing*; it always picks a winner (§9).
+- **A semantic merge.** We *surface* siblings and hand them to a human with a button. A real system needs a
+  merge function per data type — union the carts, add the counters — or a CRDT that carries its own. Our
+  values are opaque strings, so **there is nothing to merge**, and the demo's resolve button is an
+  affordance, not an answer (§9).
+- **Vector pruning.** The vector grows one counter per writer, forever. Five nodes makes that invisible;
+  real clusters must cap it (Dynamo did), and cluster-in-a-box is what hides the cost (§9).
 
 ---
 
@@ -339,10 +429,17 @@ Also missing, named not hidden:
    **even on a perfectly healthy network?**
    *(gives read/write overlap ⇒ no stale reads + only one side writes; costs write fault-tolerance — `W=1`
    survives 2 owners down, `W=2` survives 1; **yes, paid every ordinary day.**)*
-2. **What a Lamport clock does NOT fix.** Side A writes `bob`, side B writes `carol`, concurrent. Lamport
-   picks a winner. What did it fix, what did it not, and **what was the losing client told at the time?**
-   *(fixed skew, fixed nothing about concurrency; fabricates an order and silently destroys an acked write;
-   the loser was told **`204 success`.**)*
-3. **Lost updates without a partition.** Two clients write `user:1` through n0 and n2 on a healthy network,
-   both reach `W=2`. Why is one write still lost, and why doesn't a bigger W fix it?
-   *(quorums overlap but don't serialize; no agreed order exists; only consensus/CAS fixes it.)*
+2. **What a vector clock does NOT fix.** Side A writes `bob`, side B writes `carol` — concurrent. The vector
+   clock finds that neither dominates and keeps both. What did it fix, what did it **not**, and **who decides
+   now, on what basis?**
+   *(Fixed the silence: nothing is destroyed, nobody is lied to, and the clash is **detected** rather than
+   invented away — which is exactly what Lamport could not do, since it can't tell `carol ∥ bob` from
+   `carol → bob`. Fixed **nothing about the clash itself**: "concurrent" means no winner exists, so detection
+   is the ceiling. The **app** decides — on **no basis at all** for an opaque string. A real app merges by
+   meaning (union carts, add counters); ours can't. Only consensus prevents the collision, §10/§13.)*
+3. **Colliding writes without a partition.** Two clients write `user:1` through n0 and n2 on a healthy
+   network, both reach `W=2`. Why do you still end up with two siblings, and why doesn't a bigger `W` fix it?
+   *(Quorums overlap but don't serialize — overlap means a reader touches a recent write, it says nothing
+   about the order writes were applied in. Neither writer saw the other, so no vector dominates and no agreed
+   order exists to find. `W=3` changes nothing: both writes reach all three owners and both are legitimate.
+   It's a serialization problem, not a quorum-size one — only consensus/CAS fixes it.)*

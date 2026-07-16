@@ -100,6 +100,30 @@ state and drives failure injection. Every node talks to peers directly; no coord
 | **Internal API** | node↔node RPC: replicate, heartbeat, transfer keys | 3–5 |
 | **Dashboard** | visualize ring + metrics; inject failure | 6 |
 
+### One process, more than one cluster
+
+> **⇒ PLANNED (Phase 7, step 7.0 — see `CAP_DEMO.md` §2).** The container will host **two independent
+> clusters**: the Phase 6 replication demo, and the CAP demo (which leaves the network cut for minutes at a
+> time and therefore cannot share a ring). One tab each.
+
+**The cluster layer needs no changes for this, and that's worth understanding rather than just noting.** Two
+existing decisions did the work:
+
+- **Nodes bind `127.0.0.1:0`**, so the OS assigns every port. Two clusters cannot collide because nobody
+  picked a number to collide over.
+- **`Cluster` holds all its state in its own fields** (`nodes`, `addrs`, `events`, `deadlines`, `seeded`),
+  and there is **no package-level mutable state** in `cluster/`, `node/`, or `cache/` — the only `var` in any
+  of them is a compile-time interface assertion. `wireAll` only ever wires peers listed in that cluster's own
+  `addrs`, so two clusters cannot discover each other even in principle.
+
+Verified (S17) with a throwaway probe under `-race`: killing `n2` in cluster A left B reporting 5 alive, a
+key written to A was invisible in B, and B's event log stayed clean. **Isolation is structural, not
+disciplined** — there is no shared thing for a second cluster to corrupt.
+
+The work is therefore entirely in the serving layer (§7) and the frontend. ⚠️ **The one cost is idle CPU:**
+two clusters means 10 nodes heart-beating forever instead of 5, on a free tier chosen partly for tolerating
+a process that must never stop beating (§8.5).
+
 ---
 
 ## 5. Data model & placement
@@ -254,6 +278,22 @@ unavailable), which is out of scope (§9).
 - `POST /api/kill|revive|pause` — failure injection · `POST /api/set|seed|delete|clear`, `GET /api/get`.
 - ⚠️ All `POST`, including the deletes: CORS here allows GET/POST only, so a real `DELETE` verb would fail
   the browser's preflight. The **node↔node** protocol does use real `DELETE`.
+
+> **⇒ PLANNED (Phase 7, step 7.0).** These routes gain a cluster segment — `GET /api/{cluster}/state`,
+> `POST /api/{cluster}/kill`, and so on — resolved against a `map[string]*cluster.Cluster` and 404-ing on an
+> unknown name. `routes()` currently closes over a single `*cluster.Cluster` and every handler uses it; the
+> change is to pass `c` in as a parameter instead. ~40 lines, mechanical. The `ServeMux` wildcard and
+> `r.PathValue` are already in use for the node↔node routes (`GO_NOTES.md` § net/http).
+>
+> ⚠️ **Not two ports.** A second `http.Server` on `:8081` is a smaller diff and unshippable: the host injects
+> one `$PORT` and exposes exactly that (§8.5). It would work on the laptop and die in the container — the
+> same failure shape as the two production surprises below.
+>
+> The frontend takes the rest of the work: five files import bound API functions that hardcode the path
+> (`hooks.ts`, `NodePanel`, `WritePanel`, `ReadPanel`, `KeyTable`); the rest import types only. The plan is a
+> `createApi(clusterId)` factory supplied through React context **at the tab boundary**, so a component
+> cannot name the other cluster's API rather than merely being trusted not to. Cross-talk becomes impossible
+> on the client for the same reason it already is on the server: there is nothing shared to reach.
 
 ### Cleanup — why heal alone is a ratchet
 
