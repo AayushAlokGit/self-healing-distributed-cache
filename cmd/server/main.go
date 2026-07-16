@@ -31,12 +31,31 @@ func main() {
 // defaultAddr honours $PORT. Container hosts pick the port themselves and inject it —
 // bind anything else and the platform's health check never gets an answer, so the deploy
 // is marked failed. Locally $PORT is unset and this is just :8080.
+//
+// ⚠️ This is also why the two demos below share one server behind an /api/{cluster}/
+// prefix rather than getting a port each: the host exposes exactly the one port it
+// injected. A second http.Server on :8081 would work on the laptop and be unreachable in
+// the container.
 func defaultAddr() string {
 	if p := os.Getenv("PORT"); p != "" {
 		return ":" + p
 	}
 	return ":8080"
 }
+
+// demoClusters are the dashboard's tabs — one wholly independent cluster each.
+//
+// They need separate clusters because they want the ring in states that cannot both be
+// true: the CAP demo leaves the network cut for minutes at a time while writing to both
+// sides, which reads as a broken cluster to anyone on the replication tab, and a node
+// killed over there would quietly corrupt a run over here.
+//
+// This costs nothing structural (docs/HLD.md §4). Nodes bind 127.0.0.1:0, so the OS hands
+// out every port and two clusters cannot collide — nobody picked a number to collide
+// over. And Cluster keeps all its state in its own fields; there is no package-level
+// mutable state in cluster/, node/ or cache/ for a second cluster to reach. Isolation
+// here is structural, not disciplined.
+var demoClusters = []string{"replication", "cap"}
 
 func run() error {
 	addr := flag.String("addr", defaultAddr(), "API listen address ($PORT wins by default)")
@@ -66,19 +85,34 @@ func run() error {
 		"pid", os.Getpid(),
 	)
 
-	c := cluster.New(3, 1, *grace, "n0", "n1", "n2", "n3", "n4")
-	c.SetLogger(log) // before Start, so the nodes' own startup logs are captured
-	if err := c.Start(); err != nil {
-		return fmt.Errorf("start cluster: %w", err)
-	}
-	defer c.Close()
+	// Registered before the loop and iterating the map, so a cluster that dies half-way
+	// through Start still gets the nodes it did start closed — Close stops whatever is in
+	// c.nodes. (The single-cluster version returned on a Start error before its defer was
+	// installed, and leaked them.)
+	clusters := make(map[string]*cluster.Cluster, len(demoClusters))
+	defer func() {
+		for _, c := range clusters {
+			c.Close()
+		}
+	}()
 
-	if err := c.Seed(*seed); err != nil {
-		// Not fatal: the cluster is up and usable, the ring just starts empty.
-		log.Warn("seeding failed; cluster is up but the ring starts empty", "err", err)
+	for _, id := range demoClusters {
+		c := cluster.New(3, 1, *grace, "n0", "n1", "n2", "n3", "n4")
+		// Tag every line this cluster logs. Both clusters name their nodes n0..n4, so
+		// without this the log is two interleaved stories about the same five names.
+		// Before Start, so the nodes' own startup logs are captured and tagged too.
+		c.SetLogger(log.With("cluster", id))
+		clusters[id] = c // before Start: a partial failure still has to be closed
+		if err := c.Start(); err != nil {
+			return fmt.Errorf("start cluster %q: %w", id, err)
+		}
+		if err := c.Seed(*seed); err != nil {
+			// Not fatal: the cluster is up and usable, its ring just starts empty.
+			log.Warn("seeding failed; cluster is up but its ring starts empty", "cluster", id, "err", err)
+		}
 	}
 
-	srv := &http.Server{Addr: *addr, Handler: routes(c, log)}
+	srv := &http.Server{Addr: *addr, Handler: routes(clusters, log)}
 
 	// Serve until an interrupt (or a serve failure), then drain: stop the users, then
 	// stop the cluster.

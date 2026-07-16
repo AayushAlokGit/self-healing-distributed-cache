@@ -48,11 +48,15 @@ func newVisits(to notify.Notifier, log *slog.Logger, now time.Time) *visits {
 	return &visits{to: to, log: log, lastSeen: make(map[string]time.Time), hour: now}
 }
 
-// middleware counts only GET /api/state: the platform's health check hits GET /, and gating
-// on the poll route keeps the host's own traffic out.
+// middleware counts only a dashboard state poll (isStatePoll, server.go): the platform's
+// health check hits GET /, and gating on the poll route keeps the host's own traffic out.
+//
+// One visitor now polls whichever cluster's tab they have open, so a visit is still one
+// person — the dedupe below is per-IP, not per-cluster, and switching tabs must not push
+// twice.
 func (v *visits) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/state" {
+		if isStatePoll(r) {
 			if n, ok := v.visit(r, time.Now()); ok {
 				go v.send(n)
 			}

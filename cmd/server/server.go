@@ -4,28 +4,56 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/notify"
 )
 
-// maxSeed bounds one POST /api/seed batch. The dashboard stops the user lower
+// maxSeed bounds one POST /api/{cluster}/seed batch. The dashboard stops the user lower
 // (MAX_SEED in frontend/src/components/WritePanel.tsx), but this is the copy that
 // enforces anything at all, since a client can curl the API directly.
 const maxSeed = 5000
 
-// routes wires the control API. The UI is the React app in frontend/, served
-// separately (Vite in dev, a static host in prod) and talking to this API.
-func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
+// clusterHandler is a handler that has already been told which cluster it is for. handle
+// (below) supplies the cluster; everything else is an ordinary http.HandlerFunc.
+type clusterHandler func(*cluster.Cluster, http.ResponseWriter, *http.Request)
+
+// routes wires the control API over every demo cluster (see demoClusters in main.go). The
+// UI is the React app in frontend/, served separately (Vite in dev, a static host in prod)
+// and talking to this API.
+//
+// Every route is scoped to exactly one cluster by its {cluster} segment. There is
+// deliberately no route that reaches more than one, so no dashboard bug can make an action
+// on one demo disturb another.
+func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, _ *http.Request) {
+	// handle registers a cluster-scoped route, resolving {cluster} so no handler below has
+	// to think about it. An unknown name 404s rather than falling back to a default:
+	// quietly serving "some cluster" to a caller who named one is how you debug the wrong
+	// ring for an hour. GET / lists the valid names.
+	handle := func(pattern string, fn clusterHandler) {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("cluster")
+			c, ok := clusters[id]
+			if !ok {
+				writeErr(w, http.StatusNotFound, "unknown cluster "+id)
+				return
+			}
+			fn(c, w, r)
+		})
+	}
+
+	handle("GET /api/{cluster}/state", func(c *cluster.Cluster, w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, c.State())
 	})
 
-	mux.HandleFunc("POST /api/set", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /api/{cluster}/set", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		// Milliseconds, matching the ttlMs KeyState reports back. <= 0 or absent means
 		// the key never expires.
 		var body struct {
@@ -50,7 +78,7 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	mux.HandleFunc("GET /api/get", func(w http.ResponseWriter, r *http.Request) {
+	handle("GET /api/{cluster}/get", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("key")
 		if key == "" {
 			writeErr(w, http.StatusBadRequest, "key is required")
@@ -72,7 +100,7 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		})
 	})
 
-	mux.HandleFunc("POST /api/seed", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /api/{cluster}/seed", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		var body struct{ N int }
 		if !readJSON(w, r, &body) {
 			return
@@ -97,7 +125,7 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 	// POST, not DELETE, to match every other mutation here — and because withCORS below
 	// allows GET/POST/OPTIONS only, so a DELETE would fail the browser's preflight. The
 	// node-to-node protocol does use real DELETE verbs; this is just the control API.
-	mux.HandleFunc("POST /api/delete", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /api/{cluster}/delete", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		var body struct{ Key string }
 		if !readJSON(w, r, &body) {
 			return
@@ -116,7 +144,7 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dropped": dropped})
 	})
 
-	mux.HandleFunc("POST /api/clear", func(w http.ResponseWriter, _ *http.Request) {
+	handle("POST /api/{cluster}/clear", func(c *cluster.Cluster, w http.ResponseWriter, _ *http.Request) {
 		keys, err := c.Clear()
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
@@ -125,10 +153,10 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": keys})
 	})
 
-	mux.HandleFunc("POST /api/kill", nodeAction(c.Kill))
-	mux.HandleFunc("POST /api/revive", nodeAction(c.Revive))
+	handle("POST /api/{cluster}/kill", nodeAction((*cluster.Cluster).Kill))
+	handle("POST /api/{cluster}/revive", nodeAction((*cluster.Cluster).Revive))
 
-	mux.HandleFunc("POST /api/pause", func(w http.ResponseWriter, r *http.Request) {
+	handle("POST /api/{cluster}/pause", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			ID     string
 			Paused bool
@@ -143,11 +171,13 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	// A hint at the root, since the UI lives elsewhere.
+	// A hint at the root, since the UI lives elsewhere. It names the clusters, so anyone
+	// curling this can find the routes without reading the source.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"service": "self-healing-distributed-cache control API",
-			"ui":      "run the React app in frontend/ (npm run dev), or see /api/state",
+			"service":  "self-healing-distributed-cache control API",
+			"clusters": slices.Sorted(maps.Keys(clusters)),
+			"ui":       "run the React app in frontend/ (npm run dev), or see /api/{cluster}/state",
 		})
 	})
 
@@ -166,9 +196,31 @@ func routes(c *cluster.Cluster, log *slog.Logger) http.Handler {
 	return withLogging(withCORS(h), log)
 }
 
-// noisyPaths are polled several times a second, so they log at Debug: at Info they
-// would bury every kill and heal under thousands of identical polls.
-var noisyPaths = map[string]bool{"/api/state": true}
+// IsStatePoll reports whether r is a dashboard state poll: GET /api/{cluster}/state.
+//
+// ⚠️ Match the SHAPE, never a literal path. Two callers need this — the log level below and
+// the visit notifier (visits.go) — and both used to compare r.URL.Path against the constant
+// "/api/state". The moment the route gained a {cluster} segment, both comparisons silently
+// stopped matching anything: every poll would have logged at Info (burying each kill under
+// thousands of them) and visit notifications would have stopped firing outright. Nothing
+// would have errored, and no test would have failed.
+//
+// This middleware cannot use r.PathValue("cluster") instead: it wraps the mux, and the mux
+// sets path values on a *clone* of the request during routing, which this r never sees.
+// ⚠️ Exactly /api/{one non-empty segment}/state. A looser prefix+suffix test also matches
+// the pre-cluster "/api/state", which is now a 404 — and counting a visit for a request the
+// mux refuses is a push about nothing.
+func isStatePoll(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/")
+	if !ok {
+		return false
+	}
+	id, tail, ok := strings.Cut(rest, "/")
+	return ok && id != "" && tail == "state"
+}
 
 // withLogging records every HTTP request: what it asked for, what it got, how long it
 // took. Outermost layer, so the duration covers CORS, the handler, and the cluster's
@@ -180,9 +232,11 @@ func withLogging(h http.Handler, log *slog.Logger) http.Handler {
 
 		h.ServeHTTP(rec, r)
 
+		// State polls arrive several times a second, per cluster, so they log at Debug: at
+		// Info they would bury every kill and heal under thousands of identical polls.
 		level := slog.LevelInfo
 		switch {
-		case noisyPaths[r.URL.Path]:
+		case isStatePoll(r):
 			level = slog.LevelDebug
 		case rec.status >= 500:
 			level = slog.LevelError
@@ -237,14 +291,18 @@ func withCORS(h http.Handler) http.Handler {
 	})
 }
 
-// nodeAction adapts a func(id) error (Kill/Revive) into a handler reading {id}.
-func nodeAction(fn func(string) error) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+// nodeAction adapts Kill/Revive into a handler reading {id}. It takes a **method
+// expression** — `(*cluster.Cluster).Kill`, not `c.Kill` — which yields a plain
+// func(*cluster.Cluster, string) error with the receiver as its first argument. That is
+// what lets one handler serve every cluster: the receiver arrives per request from handle,
+// so there is no cluster to bind at wiring time.
+func nodeAction(fn func(*cluster.Cluster, string) error) clusterHandler {
+	return func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		var body struct{ ID string }
 		if !readJSON(w, r, &body) {
 			return
 		}
-		if err := fn(body.ID); err != nil {
+		if err := fn(c, body.ID); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}

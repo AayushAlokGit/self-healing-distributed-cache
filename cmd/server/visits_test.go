@@ -23,9 +23,15 @@ func newTestVisits() *visits {
 	return newVisits(notify.Nop{}, slog.New(slog.DiscardHandler), t0)
 }
 
+// statePath is one real poll route. The cluster segment is deliberately spelled out rather
+// than built from a constant: these tests exist to catch the route shape drifting away from
+// what isStatePoll matches, and a shared constant would move both sides together and catch
+// nothing.
+const statePath = "/api/replication/state"
+
 // poll is one dashboard poll from one visitor.
 func poll(ip, ua string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+	r := httptest.NewRequest(http.MethodGet, statePath, nil)
 	r.Header.Set("X-Forwarded-For", ip)
 	r.Header.Set("User-Agent", ua)
 	r.Header.Set("Origin", "https://dashboard.test")
@@ -138,8 +144,9 @@ func TestOnlyTheStatePollCounts(t *testing.T) {
 
 	for _, r := range []*http.Request{
 		httptest.NewRequest(http.MethodGet, "/", nil),
-		httptest.NewRequest(http.MethodPost, "/api/kill", nil),
-		httptest.NewRequest(http.MethodPost, "/api/state", nil), // right path, wrong method
+		httptest.NewRequest(http.MethodPost, "/api/replication/kill", nil),
+		httptest.NewRequest(http.MethodPost, statePath, nil),   // right path, wrong method
+		httptest.NewRequest(http.MethodGet, "/api/state", nil), // the pre-cluster path: no longer a route
 	} {
 		srv.ServeHTTP(httptest.NewRecorder(), r)
 	}
@@ -225,10 +232,10 @@ func TestARealStatePollPushesThroughRoutes(t *testing.T) {
 	}
 	defer c.Close()
 
-	h := routes(c, slog.New(slog.DiscardHandler))
+	h := routes(map[string]*cluster.Cluster{"replication": c}, slog.New(slog.DiscardHandler))
 
 	// The browser's CORS preflight must not count as a visit; the poll that follows must.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodOptions, "/api/state", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodOptions, statePath, nil))
 	h.ServeHTTP(httptest.NewRecorder(), poll("203.0.113.9", chrome))
 
 	select {
