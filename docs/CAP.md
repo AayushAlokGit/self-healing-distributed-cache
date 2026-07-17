@@ -429,6 +429,12 @@ Also missing, named not hidden:
    **even on a perfectly healthy network?**
    *(gives read/write overlap ⇒ no stale reads + only one side writes; costs write fault-tolerance — `W=1`
    survives 2 owners down, `W=2` survives 1; **yes, paid every ordinary day.**)*
+   > **Aayush's reframing (S17), which is better than the above.** "Fault-tolerance" makes `W=1` sound like a
+   > free win. It isn't: the write that survives two deaths lives on **one node**, and dies with it. So —
+   > **`W` is how much a `204` is worth.** An ack at `W=1` means *one machine has this*; at `W=2`, *two
+   > machines have this*. `W=1` says yes more often and each yes means less; `W=2` says yes less often and
+   > each yes means more. It is not availability vs *consistency* here, it is availability vs **durability**,
+   > and you pay it on the healthy path.
 2. **What a vector clock does NOT fix.** Side A writes `bob`, side B writes `carol` — concurrent. The vector
    clock finds that neither dominates and keeps both. What did it fix, what did it **not**, and **who decides
    now, on what basis?**

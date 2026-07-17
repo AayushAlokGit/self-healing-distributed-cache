@@ -11,6 +11,106 @@ than re-tells.
 
 ---
 
+## Session 17 — 2026-07-16 · cold re-ask before 7A (4 Q) + 2 follow-ups
+
+4 Q cold. **0 ✅ · 3 ⚠️ · 1 ⊘ (not understood → re-taught).** Follow-ups: **1 ✅ · 1 ⚠️.**
+
+**Through-line:** the S9 pattern has *shifted*, not repeated. He no longer stops at "what the code does" —
+he reaches for the principle unprompted. What he now does is **answer the sub-question he finds most
+interesting and drop the others**: Q2 and Q3 each asked three things and got one. Not a knowledge gap;
+a completeness habit. Worth naming to him rather than re-teaching.
+
+**Q1 — Presence ≠ version (S9 Q4, cold re-ask) — ⚠️ partial. The gap NARROWS but does not close.**
+*"A revived node answers `200, I have it` for key `k`, but its value differs from the primary's. What does
+`heal()` do, and what does a client read return?"*
+Model: the heal **skips** it (`has` is presence, not version) and **preserves the conflict forever**; the
+read returns the **first reachable owner in ring order** — ring geometry decides, stably and silently.
+> Aayush: *"Heal will ignore the value differen and client read value depends on the corridnating cluster"*
+
+- ✅ **Heal half: right.** He has it. Minor: "ignore" undersells it — the heal doesn't defer, it can never
+  fix this, and no anti-entropy pass revisits the key.
+- ❌ **Read half: wrong.** Verified against the code before grading: `handleClientGet` does
+  `owners := n.ownersFor(key)` then walks them **in ring order**, returning the first hit. The coordinator
+  reads locally only when it *is* the owner at that rank — that changes who does the I/O, not the order.
+  Every node computes the same ring, so **every coordinator returns the same value.**
+- **GAP (specific):** he thinks the answer is **coordinator-dependent**. It is **ring-dependent**, and that
+  is worse: coordinator-dependent would look random and get *reported*; ring geometry makes it **stable** —
+  the same wrong value, every read, forever. *A conflict that flickers gets filed as a bug; a stable one
+  looks like the truth.* The coordinator matters in exactly one way (`CAP.md` §7: "only through how many
+  owners it can reach") and that is **under a partition**, not here.
+- **Re-ask at S18, the read half only.** The heal half is done.
+
+**Q2 — The cost of W (`CAP.md` §14 Q1, cold) — ⚠️ partial.**
+*"Raising `W` 1→2: what does it give, what does it cost, and is any cost paid **even on a perfectly healthy
+network**?"*
+> Aayush: *"It reduces availability of system fro writes in event of parition, with W=2 and R=2 and 2 sides
+> only one side can accept a write. This is for the case with pariiton, for a healthy netowrk it could still
+> cause issue due to concurrent writes to different nodes."*
+
+- ✅ Partition half right — the pigeonhole (§7).
+- ⚠️ **Framed the benefit as a cost.** "Only one side can accept" *is* what you are buying; refusing the
+  second side is the point, not the price.
+- ❌ **Named no benefit at all** — `W+R_read = 4 > R=3` ⇒ read and write sets must overlap ⇒ **no stale reads**.
+- ❌ **Healthy-network answer wrong.** He imported §10's concurrent writes, which are **not a cost of `W`**:
+  they happen at `W=1` too and `W=3` doesn't fix them. The real everyday cost is **write fault-tolerance** —
+  `W=1` survives 2 owners down, `W=2` survives 1.
+- **Closed by follow-up A** (below), and he improved on the model answer doing it.
+
+**Q3 — What a vector clock does NOT fix (`CAP.md` §14 Q2 — rewritten S17, first outing) — ⚠️ partial.**
+*"Side A writes `bob`, side B writes `carol` — concurrent. The vector clock finds neither dominates and keeps
+both. What did that fix, what did it **not**, and **who decides now, on what basis?**"*
+> Aayush: *"A vector clock does not fix concurrent writes, it surfaces concurrent writes for the app to
+> decide how to handle them."*
+
+- ✅ **The ceiling is right** — detection ≠ resolution; the app decides. That is the load-bearing half.
+- ❌ Skipped **"what did it fix"**: the *silence*. Nothing is destroyed, nobody is told `204` for a write
+  that vanishes, and the clash is **detected** rather than invented — none of which Lamport can do, since it
+  cannot tell `carol ∥ bob` from `carol → bob` (both are just "8 beats 6").
+- ❌ Skipped **"on what basis"**: **none.** A real app merges by *meaning* (union carts, add counters); ours
+  holds opaque text. "The app decides" is true; the honest version is *the app guesses, and there is no right
+  answer to find.*
+- **GAP:** states what a mechanism *doesn't* do and stops. Same shape as Q2 — one sub-question of three.
+
+**Q4 — Colliding writes without a partition (`CAP.md` §14 Q3 — rewritten S17) — ⊘ not understood → re-taught.**
+*"Two clients write `user:1` through n0 and n2 on a healthy network, both reach `W=2`. Why do you still end up
+with two siblings, and why doesn't a bigger `W` fix it?"*
+Re-taught with the trace: both writes get a real quorum, both overlap at n1 — and neither writer had *heard
+of* the other, so no vector dominates. `W=3` changes nothing: both reach all three owners, both still never
+met. **Quorums OVERLAP; they don't SERIALIZE.** Landed — see follow-up B.
+
+### Follow-ups (after the re-teach)
+
+**A — `W=1` vs `W=2` with two owners dead — ✅, and he beat the model answer.**
+*"`W=1`, three owners, two dead. Does the write succeed? Now `W=2`, same two dead. Does it? What did you pay
+for, and was anything broken?"*
+> Aayush: *"Yes write succeeds since only one owner needs to ack though there is high chance that the write
+> can be lost since other 2 are donw. With W=2 write will not succeed because one other node should ack but
+> the other 2 owners are either dead or not reachable so write fails."*
+
+- ✅ Mechanics exact, both directions.
+- ✅✅ **His clause improves on §14's model answer, and is now folded into it, credited.** The doc framed the
+  cost as *"write fault-tolerance — `W=1` survives 2 owners down, `W=2` survives 1"*, which makes `W=1` read
+  as a free win. He spotted that the surviving `W=1` write lives on **one node** and is fragile. That reframes
+  the whole trade:
+  > **`W` is how much a `204` is worth.** An ack at `W=1` means *one machine has this*; at `W=2`, *two
+  > machines have this*. `W=1` says yes more often and each yes means less. It is availability vs
+  > **durability**, and it is paid on the healthy path.
+
+**B — what would have to change for `carol` to know about `bob` — ⚠️ half.**
+> Aayush: *"The writes must be serialised through one node. COncurrent writes through 2 different nodes
+> introduce the problem"*
+
+- ✅ **"Serialised through one node"** — right; that is a leader (`CAP.md` §13's third rung). One node **per
+  key** — one node for everything would be a single point of failure and would throw the ring away.
+- ✅ **"2 different nodes introduce the problem"** — right *for this system*: two writes through the same
+  coordinator are ordered by its own lock, so the second merges the first's vector and dominates it. It takes
+  two coordinators for neither writer to see the other.
+- ❌ **Did not answer "why no `W` can be that thing"** — the half the question existed for. **`W` counts acks:
+  a quantity. Concurrency is a relationship.** Raising `W` makes each write talk to more *nodes*; it never
+  makes the two writers talk to *each other*. **You cannot fix an ordering problem by counting higher.**
+
+---
+
 ## Session 9 — 2026-07-11 · Phase 5 + Phase 6 MILESTONE QUIZ
 
 8 Q. **2 ✅ · 3 ⚠️ · 3 ⊘.**
@@ -526,11 +626,16 @@ couldn't take an `RLock` anyway.)
 ## Carried forward — re-ask cold
 
 **Open (from the Session 9 milestone quiz, 2026-07-11):**
-1. **Presence ≠ version** (S9 Q4) — the only genuine knowledge gap on the board. Re-ask cold: *"A revived
-   node answers `200, I have it` for key `k`, but its value differs from the primary's. What does `heal()`
-   do, and what does a client read return?"* Looking for: the heal **skips** it (`has` is presence, not
-   version) and thus **preserves the conflict forever**; the read returns the **first reachable owner in
-   ring order**, so ring geometry decides — stably, silently.
+1. **Presence ≠ version** (S9 Q4) — **re-asked cold S17: heal half ✅, read half ❌. Narrowed, not closed.**
+   He has *"the heal skips it and preserves the conflict"*. He does **not** have the read: he thinks the
+   value returned depends on the **coordinator**. It depends on the **ring** — `handleClientGet` walks the
+   owners in ring order and returns the first hit, and every node computes the same ring, so every
+   coordinator answers the same. Re-ask **only this half**: *"Two owners of `k` hold different values, the
+   network is healthy. I read `k` ten times through five different coordinators. How many distinct values do
+   I see, and why is that answer worse than 'it depends who I ask'?"* Looking for: **one** — ring geometry
+   decides, so it is **stable**; a flickering conflict gets reported as a bug, a stable one looks like the
+   truth. ⚠️ 7A fixes this in code (the heal starts asking *"did these two ever see each other?"*), so ask it
+   **before** he writes that code, not after.
 2. **Reversibility, not just cost** (S9 Q2) — re-ask: *"State the rule for which reaction to a suspected
    death fires instantly and which waits. Two properties."* He reliably produces "cheap/expensive" and
    drops "reversible/irreversible."

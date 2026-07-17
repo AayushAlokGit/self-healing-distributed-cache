@@ -542,6 +542,30 @@ not at the call site. Free at runtime.
 **Accept interfaces, return structs.** `newVisits` takes a `Notifier` (any transport); `NewNtfy` returns a
 `*Ntfy` (everything it has). The caller can always narrow; it can never widen.
 
+### Method *values* vs method *expressions* — the receiver as an argument
+
+`c.Kill` is a **method value**: the receiver `c` is captured *now*, and you get a `func(string) error`.
+`(*Cluster).Kill` is a **method expression**: nothing is captured, and you get a plain
+`func(*Cluster, string) error` — **the receiver becomes the first parameter.**
+
+That distinction did real work in `cmd/server`. `nodeAction` used to take `c.Kill`, which only worked while
+there was exactly one cluster to bind at wiring time. With several, the cluster arrives *per request*:
+
+```go
+// before — the receiver is baked in at startup
+mux.HandleFunc("POST /api/kill", nodeAction(c.Kill))          // func(string) error
+
+// after — no receiver yet; handle() supplies it per request
+handle("POST /api/{cluster}/kill", nodeAction((*cluster.Cluster).Kill))  // func(*Cluster, string) error
+```
+
+**Python parallel, and it's exact.** `instance.method` is a bound method; `Class.method` is a plain function
+whose first parameter is `self`, so `Class.method(instance, arg)` works. Go's two forms are the same idea
+with static types. **C++ has no equivalent** — `&Class::method` is a pointer-to-member, which needs an
+object *and* `.*`/`->*` to invoke; it is not a plain callable.
+
+Reach for the expression when the receiver is **data**, chosen later — not when it's fixed at wiring time.
+
 ---
 
 ## Packages, visibility, style

@@ -18,7 +18,7 @@ Where we are, what's been taught, and what each thing earned. Update at the end 
 
 **Phases 0–6 COMPLETE, and SHIPPED.**
 [Dashboard](https://self-healing-distributed-cache.vercel.app/) (Vercel) ·
-[API](https://self-healing-cache-api.onrender.com/api/state) (Render). Kill→heal→revive verified
+[API](https://self-healing-cache-api.onrender.com/) (Render — the root lists the clusters). Kill→heal→revive verified
 against the live deployment, not just locally: killing `n2` cost **0 keys**, the survivors pushed the
 copies back to R=3, and the revived node came back empty and was repopulated by the heal alone.
 
@@ -46,13 +46,11 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
 - **(f) Phase 7 — the partition / consistency-dial demo** ← *designed S16, reworked S17.* `docs/CAP.md` owns
   the reasoning, `docs/CAP_DEMO.md` the demo spec + the scorecard. Highest-value *new capability*, and it's
   where **presence ≠ version** finally gets fixed in code. Build arc, now **three steps**:
-  - **7.0 — a second cluster on a second tab.** The CAP demo leaves the network cut for minutes at a time;
-    it cannot share a ring with the replication demo. Verified S17 with a throwaway `-race` probe: **two
-    `cluster.Cluster` values in one process are already fully independent** — nodes bind `127.0.0.1:0` so the
-    OS assigns ports (no collision), and there is **no package-level mutable state** in `cluster/`, `node/`,
-    or `cache/`. Killing a node in A left B at 5 alive; a key written to A was invisible in B. So `cluster/`
-    needs **zero changes**; the work is `cmd/server` (~40 lines: a cluster map + an `/api/{cluster}/…` path
-    prefix) and the frontend (an api factory + tabs). Ships as an empty second tab.
+  - ~~**7.0 — a second cluster on a second tab.**~~ **DONE S17** (`48307dd` Go, `d39a305` frontend,
+    `f02805e`, `7b86654`). `cluster/` needed **zero changes**, as predicted: nodes bind `127.0.0.1:0` so the
+    OS assigns ports, and there is **no package-level mutable state** in `cluster/`, `node/` or `cache/` —
+    isolation is structural, not disciplined. Browser-verified: killed `n1` on Replication (4/5, healed onto
+    survivors), CAP stayed 5/5 with 0 pushed. ⚠️ **It broke the live demo** — see the S17 log.
   - **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Demo:
     both sides accept a write, the heal proves the two writes never saw each other, and **keeps both**.
   - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
@@ -64,7 +62,10 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
     Lamport and needs a rewrite** — along with §10–§14; `CAP_DEMO.md` §7 lists every stale line.
 
 ### Carried forward — re-ask cold (full text in `QUIZZES.md`)
-1. **Presence ≠ version** (S9) — the only genuine knowledge gap on the board.
+1. **Presence ≠ version** (S9) — **asked cold S17: heal half ✅, read half ❌. Narrowed.** He has "the heal
+   skips it and preserves the conflict"; he still thinks the *read* depends on the **coordinator** rather than
+   the **ring**. Ask the read half **before 7A's heal code**, since that code closes the gap and answering
+   after it doesn't prove anything.
 2. **Reversibility, not just cost** (S9) — the rule splitting the instant reaction from the delayed one. He
    reliably produces "cheap/expensive" and drops "reversible/irreversible."
 3. **The stranded-key case** (S9) — *"a revived node is promoted back to primary of an arc while holding
@@ -500,6 +501,56 @@ re-replicate.
 
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
+
+### Session 17 — 2026-07-16 · Phase 7 reversed twice, 7.0 shipped, and the demo it took down
+**Design + build + cold quiz.** Two reversals, both driven by Aayush pushing back on my recommendation, and
+both of which the docs already half-argued for against themselves:
+
+- **Vector clocks, not Lamport** (`CAP.md` §9 rewritten). His argument: the two writes either side of a cut
+  *are* concurrent (§4 says so — no "later" exists), so Lamport doesn't resolve the clash, it **invents a
+  fact** and destroys an acked write on the strength of it. I argued against it — the ghost was the demo's
+  best beat — and I was wrong: I claimed siblings leave eventual with no real cost, when siblings **are** the
+  cost, and a heavy one. The lesson that survived: **detection is the ceiling of any clock; only
+  serialization is above it. Raft doesn't resolve collisions better, it prevents them.**
+- **Fold the naive-AP demo away; the dial is two numbers, not five** (§11). One rule settles both: *a dial
+  should only offer settings a real operator would pick.* "No versions at all" and "quorum on a shrinking
+  ring" are bugs, not consistency levels. Cassandra's real dial is `ONE` vs `QUORUM` — exactly what's left.
+- **"CP" retired as a label.** §13 always said the strong end is Cassandra's `QUORUM`, not CP; six other
+  sections ignored it. The caveat was quarantined while the rest of the doc overstated — same pattern as S16.
+
+**Built 7.0** — two demo clusters in one process behind `/api/{cluster}/`, one tab each. `cluster/` needed
+**zero changes**, and the reason is the interesting part: nodes already bind `127.0.0.1:0` (the OS assigns
+ports, so two clusters cannot collide) and there is **no package-level mutable state** in `cluster/`, `node/`
+or `cache/`. **Isolation was structural before we asked for it.** Proven with a throwaway `-race` probe
+before writing a line, then browser-verified.
+
+**Two silent regressions caught by reaching for a literal path.** `noisyPaths` and the visit notifier both
+compared `r.URL.Path == "/api/state"`. Adding a segment made both match **nothing**: every poll would have
+logged at Info (burying each kill under thousands) and visit notifications would have **stopped firing
+outright**. Nothing errors, no test fails. Then my *first* fix (`HasPrefix`+`HasSuffix`) also matched the
+now-dead `/api/state`, so a curl to a 404 would push a visit — caught by the test I wrote for it. **Match the
+shape, never a literal.**
+
+**⚠️ The one that matters: 7.0 took the live demo down, and the docs predicted it wrongly.** I removed
+`/api/state` reasoning *"the dashboard is the only client and they ship together."* **They don't.** Render
+auto-deployed the new backend; **Vercel has not built since 2026-07-11** (7 commits back — and the giveaway is
+that its last build was a *docs-only* commit, so it wasn't path-filtering, it just stopped). So: live frontend
+calls `/api/state`, live backend 404s it, dashboard shows *"waking the cluster…"* forever. **Both deploys
+green, feature dead** — HLD §8.5's own lesson, collected. A manual redeploy from the Vercel UI produced **zero
+new deployments**, consistent with the Git link being broken (`live: false`, no `link` field on the project).
+**Open: reconnect Vercel↔GitHub.** The design question it raises: two independently-deployed halves mean a
+breaking API change needs either lockstep or a compatibility window, and we have neither.
+
+**Cold quiz before 7A** (4 Q + 2 follow-ups; **0 ✅ · 3 ⚠️ · 1 ⊘**, follow-ups **1 ✅ · 1 ⚠️** — full text in
+`QUIZZES.md`). The S9 pattern has *shifted*: he now reaches for the principle unprompted, but **answers the
+sub-question he finds most interesting and drops the rest** — Q2 and Q3 each asked three things and got one.
+A completeness habit, not a knowledge gap.
+- **Presence ≠ version narrowed, not closed.** Heal half ✅. Read half ❌ — he thinks the value depends on the
+  **coordinator**; it depends on the **ring**, which is worse, because ring geometry makes it **stable**.
+- **He beat a model answer.** On the cost of `W`, §14 said "write fault-tolerance", which makes `W=1` sound
+  free. He spotted that the surviving `W=1` write lives on **one node**: *"high chance that the write can be
+  lost since other 2 are down."* → **`W` is how much a `204` is worth** — availability vs **durability**, paid
+  on the healthy path. Folded into §14, credited.
 
 ### Session 16 — 2026-07-14 · CAP made teachable, and the doc that overstated itself
 **Teach + doc, no build, no formal quiz.** A deep pass on the Phase 7 material — partition, concurrent writes,
