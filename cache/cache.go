@@ -400,13 +400,16 @@ func (c *Cache) installLocked(key string, entries []Entry, now time.Time) {
 // Dropping this to a bare append is the resurfacing bug the vclock tests guard against.
 func reconcile(existing []Entry, incoming Entry) []Entry {
 	out := make([]Entry, 0, len(existing)+1)
-	superseded := false // a stored version dominates or equals incoming: incoming adds nothing
+	superseded := false // incoming is stale or already placed: don't append it again at the end
 	for _, e := range existing {
 		switch vclock.Compare(incoming.Version, e.Version) {
 		case vclock.After:
 			// incoming dominates e: drop e
-		case vclock.Before, vclock.Equal:
-			out = append(out, e)
+		case vclock.Before:
+			out = append(out, e) // e dominates incoming: incoming is a stale replica
+			superseded = true
+		case vclock.Equal:
+			out = append(out, incoming) // same clock: take incoming's value (last write wins)
 			superseded = true
 		default: // Concurrent
 			out = append(out, e)

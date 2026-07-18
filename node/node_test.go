@@ -1,7 +1,7 @@
 package node
 
 import (
-	"io"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -29,6 +29,8 @@ func put(t *testing.T, n *Node, key, value string) int {
 	return resp.StatusCode
 }
 
+// get reads /kv, which now returns a JSON array of versions. It returns the first value,
+// which is all the single-value tests need.
 func get(t *testing.T, n *Node, key string) (string, int) {
 	t.Helper()
 	resp, err := http.Get("http://" + n.Addr() + "/kv/" + key)
@@ -36,8 +38,17 @@ func get(t *testing.T, n *Node, key string) (string, int) {
 		t.Fatalf("get %s: %v", key, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.StatusCode
+	}
+	var wires []wireEntry
+	if err := json.NewDecoder(resp.Body).Decode(&wires); err != nil {
+		t.Fatalf("get %s: decode: %v", key, err)
+	}
+	if len(wires) == 0 {
+		return "", resp.StatusCode
+	}
+	return wires[0].Value, resp.StatusCode
 }
 
 func TestPutThenGet(t *testing.T) {

@@ -9,6 +9,7 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cache"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
+	"github.com/AayushAlokGit/self-healing-distributed-cache/vclock"
 )
 
 // forwardTimeout bounds a node-to-node call, so a dead owner fails fast instead of
@@ -501,8 +503,10 @@ func (n *Node) heal() {
 				continue
 			}
 			// entry.Expires, not a fresh TTL: the copy inherits the deadline the key
-			// already had, or its own rescue would hand it a new lease on life.
-			if err := n.storeOn(o.addr, key, entry.Value, entry.Expires); err != nil {
+			// already had, or its own rescue would hand it a new lease on life. The version
+			// travels too, so the copy reconciles against a divergent replica instead of
+			// clobbering it.
+			if err := n.storeOn(o.addr, key, entry.Value, entry.Version, entry.Expires); err != nil {
 				failed++
 				log.Warn("heal: copy failed, key still under-replicated", "key", key, "owner", o.id, "err", err)
 				continue // record only copies that actually landed
@@ -811,15 +815,45 @@ func (n *Node) Close() error {
 	return err
 }
 
-// handleGet returns the value for {key}, or 404 if absent or expired. An expiry and a
-// missing key are the same 404: the caller cannot tell them apart.
+// wireEntry is one version of a key as it crosses the network: value, vector clock, and
+// deadline as Unix milliseconds (0 = never). The internal /kv endpoints speak a JSON array
+// of these, so a node can hand a peer every concurrent version it holds, not just one.
+type wireEntry struct {
+	Value     string       `json:"v"`
+	Version   vclock.Clock `json:"vc,omitempty"`
+	ExpiresMS int64        `json:"e,omitempty"`
+}
+
+func toWire(e cache.Entry) wireEntry {
+	w := wireEntry{Value: e.Value, Version: e.Version}
+	if !e.Expires.IsZero() {
+		w.ExpiresMS = e.Expires.UnixMilli()
+	}
+	return w
+}
+
+func (w wireEntry) toEntry() cache.Entry {
+	var expires time.Time
+	if w.ExpiresMS > 0 {
+		expires = time.UnixMilli(w.ExpiresMS)
+	}
+	return cache.Entry{Value: w.Value, Version: w.Version, Expires: expires}
+}
+
+// handleGet returns every live version of {key} as a JSON array, or 404 if absent or
+// expired. An expiry and a missing key are the same 404: the caller cannot tell them apart.
 func (n *Node) handleGet(w http.ResponseWriter, r *http.Request) {
-	value, ok := n.cache.Get(r.PathValue("key"))
+	entries, ok := n.cache.GetEntries(r.PathValue("key"))
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	io.WriteString(w, value)
+	wires := make([]wireEntry, len(entries))
+	for i, e := range entries {
+		wires[i] = toWire(e)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(wires)
 }
 
 // expiresHeader carries a key's deadline between nodes as an absolute instant: Unix
@@ -879,15 +913,47 @@ func readExpires(h http.Header) time.Time {
 	return time.UnixMilli(ms)
 }
 
-// handlePut stores the request body as the value for {key}, honouring the deadline the
-// sender stamped on it (see expiresHeader). The internal replica write.
+// versionHeader carries a value's vector clock between nodes, JSON-encoded. Absent means an
+// unversioned write (the legacy path); the receiver reconciles by dominance either way.
+const versionHeader = "X-Version"
+
+func putVersion(h http.Header, v vclock.Clock) {
+	if len(v) == 0 {
+		return
+	}
+	if b, err := json.Marshal(v); err == nil {
+		h.Set(versionHeader, string(b))
+	}
+}
+
+func readVersion(h http.Header) (vclock.Clock, error) {
+	s := h.Get(versionHeader)
+	if s == "" {
+		return nil, nil
+	}
+	var v vclock.Clock
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// handlePut reconciles the request body into {key}, honouring the deadline and vector clock
+// the sender stamped on it. The internal replica write: SetVersioned keeps a concurrent
+// value rather than clobbering it, so a replica that already holds a conflicting version
+// ends up with both.
 func (n *Node) handlePut(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	n.cache.SetAt(r.PathValue("key"), string(body), readExpires(r.Header))
+	version, err := readVersion(r.Header)
+	if err != nil {
+		http.Error(w, "bad version: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	n.cache.SetVersioned(r.PathValue("key"), string(body), version, readExpires(r.Header))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -943,7 +1009,11 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		if o.id == n.id {
 			v, ok = n.cache.Get(key) // local read never "fails to reach"
 		} else {
-			v, ok, err = n.fetchFrom(o.addr, key)
+			var entries []cache.Entry
+			entries, ok, err = n.fetchFrom(o.addr, key)
+			if ok {
+				v = entries[0].Value // first live version; conflict-aware reads come next increment
+			}
 		}
 		switch {
 		case err != nil:
@@ -1016,15 +1086,24 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log := n.logger()
+
+	// Read-before-write: merge every version currently on the reachable owners, then bump
+	// this coordinator's slot. The new value therefore dominates everything it could see —
+	// but two coordinators that cannot see each other (a cut) each bump a different slot, so
+	// their writes come out concurrent and are both kept. Best-effort: an unreachable owner
+	// is skipped, not waited on.
+	base := n.currentVersion(key, owners)
+	version := base.Bump(n.id)
+
 	acks, ownerIDs := 0, make([]string, 0, len(owners))
 	for _, o := range owners {
 		ownerIDs = append(ownerIDs, o.id)
 		if o.id == n.id {
-			n.cache.SetAt(key, value, expires)
+			n.cache.SetVersioned(key, value, version, expires)
 			acks++
 			continue
 		}
-		if err := n.storeOn(o.addr, key, value, expires); err != nil {
+		if err := n.storeOn(o.addr, key, value, version, expires); err != nil {
 			// Not fatal: the write still succeeds if enough others ack, and a later heal
 			// repairs this replica.
 			log.Warn("write: owner did not ack", "key", key, "owner", o.id, "err", err)
@@ -1118,39 +1197,65 @@ func (n *Node) handleClientClear(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// fetchFrom GETs key from another node's internal /kv endpoint. ok is false on a
-// clean 404 (miss); err is non-nil only when the node could not be reached.
-func (n *Node) fetchFrom(addr, key string) (value string, ok bool, err error) {
+// fetchFrom GETs every version of key from another node's internal /kv endpoint. ok is
+// false on a clean 404 (the node answered, holds nothing); err is non-nil only when the
+// node could not be reached. Normally one entry; several when the node holds a conflict.
+func (n *Node) fetchFrom(addr, key string) (entries []cache.Entry, ok bool, err error) {
 	resp, err := n.client.Get("http://" + addr + "/kv/" + key)
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", false, nil
+		return nil, false, nil
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", false, err
+	var wires []wireEntry
+	if err := json.NewDecoder(resp.Body).Decode(&wires); err != nil {
+		return nil, false, err
 	}
-	return string(body), true, nil
+	entries = make([]cache.Entry, len(wires))
+	for i, wv := range wires {
+		entries[i] = wv.toEntry()
+	}
+	return entries, len(entries) > 0, nil
 }
 
-// storeOn PUTs key=value to another node's internal /kv endpoint, stamped with the
-// deadline the key already has. A zero expires means it never expires.
-func (n *Node) storeOn(addr, key, value string, expires time.Time) error {
+// storeOn PUTs one versioned value to another node's internal /kv endpoint, stamped with the
+// deadline and vector clock the value already carries. A zero expires means it never expires;
+// a nil version is an unversioned write.
+func (n *Node) storeOn(addr, key, value string, version vclock.Clock, expires time.Time) error {
 	req, err := http.NewRequest(http.MethodPut, "http://"+addr+"/kv/"+key, strings.NewReader(value))
 	if err != nil {
 		return err
 	}
 	putExpires(req.Header, expires)
+	putVersion(req.Header, version)
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// currentVersion merges the vector clocks of every version the key's reachable owners hold
+// — the base a new write bumps from. Unreachable owners are skipped: the write proceeds
+// against what it can see, which is exactly how a cut produces concurrent writes.
+func (n *Node) currentVersion(key string, owners []owner) vclock.Clock {
+	var base vclock.Clock
+	for _, o := range owners {
+		var entries []cache.Entry
+		if o.id == n.id {
+			entries, _ = n.cache.GetEntries(key)
+		} else {
+			entries, _, _ = n.fetchFrom(o.addr, key)
+		}
+		for _, e := range entries {
+			base = vclock.Merge(base, e.Version)
+		}
+	}
+	return base
 }
 
 // deleteOn DELETEs key on another node's internal /kv endpoint. had reports whether that
