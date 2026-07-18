@@ -6,6 +6,8 @@ package cache
 import (
 	"sync"
 	"time"
+
+	"github.com/AayushAlokGit/self-healing-distributed-cache/vclock"
 )
 
 const (
@@ -50,24 +52,53 @@ type Reclaim struct {
 	Reason string
 }
 
-// node stores the absolute deadline, not the TTL duration: the arithmetic happens
-// once at Set time so Get only has to compare.
+// node holds one key's set of concurrent versions. Almost always len 1 — the set grows
+// only when two writes conflict (neither vector clock dominates), and a later dominating
+// write collapses it again. Each Entry carries its own absolute deadline, since two
+// conflicting writes can have been made with different TTLs.
 type node struct {
 	// Carried so that removing a node, given only a pointer, can also delete it
 	// from data and expiring.
 	key string
 
-	value string
-
-	// The zero Time means "never expires".
-	expires time.Time
+	entries []Entry
 
 	// Never nil: the sentinels terminate the recency list.
 	prev, next *node
 }
 
-func (n *node) expired(now time.Time) bool {
-	return !n.expires.IsZero() && now.After(n.expires)
+// fullyExpired reports whether every entry is past its deadline (an empty node counts):
+// only then is the whole key reclaimable. A node with one live entry and one corpse is
+// still live.
+func (n *node) fullyExpired(now time.Time) bool {
+	for _, e := range n.entries {
+		if !e.expired(now) {
+			return false
+		}
+	}
+	return true
+}
+
+// pruneExpired drops expired entries in place, keeping the node's remaining versions.
+func (n *node) pruneExpired(now time.Time) {
+	live := n.entries[:0]
+	for _, e := range n.entries {
+		if !e.expired(now) {
+			live = append(live, e)
+		}
+	}
+	n.entries = live
+}
+
+// hasDeadline reports whether any entry has a deadline, i.e. whether the key belongs in
+// the expiring index.
+func (n *node) hasDeadline() bool {
+	for _, e := range n.entries {
+		if !e.Expires.IsZero() {
+			return true
+		}
+	}
+	return false
 }
 
 // Cache is an in-memory key→value store, safe for concurrent use. The caller MUST
@@ -245,7 +276,7 @@ func (c *Cache) samplePass() (scanned, expired int) {
 		}
 		scanned++
 
-		if n.expired(now) {
+		if n.fullyExpired(now) {
 			c.reclaimLocked(n, ReclaimSweep)
 			expired++
 		}
@@ -263,7 +294,7 @@ func (c *Cache) sweepAll() int {
 	now := time.Now()
 	removed := 0
 	for _, n := range c.data {
-		if n.expired(now) {
+		if n.fullyExpired(now) {
 			c.reclaimLocked(n, ReclaimSweep)
 			removed++
 		}
@@ -287,7 +318,7 @@ func (c *Cache) evictLocked(now time.Time) {
 		}
 		probed++
 
-		if n.expired(now) {
+		if n.fullyExpired(now) {
 			c.reclaimLocked(n, ReclaimEvict)
 			return
 		}
@@ -316,29 +347,75 @@ func (c *Cache) Set(key, value string, ttl time.Duration) {
 // of a key dies together no matter when or how often it was replicated.
 func (c *Cache) SetAt(key, value string, expires time.Time) {
 	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Unversioned replace: the legacy path stores a single entry, overwriting whatever
+	// was there. Versioned writers use SetVersioned, which reconciles instead.
+	c.installLocked(key, []Entry{{Value: value, Expires: expires}}, now)
+}
 
+// SetVersioned reconciles a versioned write into key's set: it drops every stored version
+// the new one dominates, keeps the ones concurrent with it, and ignores the write when a
+// stored version already dominates it (a stale replica). The common case — a write that
+// dominates the single value there — collapses the set back to one entry.
+func (c *Cache) SetVersioned(key, value string, version vclock.Clock, expires time.Time) {
+	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	n, overwrite := c.data[key]
-	if overwrite {
-		n.value, n.expires = value, expires
+	var existing []Entry
+	if n, ok := c.data[key]; ok {
+		n.pruneExpired(now)
+		existing = n.entries
+	}
+	incoming := Entry{Value: value, Version: version, Expires: expires}
+	c.installLocked(key, reconcile(existing, incoming), now)
+}
+
+// installLocked replaces key's version set with entries (already reconciled, never empty),
+// refreshing recency and the expiring index. Callers hold c.mu.
+func (c *Cache) installLocked(key string, entries []Entry, now time.Time) {
+	n, ok := c.data[key]
+	if ok {
+		n.entries = entries
 		c.unlink(n)
 	} else {
 		if c.capacity > noLimit && len(c.data) >= c.capacity {
 			c.evictLocked(now)
 		}
-		n = &node{key: key, value: value, expires: expires}
+		n = &node{key: key, entries: entries}
 		c.data[key] = n
 	}
 	c.pushFront(n)
 
-	// Overwriting a TTL'd key with a permanent one must un-index it.
-	if !expires.IsZero() {
+	if n.hasDeadline() {
 		c.expiring[key] = n
 	} else {
 		delete(c.expiring, key)
 	}
+}
+
+// reconcile folds incoming into existing and returns the maximal set under vector-clock
+// dominance — no kept version dominates another. It assumes existing is already such a set.
+// Dropping this to a bare append is the resurfacing bug the vclock tests guard against.
+func reconcile(existing []Entry, incoming Entry) []Entry {
+	out := make([]Entry, 0, len(existing)+1)
+	superseded := false // a stored version dominates or equals incoming: incoming adds nothing
+	for _, e := range existing {
+		switch vclock.Compare(incoming.Version, e.Version) {
+		case vclock.After:
+			// incoming dominates e: drop e
+		case vclock.Before, vclock.Equal:
+			out = append(out, e)
+			superseded = true
+		default: // Concurrent
+			out = append(out, e)
+		}
+	}
+	if !superseded {
+		out = append(out, incoming)
+	}
+	return out
 }
 
 // Delete removes key and reports whether a live entry was there to remove. An expired
@@ -354,7 +431,7 @@ func (c *Cache) Delete(key string) bool {
 	if !ok {
 		return false
 	}
-	live := !n.expired(time.Now())
+	live := !n.fullyExpired(time.Now())
 	c.removeLocked(n)
 	return live
 }
@@ -376,11 +453,17 @@ func (c *Cache) Clear() int {
 	return held
 }
 
-// Entry is a live entry as seen from outside the cache: its value and the instant
-// it dies. A zero Expires means it never does.
+// Entry is one version of a key: its value, the vector clock stamped on it, and the
+// instant it dies. A zero Expires means it never does; a nil Version is an unversioned
+// write (the legacy Set path). A key can hold several concurrent Entries at once.
 type Entry struct {
 	Value   string
+	Version vclock.Clock
 	Expires time.Time
+}
+
+func (e Entry) expired(now time.Time) bool {
+	return !e.Expires.IsZero() && now.After(e.Expires)
 }
 
 // Snapshot returns a copy of every live entry, skipping the expired.
@@ -396,10 +479,35 @@ func (c *Cache) Snapshot() map[string]Entry {
 	now := time.Now()
 	out := make(map[string]Entry, len(c.data))
 	for k, n := range c.data {
-		if n.expired(now) {
-			continue
+		for _, e := range n.entries {
+			if !e.expired(now) {
+				out[k] = e // first live version; callers that need the conflict use SnapshotAll
+				break
+			}
 		}
-		out[k] = Entry{Value: n.value, Expires: n.expires}
+	}
+	return out
+}
+
+// SnapshotAll returns every live version of every key. The form the versioned heal needs:
+// a key can hold concurrent values, and all of them must be reconciled onto its owners, not
+// just one. Skips expired entries and does not touch recency, like Snapshot.
+func (c *Cache) SnapshotAll() map[string][]Entry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	out := make(map[string][]Entry, len(c.data))
+	for k, n := range c.data {
+		var live []Entry
+		for _, e := range n.entries {
+			if !e.expired(now) {
+				live = append(live, e)
+			}
+		}
+		if len(live) > 0 {
+			out[k] = live
+		}
 	}
 	return out
 }
@@ -425,12 +533,39 @@ func (c *Cache) Get(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if n.expired(time.Now()) {
+	now := time.Now()
+	if n.fullyExpired(now) {
 		c.reclaimLocked(n, ReclaimLazy)
 		return "", false
 	}
 
+	n.pruneExpired(now)
 	c.unlink(n)
 	c.pushFront(n)
-	return n.value, true
+	return n.entries[0].Value, true // first live version; GetEntries returns the whole set
+}
+
+// GetEntries returns every live version of key — one Entry normally, several when the key
+// holds a conflict. The bool is false if key is absent or fully expired. Like Get it counts
+// as a use and prunes expired versions in passing; the returned slice is the caller's own.
+func (c *Cache) GetEntries(key string) ([]Entry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n, ok := c.data[key]
+	if !ok {
+		return nil, false
+	}
+	now := time.Now()
+	if n.fullyExpired(now) {
+		c.reclaimLocked(n, ReclaimLazy)
+		return nil, false
+	}
+
+	n.pruneExpired(now)
+	c.unlink(n)
+	c.pushFront(n)
+	out := make([]Entry, len(n.entries))
+	copy(out, n.entries)
+	return out, true
 }
