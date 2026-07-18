@@ -11,6 +11,34 @@ than re-tells.
 
 ---
 
+## Session 18 — 2026-07-17 · presence≠version read half (cold) + vector-clock quick-checks
+
+**Q1 — Presence ≠ version, the READ half (S9/S17 carried #1, cold re-ask) — ✅. Gap CLOSED.**
+*"A key `k` holds two different values on two nodes (`n0`=apple, `n2`=banana). A client `GET k`: which value,
+what decides it, is it stable across repeats, and does it matter which node the client hit?"*
+Model: with no version, the read returns the **first reachable owner in ring order** — ring geometry decides;
+it's **deterministic and node-independent** because every node computes the same ring; and the answer can be a
+**stably-wrong (older) value forever**.
+> Aayush: first reached for versions ("return the larger version") — the *fix*, not today's behaviour. On the
+> re-ask he landed it: *"it does not matter which node — the ring geometry is the same across all nodes, since
+> the membership view of each node is highly consistent."*
+
+- ✅ **The S17 error is gone.** S17 he said coordinator-dependent; now he says node-**independent** and names
+  **ring geometry** as the decider — and volunteered the precondition (*membership views agree*), which is
+  precisely the seam 7A opens. Both halves of presence≠version now solid.
+
+**Q2–Q4 — Vector-clock quick-checks (during teaching, not cold) — 3/3 with one correction.**
+- **Q2 (read a vector):** `[2,1,0,0,0]` = 3 writes in this value's history, 2 at n0, 1 at n1. ✅
+- **Q3 (write rule):** `n2` overwrites `[2,1,0,0,0]` → `[2,1,1,0,0]`. Number ✅. **Correction:** he generalised
+  to "the coordinator only bumps its own slot, ignores the other slots." True *here* (single predecessor, so
+  `max` is a no-op) but **wrong in general** — resolution merges *multiple* siblings, and skipping the `max`
+  yields a resolved clock that fails to dominate a sibling it didn't merge, so the loser resurfaces forever.
+  **Merge, then bump — always.**
+- **Q4 (dominance):** `x=[3,1,0,0,0]` vs `y=[3,0,0,0,2]` → concurrent (x has slot1, y has slot4). ✅ (labels
+  off-by-one — called them n5/n2 — slot logic right; fixed to 0-indexed n0..n4.)
+
+---
+
 ## Session 17 — 2026-07-16 · cold re-ask before 7A (4 Q) + 2 follow-ups
 
 4 Q cold. **0 ✅ · 3 ⚠️ · 1 ⊘ (not understood → re-taught).** Follow-ups: **1 ✅ · 1 ⚠️.**
@@ -626,16 +654,9 @@ couldn't take an `RLock` anyway.)
 ## Carried forward — re-ask cold
 
 **Open (from the Session 9 milestone quiz, 2026-07-11):**
-1. **Presence ≠ version** (S9 Q4) — **re-asked cold S17: heal half ✅, read half ❌. Narrowed, not closed.**
-   He has *"the heal skips it and preserves the conflict"*. He does **not** have the read: he thinks the
-   value returned depends on the **coordinator**. It depends on the **ring** — `handleClientGet` walks the
-   owners in ring order and returns the first hit, and every node computes the same ring, so every
-   coordinator answers the same. Re-ask **only this half**: *"Two owners of `k` hold different values, the
-   network is healthy. I read `k` ten times through five different coordinators. How many distinct values do
-   I see, and why is that answer worse than 'it depends who I ask'?"* Looking for: **one** — ring geometry
-   decides, so it is **stable**; a flickering conflict gets reported as a bug, a stable one looks like the
-   truth. ⚠️ 7A fixes this in code (the heal starts asking *"did these two ever see each other?"*), so ask it
-   **before** he writes that code, not after.
+1. ~~**Presence ≠ version** (S9 Q4)~~ — **CLOSED S18** (see the S18 quiz above). Read half re-asked cold
+   before any 7A code: he got ring-geometry-decides (not the coordinator), node-independent, stable, and
+   volunteered the *membership-views-agree* precondition — the seam 7A opens. Both halves solid; retired.
 2. **Reversibility, not just cost** (S9 Q2) — re-ask: *"State the rule for which reaction to a suspected
    death fires instantly and which waits. Two properties."* He reliably produces "cheap/expensive" and
    drops "reversible/irreversible."

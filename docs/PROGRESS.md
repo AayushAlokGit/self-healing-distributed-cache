@@ -50,9 +50,28 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
     `f02805e`, `7b86654`). `cluster/` needed **zero changes**, as predicted: nodes bind `127.0.0.1:0` so the
     OS assigns ports, and there is **no package-level mutable state** in `cluster/`, `node/` or `cache/` —
     isolation is structural, not disciplined. Browser-verified: killed `n1` on Replication (4/5, healed onto
-    survivors), CAP stayed 5/5 with 0 pushed. ⚠️ **It broke the live demo** — see the S17 log.
+    survivors), CAP stayed 5/5 with 0 pushed. ⚠️ **It broke the live demo** (see the S17 log) — **fixed
+    2026-07-17: Vercel↔GitHub reconnected, verified live.**
   - **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Demo:
     both sides accept a write, the heal proves the two writes never saw each other, and **keeps both**.
+    **In progress on branch `cap-demo` (S18)** — build it there, verify locally, merge to main by hand so
+    a breaking API change never auto-deploys onto the live frontend again (the S17 failure). Done so far:
+    - ✅ **`vclock/`** (`129ab1f`) — `Clock` = one counter per node; `Merge`/`Bump`/`Compare`
+      (Before/After/Equal/**Concurrent**). Merge-then-bump; the resolution-must-merge trap is a test.
+    - ✅ **Versioned cache** (`3cf80dc`) — a key holds `[]Entry`, each with a `vclock.Clock` and its own
+      deadline. Additive: `Set`/`Get`/`Snapshot` keep single-value behaviour (Phase-1 suite untouched),
+      new `SetVersioned`/`GetEntries`/`SnapshotAll` + `reconcile` (drop dominated, keep concurrent) ride
+      alongside. **Nothing produced versions yet at this commit.**
+    - ✅ **Write path flows versions** (`3d5251f`) — `/kv` carries versions (JSON array on GET, `X-Version`
+      header on PUT → `SetVersioned`); `handleClientSet` does read-before-write (`currentVersion` merges the
+      owners' clocks, `Bump(coordinator)` stamps). Two coordinators that can't see each other bump different
+      slots ⇒ concurrent ⇒ both kept — the seam the cut exploits. Heal's `storeOn` carries the version too.
+    - ⬜ **Read + heal version-awareness (next)** — `handleClientGet` gathers owners' versions, reconciles,
+      returns one value **or the sibling set** (conflict *detection*); heal switches to `SnapshotAll` and
+      reconciles concurrent versions onto owners so a stranded `carol` survives; `cleanup` stops dropping a
+      concurrent copy (the presence≠version hole its own comment confesses to).
+    - ⬜ **The cut** (fault injector under the two `http.Client`s) · **coordinator picker** (`via=n0`) ·
+      **the conflict card** (UI).
   - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
     `Cluster.SetQuorum(w, rRead)` — `rf`/`wq` are fixed at `New()` today. **The only `cluster/` change Phase 7
     asks for.**
@@ -62,10 +81,9 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
     Lamport and needs a rewrite** — along with §10–§14; `CAP_DEMO.md` §7 lists every stale line.
 
 ### Carried forward — re-ask cold (full text in `QUIZZES.md`)
-1. **Presence ≠ version** (S9) — **asked cold S17: heal half ✅, read half ❌. Narrowed.** He has "the heal
-   skips it and preserves the conflict"; he still thinks the *read* depends on the **coordinator** rather than
-   the **ring**. Ask the read half **before 7A's heal code**, since that code closes the gap and answering
-   after it doesn't prove anything.
+1. ~~**Presence ≠ version** (S9)~~ — **CLOSED S18.** Re-asked the read half cold before any 7A code: he got
+   ring geometry decides (not the coordinator), it's stable across nodes *because membership views agree*, and
+   named the precondition unprompted — which is exactly the seam 7A opens. Both halves now solid.
 2. **Reversibility, not just cost** (S9) — the rule splitting the instant reaction from the delayed one. He
    reliably produces "cheap/expensive" and drops "reversible/irreversible."
 3. **The stranded-key case** (S9) — *"a revived node is promoted back to primary of an arc while holding
@@ -502,6 +520,31 @@ re-replicate.
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
 
+### Session 18 — 2026-07-17 · 7A begins — versions built and flowing, on a branch
+**Cold quiz + teach + build, three commits on `cap-demo`.** Opened by confirming the live demo was fixed
+(Vercel↔GitHub reconnected — verified `/api/replication/state` serves 200 live, not on faith). Then 7A.
+
+- **Carried #1 CLOSED.** Re-asked the presence≠version **read half** cold, before writing any 7A code (the
+  point: that code closes the gap, so answering after proves nothing). He nailed it — **ring geometry decides,
+  not the coordinator**, stable across nodes *because membership views agree*. He volunteered the precondition
+  unprompted, which is the exact seam 7A pries open. The S17 gap is gone.
+- **Taught vector clocks from scratch** (shape · merge-then-bump · dominance · concurrency). Quick-check landed
+  3/3 with one real correction: on a resolution he reached for "just bump my own slot" — the trap. Shown that
+  bump-only leaves the loser **concurrent forever** (it doesn't dominate the sibling it didn't merge). He then
+  derived the storage consequence himself: for an owner to hold both `bob` and `carol`, a key must become a
+  **set**, not one value. Arrived at `CAP.md` §11's "read is now `[]Entry`" from the data side.
+- **Built, in three tested + committed increments** (full tree green under `-race` at each):
+  - `vclock/` — the primitive. `Bump` (renamed from `Next` at his request — "merge, then bump").
+  - versioned `cache` — `[]Entry` per key, `reconcile` by dominance, additive so Phase-1 stayed untouched.
+    ⚠️ `reconcile`'s **Equal** case must take the *incoming* value (LWW for an identical clock) — `TestOverwrite`
+    caught the first version dropping a nil-version overwrite.
+  - `node` write path — `/kv` speaks versions (JSON + `X-Version`), `handleClientSet` does read-before-write
+    (`currentVersion` merge → `Bump(self)`). Read/heal still presence-based; that's next.
+- **Process decisions (his calls):** build 7A on a **branch** and merge to main by hand — the direct lesson
+  from S17's auto-deploy break; **reuse `Entry`/`[]Entry`**, no new "sibling" vocabulary; and **leaner comments**
+  than the old docs pushed (recorded as a preference). Scope kept to `cache`+`node`+`vclock` — no `cluster`,
+  `cmd`, or frontend touched yet.
+
 ### Session 17 — 2026-07-16 · Phase 7 reversed twice, 7.0 shipped, and the demo it took down
 **Design + build + cold quiz.** Two reversals, both driven by Aayush pushing back on my recommendation, and
 both of which the docs already half-argued for against themselves:
@@ -538,8 +581,10 @@ that its last build was a *docs-only* commit, so it wasn't path-filtering, it ju
 calls `/api/state`, live backend 404s it, dashboard shows *"waking the cluster…"* forever. **Both deploys
 green, feature dead** — HLD §8.5's own lesson, collected. A manual redeploy from the Vercel UI produced **zero
 new deployments**, consistent with the Git link being broken (`live: false`, no `link` field on the project).
-**Open: reconnect Vercel↔GitHub.** The design question it raises: two independently-deployed halves mean a
-breaking API change needs either lockstep or a compatibility window, and we have neither.
+**RESOLVED 2026-07-17: Vercel↔GitHub reconnected, live demo works again** — verified against
+`/api/replication/state` (HTTP 200, 5 alive nodes, keys with owners/holders). The design question it raised
+still stands: two independently-deployed halves mean a breaking API change needs either lockstep or a
+compatibility window, and we have neither.
 
 **Cold quiz before 7A** (4 Q + 2 follow-ups; **0 ✅ · 3 ⚠️ · 1 ⊘**, follow-ups **1 ✅ · 1 ⚠️** — full text in
 `QUIZZES.md`). The S9 pattern has *shifted*: he now reaches for the principle unprompted, but **answers the

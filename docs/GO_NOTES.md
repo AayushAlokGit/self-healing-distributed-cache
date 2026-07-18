@@ -286,6 +286,14 @@ nodes lived in map buckets, growing the map would invalidate every one. So nodes
 independently heap-allocated: `map[string]*node`, not `map[string]node`. **Values that other values
 point at need stable identity, and map values have none.**
 
+⚠️ **A map field survives a struct copy as a shared reference.** Copying a struct copies the map
+*header*, not the entries — `b := a` gives two structs pointing at **one** table, so a write through
+either is seen by both. Bit us when `cache.Entry` gained a `vclock.Clock` (`map[string]uint64`): an
+`Entry` handed out of the cache aliases the version *still stored inside*. The fix is a discipline, not
+a type — `vclock` treats a `Clock` as **immutable**: `Bump`/`Merge` `Clone` first and return a new map,
+so the stored version is never mutated in passing. Same family as the S17 `peers`-map aliasing race
+(`maps.Clone` per node). → `vclock`, `cache.Entry`
+
 **And the pointer was free.** `BenchmarkGet`: 66.99 → 61.31 → **52.52 ns** across the two rewrites.
 The expected cost was a pointer chase; instead it *paid* for one, because a `*node` is addressable
 and `Get` stopped hashing the key a second time to store the entry back.
