@@ -1,42 +1,25 @@
 import { useEffect, useMemo, useRef } from 'react'
-import type { KeyState, Partition, State } from '../api'
-import { COLORS, colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, ownershipArcs, splitDot } from '../geometry'
-
-// The two per-side ownership bands under a cut: side A on the ring line, side B just outside
-// it, so the two rings the sides actually hold are both visible at once (only the manager can
-// see both — no node does). Well clear of the key dots at KEY_R (226) and the node markers (298).
-const RING_A = RING
-const RING_B = RING + 18
+import type { KeyState, State } from '../api'
+import { colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, ownershipArcs } from '../geometry'
 
 // Slow enough that a key is visibly seen travelling between nodes; the stagger is capped
 // so a large heal still finishes promptly.
 const PACKET_MS = 1900
 const PACKET_STAGGER_MS = 140
 const MAX_STAGGER_MS = 2200
-// Under a cut, one side's whole burst plays before the other's — two at once read as chaos.
-// This is the breath between them, after the first side's last packet has landed.
-const SIDE_GAP_MS = 300
 const SHOCK_MS = 1100
 
-export function RingViz({ state, prev, partition }: { state: State; prev: State | null; partition?: Partition | null }) {
+// RingViz draws ONE ring. A partition is two independent clusters, so the dashboard renders two
+// RingViz side by side (App builds a per-side State each) — the honest picture, since a cut really
+// does split an AP system into two clusters that each own their whole keyspace. sideLabel titles
+// one when it is a side of a cut; absent for the whole-network ring.
+export function RingViz({ state, prev, sideLabel }: { state: State; prev: State | null; sideLabel?: string }) {
   const layerRef = useRef<SVGGElement>(null)
-  // Which side of an active cut each node sits on, for the on-ring tint and to keep a heal
-  // packet from crossing the cut. Empty when there is no cut, so every node renders as before.
-  const sideOf = useMemo(() => {
-    const m: Record<string, 'a' | 'b'> = {}
-    partition?.sideA.forEach((id) => (m[id] = 'a'))
-    partition?.sideB.forEach((id) => (m[id] = 'b'))
-    return m
-  }, [partition])
   // Must stay memoised: `angles` is an effect dependency, so a fresh object each render
   // would re-run the diff below and fire the same packets twice.
   const angles = useMemo(() => markerAngles(state.nodes), [state.nodes])
   const underCount = state.keys.filter((k) => k.underReplicated).length
-  // Whole-network ring, or the two per-side rings under a cut. Each side rings only what it
-  // can reach, so the two disagree about who owns which arc — that disagreement, drawn.
   const arcs = useMemo(() => ownershipArcs(state.vnodes), [state.vnodes])
-  const arcsA = useMemo(() => (partition ? ownershipArcs(partition.vnodesA, RING_A) : []), [partition])
-  const arcsB = useMemo(() => (partition ? ownershipArcs(partition.vnodesB, RING_B) : []), [partition])
   const labels = useMemo(() => keyLabels(state.keys), [state.keys])
 
   // Transient particle layer, driven imperatively: these elements animate once and remove
@@ -79,50 +62,21 @@ export function RingViz({ state, prev, partition }: { state: State; prev: State 
     }
 
     const heldBefore = new Map(prev.keys.map((k) => [k.key, new Set(k.holders)]))
-    // Under a cut, traffic cannot cross between the two sides — so neither can a heal packet.
-    // The god's-eye snapshot is partition-blind (a key's owners span both sides), so a copy that
-    // really happened WITHIN a side would otherwise be drawn from an owner on the far side — a
-    // packet flying across the cut that never physically happened. Restrict the sender to a node
-    // that can still reach the holder; if none can, the "gain" is the other side re-replicating on
-    // its own and we draw nothing. Empty sideOf (no cut) makes canReach always true — unchanged.
-    const canReach = (from: string, to: string) => {
-      const fs = sideOf[from], ts = sideOf[to]
-      return !(fs && ts && fs !== ts)
-    }
-    // Collect the packets first, tagged with the side they belong to — the holder's side, or the
-    // sender's if the holder is an unassigned bridge. We then play one side's whole burst before
-    // the other's, since two simultaneous bursts under a cut read as chaos. With no cut every
-    // packet is the same neutral group, so the order and timing are exactly as before.
-    const packets: { src: string; holder: string; side: 'a' | 'b' | '_' }[] = []
+    // Fly a packet from a sender to each newly-gained holder. The sender must have a marker on
+    // THIS ring (angles[o] defined) — in a per-side ring the owners the sender comes from are
+    // this side's owners, so this never draws across a cut (that boundary is now two components).
+    let i = 0
     for (const k of state.keys) {
       const had = heldBefore.get(k.key) ?? new Set<string>()
       for (const holder of k.holders) {
         if (had.has(holder)) continue
-        // Prefer a live owner as the sender; fall back to any other holder — but only one on the
-        // holder's side of the cut, since the copy could not have crossed it.
         const src =
-          k.owners.find((o) => o !== holder && angles[o] !== undefined && canReach(o, holder)) ??
-          k.holders.find((o) => o !== holder && canReach(o, holder))
+          k.owners.find((o) => o !== holder && angles[o] !== undefined) ??
+          k.holders.find((o) => o !== holder && angles[o] !== undefined)
         if (src === undefined) continue
-        packets.push({ src, holder, side: sideOf[holder] ?? sideOf[src] ?? '_' })
+        flyPacket(angles[src], angles[holder], colorFor(holder), Math.min(i * PACKET_STAGGER_MS, MAX_STAGGER_MS))
+        i++
       }
-    }
-    // Side A first, then B, then bridge / no-cut. Stable, so within a side the iteration order holds.
-    const rank = { a: 0, b: 1, _: 2 }
-    packets.sort((p, q) => rank[p.side] - rank[q.side])
-    // Stagger within a side; a new side does not begin until the previous side's last packet has
-    // landed (plus a breath), so the bursts are seen one-then-the-other rather than at once.
-    let base = 0
-    let inSide = 0
-    let side: 'a' | 'b' | '_' | null = null
-    for (const p of packets) {
-      if (side !== null && p.side !== side) {
-        base += Math.min((inSide - 1) * PACKET_STAGGER_MS, MAX_STAGGER_MS) + PACKET_MS + SIDE_GAP_MS
-        inSide = 0
-      }
-      side = p.side
-      flyPacket(angles[p.src], angles[p.holder], colorFor(p.holder), base + Math.min(inSide * PACKET_STAGGER_MS, MAX_STAGGER_MS))
-      inSide++
     }
 
     const aliveBefore = new Map(prev.nodes.map((n) => [n.id, n.alive]))
@@ -131,54 +85,38 @@ export function RingViz({ state, prev, partition }: { state: State; prev: State 
       if (was === undefined || was === n.alive) continue
       shock(angles[n.id], n.alive ? '#34d399' : '#ff5470')
     }
-  }, [state, prev, angles, sideOf])
+  }, [state, prev, angles])
 
-  // One key dot. Whole network: a single circle in the owner's colour. Under a cut, a key held
-  // on BOTH sides is drawn two-tone (each half in that side's owner colour) — that key can take
-  // a concurrent write on each side, which becomes a conflict (surfaced in Read · GET). A key on
-  // one side only stays single-colour, in that side's owner colour.
   const keyDot = (k: KeyState) => {
     const [cx, cy] = xy(k.angle, KEY_R)
-    const onA = k.holders.some((h) => sideOf[h] === 'a')
-    const onB = k.holders.some((h) => sideOf[h] === 'b')
-    const split = !!partition && onA && onB
     const under = k.underReplicated
-
-    const owns = partition
-      ? `\nside A owns: ${(k.ownersA ?? []).join(', ') || '—'}\nside B owns: ${(k.ownersB ?? []).join(', ') || '—'}`
-      : `\nowners: ${k.owners.join(', ')}`
-    const title = (
-      <title>
-        {k.key}
-        {owns}
-        {'\n'}holders: {k.holders.join(', ')}
-        {split ? '\n✂ split across the cut — a write on each side becomes a conflict' : ''}
-        {under ? '\n⚠ under-replicated' : ''}
-      </title>
-    )
-
-    if (split) {
-      const { left, right } = splitDot(cx, cy, 6)
-      return (
-        <g key={k.key} className={'keydot-split' + (under ? ' under' : '')}>
-          <path d={left} fill={colorFor(k.ownersA?.[0] ?? 'n0')} />
-          <path d={right} fill={colorFor(k.ownersB?.[0] ?? 'n0')} />
-          {title}
-        </g>
-      )
-    }
-
-    const colorId = partition ? (onA ? k.ownersA?.[0] : onB ? k.ownersB?.[0] : k.owners[0]) : k.owners[0]
     return (
-      <circle key={k.key} cx={cx} cy={cy} r={5} className={'keydot' + (under ? ' under' : '')} fill={colorFor(colorId ?? 'n0')}>
-        {title}
+      <circle
+        key={k.key}
+        cx={cx}
+        cy={cy}
+        r={5}
+        className={'keydot' + (under ? ' under' : '')}
+        fill={colorFor(k.owners[0] ?? 'n0')}
+      >
+        <title>
+          {k.key}
+          {'\n'}owners: {k.owners.join(', ')}
+          {'\n'}holders: {k.holders.join(', ')}
+          {under ? '\n⚠ under-replicated' : ''}
+        </title>
       </circle>
     )
   }
 
   return (
-    <div className="stage">
-      <svg viewBox="0 0 720 720" aria-label="hash ring">
+    <div className={'stage' + (sideLabel ? ' stage-side' : '')}>
+      {sideLabel && (
+        <div className="ring-title">
+          {sideLabel} · {state.aliveCount} node{state.aliveCount === 1 ? '' : 's'}
+        </div>
+      )}
+      <svg viewBox="0 0 720 720" aria-label={sideLabel ? `${sideLabel} hash ring` : 'hash ring'}>
         <defs>
           <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
             <feGaussianBlur stdDeviation="4" result="b" />
@@ -191,27 +129,14 @@ export function RingViz({ state, prev, partition }: { state: State; prev: State 
 
         <circle className="ringbase" cx={360} cy={360} r={RING} />
 
-        {partition ? (
-          <>
-            {arcsA.map((a, i) => (
-              <path key={'a' + i} className="varc" d={a.d} stroke={colorFor(a.owner)} />
-            ))}
-            {arcsB.map((a, i) => (
-              <path key={'b' + i} className="varc side-b-arc" d={a.d} stroke={colorFor(a.owner)} />
-            ))}
-          </>
-        ) : (
-          arcs.map((a, i) => <path key={i} className="varc" d={a.d} stroke={colorFor(a.owner)} />)
-        )}
+        {arcs.map((a, i) => (
+          <path key={i} className="varc" d={a.d} stroke={colorFor(a.owner)} />
+        ))}
 
         {/* Leaders first: SVG paints in document order, so dots and names sit on top. */}
-        {labels.map(
-          (l) => l.leader && <line key={l.key} className="keyleader" {...l.leader} />,
-        )}
+        {labels.map((l) => l.leader && <line key={l.key} className="keyleader" {...l.leader} />)}
 
-        {/* Key dots sit at their true hash angle, unlike the node markers. Under a cut a key
-            held on BOTH sides is drawn two-tone — each half in that side's owner colour —
-            because a write on each side becomes a concurrent conflict (surfaced in Read · GET). */}
+        {/* Key dots sit at their true hash angle, unlike the node markers. */}
         {state.keys.map((k) => keyDot(k))}
 
         {labels.map((l) => (
@@ -228,25 +153,14 @@ export function RingViz({ state, prev, partition }: { state: State; prev: State 
         {state.nodes.map((n) => {
           const [x, y] = xy(angles[n.id], NODE_R)
           const color = colorFor(n.id)
-          const side = sideOf[n.id]
           return (
-            <g
-              key={n.id}
-              className={'nodeg ' + (n.alive ? 'alive' : 'dead') + (side ? ' side-' + side : '')}
-              transform={`translate(${x},${y})`}
-            >
+            <g key={n.id} className={'nodeg ' + (n.alive ? 'alive' : 'dead')} transform={`translate(${x},${y})`}>
               <circle className="halo" r={26} fill={n.alive ? color : 'none'} stroke={color} />
               <circle className="core" r={20} fill={n.alive ? '#0b1220' : '#171c26'} stroke={color} filter="url(#glow)" />
               <text className="label">{n.id}</text>
               <text className="sub" y={34}>
                 {n.alive ? `${n.keyCount} keys` : 'dead'}
               </text>
-              {/* A side tag while partitioned: which half of the cut this node can talk to. */}
-              {side && (
-                <text className="side-tag" x={24} y={-20}>
-                  {side.toUpperCase()}
-                </text>
-              )}
             </g>
           )
         })}
@@ -269,18 +183,20 @@ export function RingViz({ state, prev, partition }: { state: State; prev: State 
       )}
 
       <div className="legend">
-        {Object.keys(COLORS).map((id) => (
-          <div className="row" key={id}>
-            <span className="dot" style={{ color: COLORS[id] }} />
-            {id}
+        {state.nodes.map((n) => (
+          <div className="row" key={n.id}>
+            <span className="dot" style={{ color: colorFor(n.id) }} />
+            {n.id}
           </div>
         ))}
       </div>
 
-      <div className="caption">
-        The ring is split into arcs, each coloured by the node that owns that slice. A key (dot) is
-        owned by the first node clockwise. Kill a node and watch its keys jump to new owners.
-      </div>
+      {!sideLabel && (
+        <div className="caption">
+          The ring is split into arcs, each coloured by the node that owns that slice. A key (dot) is
+          owned by the first node clockwise. Kill a node and watch its keys jump to new owners.
+        </div>
+      )}
     </div>
   )
 }

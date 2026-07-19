@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { API_BASE, createApi, type State } from './api'
+import { API_BASE, createApi, type Partition, type State } from './api'
 import { ActivityLog } from './components/ActivityLog'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
@@ -42,6 +42,28 @@ const TABS: readonly Tab[] = [
       'Failure mode: the network splits — both sides keep serving, so one key can take two concurrent writes (divergence, not staleness). Vector clocks detect the clash and keep both as siblings for the client to resolve.',
   },
 ]
+
+// sideState carves one side of a cut out of the god's-eye snapshot into a self-contained State,
+// so a plain RingViz can draw that side as the independent cluster it actually is. A side sees
+// every alive node EXCEPT the far side (an unassigned bridge node is reachable by both, so it
+// shows on both) — matching the backend's per-side ring. Owners come from that side's ring
+// (ownersA/ownersB), holders are filtered to nodes this side can reach, and only keys this side
+// actually holds are shown. aliveCount is the side's own count: from here, the far side is dead.
+function sideState(state: State, partition: Partition, side: 'a' | 'b'): State {
+  const far = new Set(side === 'a' ? partition.sideB : partition.sideA)
+  const nodes = state.nodes.filter((n) => n.alive && !far.has(n.id))
+  const near = new Set(nodes.map((n) => n.id))
+  const vnodes = side === 'a' ? partition.vnodesA : partition.vnodesB
+  const want = Math.min(state.rf, nodes.length)
+  const keys = state.keys
+    .map((k) => {
+      const owners = (side === 'a' ? k.ownersA : k.ownersB) ?? k.owners
+      const holders = k.holders.filter((h) => near.has(h))
+      return { ...k, owners, holders, ownersA: undefined, ownersB: undefined, underReplicated: holders.length > 0 && holders.length < want }
+    })
+    .filter((k) => k.holders.length > 0)
+  return { ...state, nodes, keys, vnodes, aliveCount: nodes.length }
+}
 
 export default function App() {
   const [activeId, setActiveId] = useState<string>(TABS[0].id)
@@ -141,7 +163,22 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
       {state ? (
         <div className="grid">
           <div className="left">
-            <RingViz state={state} prev={prev} partition={partition} />
+            {partition ? (
+              <div className="split-stage">
+                <RingViz
+                  state={sideState(state, partition, 'a')}
+                  prev={prev ? sideState(prev, partition, 'a') : null}
+                  sideLabel="Side A"
+                />
+                <RingViz
+                  state={sideState(state, partition, 'b')}
+                  prev={prev ? sideState(prev, partition, 'b') : null}
+                  sideLabel="Side B"
+                />
+              </div>
+            ) : (
+              <RingViz state={state} prev={prev} />
+            )}
             <div className="io-row">
               <WritePanel nodes={state.nodes} onAction={refresh} />
               <ReadPanel nodes={state.nodes} />

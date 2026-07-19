@@ -99,15 +99,16 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
       - **The conflict card + cut UI** (FE `1f10793`): the card renders siblings off `X-Conflict` + the array;
         a `PartitionPanel` (per-node A|B toggles), a "NETWORK PARTITIONED" banner, and ring A/B tags. ~~⚠️ The
         cut is tracked **client-side** — `/state` reports no partition, so a page reload loses the banner.~~
-        **CLOSED S20 (below): `/state` reports the partition, the ring genuinely splits, two-colour keys landed.**
-      - ✅ **`/state` reports the partition — the split ring (S20).** `Cluster` now records the active cut
+        **CLOSED S20 (below): `/state` reports the partition; a cut renders as two independent per-side rings.**
+      - ✅ **`/state` reports the partition — two independent rings (S20).** `Cluster` now records the active cut
         (`cutA/cutB`, set in `Cut`, cleared in `Mend`); `State()` returns a `Partition{sideA,sideB,vnodesA,vnodesB}`
         and per key `OwnersA`/`OwnersB` from **two per-side rings** (side A = alive − B, side B = alive − A; a
-        bridge node lands in both). Under-replication is judged **per side**. Frontend: banner + split ring driven
-        by `state.partition` (client-only `cut` deleted, so a reload is faithful); the ring draws **two concentric
-        ownership bands**, a key held on both sides renders **two-tone** (each half = that side's owner). Browser-
-        verified: cut → banner/split-ring/two-tone keys, **reload → all reconstructed from `/state`**, mend → clean;
-        `NODES ALIVE` stayed 5/5 (no god's-eye view). Test `TestStateReportsPartitionWithPerSideOwnership`.
+        bridge node lands in both). Under-replication is judged **per side**. Frontend: banner + panel + ring driven
+        by `state.partition` (client-only `cut` deleted, so a reload is faithful). A cut renders as **two separate
+        `RingViz`, side by side** — App slices the snapshot into a per-side `State` (`sideState`) and draws each as
+        the independent cluster it is (from A's view, the far side is simply dead). The key table shows both sides'
+        owners. Browser-verified: cut → two rings + banner, **reload → all reconstructed from `/state`**, mend →
+        single ring; `NODES ALIVE` stayed 5/5 (no god's-eye view). Test `TestStateReportsPartitionWithPerSideOwnership`.
     - ✅ **Verified end-to-end in the browser (S19).** Cut `{n0,n2,n4} | {n1,n3}` → wrote `cart=milk,eggs` via
       **n0** and `cart=milk,bread` via **n3** (both accepted, each side serving alone) → mend → the version-aware
       heal reconciled (activity log: `HEAL n0→n1`, `n1→n0`, `n1→n2`; cleanup dropped surplus, **not** the
@@ -589,13 +590,17 @@ reload lost the banner while the backend cut stayed live. Now the manager report
   complete for its side no longer paints under-replicated for the whole cut. Helpers `ringOver`/`vnodesOf`/
   `setOf`. New test `TestStateReportsPartitionWithPerSideOwnership` (no polling: per-side owners come from the
   manager's ring math over the stored sides, correct the instant `Cut` returns).
-- **Frontend.** Deleted the client-only `cut` state; banner + panel + ring now read `state.partition`, so a
-  reload is faithful. `ownershipArcs` took a radius param; the ring draws **two concentric bands** (side A on
-  the ring line, side B a thinner outer band), and a key held on both sides is a **two-tone dot** (`splitDot`,
-  each half in that side's owner colour). Node A/B tags and the packet `canReach`/side-sequencing from S19 now
-  source their `sideOf` from `partition`. The **Key-ownership table** was the same fiction one layer down — it
-  rendered the single-ring `owners`; now under a cut it shows both sides (`A …owners  B …owners`), mirroring the
-  ring so the two views can't drift.
+- **Frontend.** Deleted the client-only `cut` state; banner + panel + rings now read `state.partition`, so a
+  reload is faithful. **A cut renders as two independent `RingViz` side by side** — this replaced a first pass
+  that overlaid the two per-side rings as concentric bands in ONE ring (built, then dropped same session on
+  Aayush's call: *a partition splits an AP system into two clusters, so draw two clusters* — the overlap read as
+  confusing, the split reads as the reality). `App.sideState` slices the god's-eye snapshot into a self-contained
+  per-side `State` (that side's nodes, its ring points, `ownersA`/`ownersB`, holders filtered to the side, and
+  `aliveCount` = the side's own count — from A's view the far side is simply dead), and a now partition-agnostic
+  `RingViz` draws each with a `sideLabel`. The **Key-ownership table** was the same fiction one layer down — it
+  rendered the single-ring `owners`; now under a cut it shows both sides (`A …owners  B …owners`) so the tables
+  and rings can't drift. (Layout: Write/Read moved to a side-by-side row in the left column under the ring; the
+  right column is Failure Injection · Partition · Activity Log.)
 - **Browser-verified.** Cut `{n0,n2,n4}|{n1,n3}` → banner + split ring (gold/purple outer = B, cyan/pink/green
   inner = A) + two-tone keys (key:2 half-purple/half-pink = n1 on B, n2 on A). **Full reload → CAP tab → all
   reconstructed from `/state`** (the bug, fixed). Mend → single ring back. `NODES ALIVE` stayed 5/5 throughout.
