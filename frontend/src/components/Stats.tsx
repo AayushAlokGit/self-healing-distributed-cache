@@ -18,7 +18,7 @@ export function Stats({ state }: { state: State; prev: State | null }) {
     { k: 'replication', v: `R=${state.rf}` },
     {
       k: 'dial',
-      v: `W${state.w} · R${state.rRead}`,
+      v: `W - ${state.w} · R_Read - ${state.rRead}`,
       held,
       title: held
         ? `W+R_read=${sum} > R=${state.rf}: no stale reads, and the ring is held — a partitioned side that can't reach a quorum refuses.`

@@ -31,13 +31,13 @@ export function DialPanel({ state, onAction }: { state: State; onAction: () => v
 
       <div className="dial-presets">
         <button className={'preset' + (w === 1 && rRead === 1 ? ' on' : '')} onClick={() => apply(1, 1)}>
-          ONE · W1 R1
+          ONE · W1 R_Read1
         </button>
         <button
           className={'preset' + (w === majority && rRead === majority ? ' on' : '')}
           onClick={() => apply(majority, majority)}
         >
-          QUORUM · W{majority} R{majority}
+          QUORUM · W{majority} R_Read{majority}
         </button>
       </div>
 
