@@ -98,6 +98,10 @@ export interface State {
   keys: KeyState[]
   vnodes: VNode[]
   rf: number
+  // The consistency dial. w + rRead > rf ⇒ no stale reads and the ring is held (a partitioned
+  // side without a quorum refuses); otherwise eventual (both sides of a cut serve on).
+  w: number
+  rRead: number
   aliveCount: number
   totalHealCopies: number
   events: ClusterEvent[]
@@ -160,7 +164,7 @@ export function createApi(cluster: string) {
       const res = await ok(await fetch(base + '/state'), 'state')
       const s = await res.json()
       // Go marshals a nil slice as null, so default every array or the UI blanks.
-      return { ...s, nodes: s.nodes ?? [], keys: s.keys ?? [], vnodes: s.vnodes ?? [], events: s.events ?? [] }
+      return { ...s, nodes: s.nodes ?? [], keys: s.keys ?? [], vnodes: s.vnodes ?? [], events: s.events ?? [], w: s.w ?? 1, rRead: s.rRead ?? 1 }
     },
 
     // via picks the coordinator node; omit or empty means auto (the backend picks any live node).
@@ -179,6 +183,10 @@ export function createApi(cluster: string) {
     // sides — surfaced verbatim on the panel's error line. mend clears whatever cut is active.
     cut: (sideA: string[], sideB: string[]) => post<void>('/cut', { sideA, sideB }, 'cut network'),
     mend: () => post<void>('/mend', {}, 'mend network'),
+
+    // The consistency dial: W (write quorum) and R_read (read quorum), cluster-wide. The backend
+    // 400s an out-of-range pair (each must be in [1, R]). w+rRead>R holds the ring, no stale reads.
+    setQuorum: (w: number, rRead: number) => post<void>('/quorum', { w, rRead }, 'set quorum'),
 
     // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs. via picks the
     // coordinator node; omit or empty means auto (the backend picks any live node).

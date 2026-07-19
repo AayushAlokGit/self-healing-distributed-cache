@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react'
 import { API_BASE, createApi, type Partition, type State } from './api'
 import { ActivityLog } from './components/ActivityLog'
+import { DialPanel } from './components/DialPanel'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
 import { PartitionPanel } from './components/PartitionPanel'
 import { ReadPanel } from './components/ReadPanel'
+import { Scorecard } from './components/Scorecard'
 import { RingViz } from './components/RingViz'
 import { Stats } from './components/Stats'
 import { WritePanel } from './components/WritePanel'
@@ -115,7 +117,7 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
             Self-Healing <span className="accent">Distributed Cache</span>
           </h1>
           <p className="identity">
-            A leaderless, <strong>Dynamo-style AP cache</strong>. Each tab is a distributed-systems failure
+            A leaderless, <strong>Dynamo-style AP (prioritizes availability) key value store</strong>. Each tab demos a distributed-systems failure
             mode — and how the cluster survives it.
           </p>
           <nav className="tabs" role="tablist">
@@ -188,7 +190,11 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
             {isCap && (
-              <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />
+              <>
+                <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />
+                <DialPanel state={state} onAction={refresh} />
+                <Scorecard state={state} onAction={refresh} />
+              </>
             )}
             <ActivityLog events={state.events} />
           </div>

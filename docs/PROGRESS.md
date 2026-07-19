@@ -115,9 +115,20 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
       siblings) → a gather-all read returned the **conflict card with both real values**. **NODES ALIVE stayed
       5/5 the whole time** — the manager cannot see a partition (S9's "no god's-eye view", live). ⚠️ First take
       used a 2-min TTL and `cart` expired mid-demo; redone with `never`.
-  - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
-    `Cluster.SetQuorum(w, rRead)` — `rf`/`wq` are fixed at `New()` today. **The only `cluster/` change Phase 7
-    asks for.**
+  - ✅ **7B — the dial. DONE S21, browser-verified.** `W` and `R_read` as a cluster-wide consistency dial. The
+    non-obvious core wasn't `SetQuorum` — it was that **the ring must stop shrinking**, or a quorum is a rubber
+    stamp: `node.holdRing` gates `ring.Remove`/`Add` in `heartbeatRound`, so at the strong setting the far owners
+    stay in the ring and a partitioned side that can't reach W refuses instead of re-owning the keyspace among its
+    survivors. Reads refuse **503** below `R_read` (a reachable-count threshold on the 7A gather-all, so conflict
+    detection is intact; `R_read=1` is byte-for-byte the old read); writes refuse **503** below `W` (was 502).
+    `cluster.SetQuorum(w, rRead)` validates `1≤w,rRead≤rf`, sets `holdRing = w+rRead>rf`, inherited by `wireAll`/
+    `Revive`; `State` reports `W`/`RRead`; `POST /quorum`. **Frontend:** a `DialPanel` (ONE/QUORUM presets + W and
+    R_read selectors + a live `W+R_read vs R` readout), a Stats dial tile, and a **Scorecard** — one probe row per
+    dial, so flipping and re-probing stacks the controlled experiment. **Browser-verified live: QUORUM → 5
+    accepted / 5 refused / 0 conflicts (the checkerboard); ONE → 10 / 0 / 5 (divergence). The refused writes and
+    the conflicts are the same writes.** Tests: node read/write refusal below quorum; `TestSetQuorumValidation`;
+    and the money pair — a held ring refuses the losing side of a cut, an unheld ring (W=2,R_read=1) rubber-stamps
+    it after the ring shrinks.
   - ⚠️ **Vector clocks, not Lamport (decided S17).** The two writes either side of a cut are *genuinely
     concurrent* (`CAP.md` §4: no "later" one exists), so Lamport would **invent** an order and silently
     destroy an acked write. Vector clocks detect the clash and surface it. **`CAP.md` §9 still decides
@@ -384,14 +395,14 @@ The canonical record. ☑ = taught **and** the quick-check passed · ◐ = parti
 **Phase 3 core COMPLETE (naive on purpose).** Still synchronous (writes hit all owners in-band — no async, no
 hinted handoff), and membership is **static**, so a dead node stays in every ring: the ring still *routes to
 corpses* and every read pays a failed hop before falling back. That earns Phase 4.
-- ◐ Consistency vs availability trade-off — the *code* consequence is built and **demonstrated E2E** on
-  `cap-demo` (S18–S19): **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads**
-  (`X-Conflict` + the sibling set), a **version-aware heal + cleanup** (a stranded concurrent sibling survives),
-  the **coordinator picker** (`via`), **the cut** — a partition under the HTTP clients that lets both sides
-  accept a write, the heal keep both, and a read surface the conflict — and (S20) **`/state` reports the
-  partition so the ring genuinely splits** (two per-side rings, two-colour keys, reload-faithful).
-  Browser-verified end to end. Open: **7B, the dial** (`W`/`R_read` — refusals, checkerboard, scorecard) and
-  read-repair-on-read (a read currently *detects* a conflict; it doesn't write the merge back). See (f).
+- ☑ Consistency vs availability trade-off — built and **demonstrated E2E** on `cap-demo` (S18–S21):
+  **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads** (`X-Conflict` + the sibling set),
+  a **version-aware heal + cleanup** (a stranded concurrent sibling survives), the **coordinator picker** (`via`),
+  **the cut** — a partition under the HTTP clients that lets both sides accept a write, the heal keep both, and a
+  read surface the conflict — (S20) **`/state` reports the partition so the ring splits into two** (per-side rings,
+  reload-faithful), and (S21) **the dial** (`W`/`R_read` with a held ring — refusals, checkerboard, live
+  scorecard). Browser-verified end to end. Open: read-repair-on-read (a read currently *detects* a conflict; it
+  doesn't write the merge back). See (b).
 
 ### Phase 4 — Failure detection
 - ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each `heartbeatInterval`
@@ -568,6 +579,38 @@ re-replicate.
 
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
+
+### Session 21 — 2026-07-19 · 7B — the consistency dial (W / R_read), with a held ring
+**Teach → quiz (3/3) → build, then browser-verified.** A background Plan agent produced the full 7B spec; the
+build followed its commit order. Taught the quorum from first principles (stale-read problem → `R_read+W>R`
+overlap → the *pair* not either number), quick-check **3/3** — he nailed Q3 cold (overlap ≠ ordering: quorums
+make a reader *see* a recent write, they do not serialize concurrent writes, so two concurrent writes still
+become siblings). Then part 2 (refusal = the CP end; the checkerboard; and the trap) before building.
+
+- **The non-obvious core: the ring must stop shrinking, or a quorum is a rubber stamp.** A quorum is a fraction
+  and needs a fixed denominator. Under a cut, each side normally convicts the far side and `ring.Remove`s it
+  (Phase 4) — re-owning the keyspace among its survivors, so `W=2` is met by an *invented* owner set. `node`
+  gained **`holdRing`**, which gates `ring.Remove`/`Add` in `heartbeatRound`: at the strong setting the far owners
+  stay in the ring, so a coordinator that can't reach `W` of them **refuses** instead of rubber-stamping. Same
+  `ring.Remove` line, *correct for AP, fatal for CP*. This is the connection to S20: the two-ring split we drew is
+  exactly the shrinking the CP dial must prevent.
+- **Enforcement.** `handleClientGet` refuses **503** when fewer than `R_read` owners answer — a reachable-count
+  threshold on the existing gather-all (NOT early-stop, which would break 7A conflict detection); `R_read=1` is
+  byte-for-byte the old read. `handleClientSet`'s quorum miss is now **503** (was 502). `writeQuorum` read moved
+  under the lock, since the dial mutates it at runtime.
+- **Wiring.** `cluster.SetQuorum(w, rRead)` validates `1≤w,rRead≤rf`, sets W/R_read on every node and
+  `holdRing = w+rRead>rf`, inherited by `wireAll`/`Revive`. `State` reports `W`/`RRead`. `POST /quorum`.
+- **Frontend.** `DialPanel` (ONE/QUORUM presets + W and R_read segmented selectors + a live `W+R_read {>,≤} R`
+  readout that flips to a held/cyan state), a **Stats dial tile**, and a **Scorecard** — one probe row per dial, so
+  flipping and re-probing stacks the controlled experiment (a conflict counted as *both sides accepted*, no mend
+  needed). **Verified live: QUORUM → 5 accepted / 5 refused / 0 conflicts (checkerboard); ONE → 10 / 0 / 5
+  (divergence).** The refused writes and the conflicts are the same writes — the CAP dial, measured.
+- **Tests** (all `-race`): node `TestReadRefusedBelowReadQuorum`, `TestWriteRefusedBelowWriteQuorum`; cluster
+  `TestSetQuorumValidation`, `TestHeldRingRefusesLosingSideOfCut`, and the money contrast
+  `TestUnheldRingLetsLosingSideServeAfterShrink` (proves holdRing is load-bearing: unheld, the losing side
+  re-owns and serves the very write the held ring refused). Full tree green under `-race`. Still on `cap-demo`.
+- **Layout, this session too** (his asks): key table shows per-side owners under a cut (roomier two-row cards);
+  Write/Read moved to a side-by-side row in the left column; the partition renders as two independent rings.
 
 ### Session 20 — 2026-07-19 · `/state` reports the partition — the ring genuinely splits
 **Build + browser verification, on `cap-demo`.** Closed the S19 follow-up: the cut was tracked client-side, so a

@@ -11,6 +11,31 @@ than re-tells.
 
 ---
 
+## Session 21 — 2026-07-19 · the consistency dial (quorums) — quick-check before building 7B
+
+**Q1 — At R=3, W=2, R_read=1: can a completed write still read stale? — ✅.**
+Model: yes. `W+R_read = 3`, not `> R=3`, so the read set (1 owner) and write set (2 owners) need not overlap —
+the one owner read may be the third owner that missed the write.
+> Aayush: "yes, if the read lands on the replica that hasn't received the latest write." Added, correctly for
+> *our* system, that there's no read-repair/anti-entropy so a stale replica stays stale until overwrite or a
+> membership-change heal. Sharpened: the *root* cause is the quorum math (no forced overlap); read-repair is a
+> separate mechanism (roadmap item b) that governs *convergence*, not whether a single read returns fresh.
+
+**Q2 — What does `R_read + W > R` guarantee, and why kill the stale read? — ✅.**
+Model: the read set and write set must share ≥1 owner (pigeonhole); that owner saw the latest write, so the read
+sees it. Aayush: "the read-set and write-set overlap by at least one node, so we're guaranteed the latest write."
+
+**Q3 — W=2, R_read=2, two concurrent writes via different coordinators both get 204: does overlap pick a winner? — ✅ (the deep one).**
+Model: no. **Overlap ≠ ordering.** Quorums make a reader *see* a recent write; they do not serialize concurrent
+writes. Neither vclock dominates, so both survive as siblings. Only consensus (a leader/log) prevents concurrent
+*issue*. Aayush: "overlap does not serialise, so both are recorded as siblings and surfaced to the client." Nailed
+cold — the reason the dial is tunable consistency, never linearizable.
+
+*(Part 2 — refusal = the CP end, the checkerboard, and the ring-hold trap — taught, then quiz skipped at his
+request; the build immediately demonstrated it. 3/3 on the graded part.)*
+
+---
+
 ## Session 18 — 2026-07-17 · presence≠version read half (cold) + vector-clock quick-checks
 
 **Q1 — Presence ≠ version, the READ half (S9/S17 carried #1, cold re-ask) — ✅. Gap CLOSED.**
