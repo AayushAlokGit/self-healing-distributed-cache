@@ -638,6 +638,28 @@ All three carried the same blindness; all three are closed here.
   (the canonical statement), the two dashboard tab blurbs (failure-mode framing) + a top-line identity, and two
   now-stale HLD table rows corrected to **⇒ AS BUILT (7A)** (vector clocks, and the cut). ⚠️ `CAP.md`'s deeper
   S17-flagged rewrite (§9 Lamport → vclocks, §10–14) is still open — the framing lives in HLD §0 meanwhile.
+- **Framing, sharpened further, then `CAP.md` brought to AS-BUILT.** Two forks specified in HLD §0: (a)
+  **siblings vs LWW** — we are the **Dynamo/Riak** branch (never silently lose an acked write), not Cassandra's
+  LWW; this axis is *independent* of the dial (we borrow the dial from Cassandra, the resolution from Dynamo).
+  (b) **The dial is delegation, not "more consistency"** — it hands the *"how fresh must this read be?"* choice
+  to the caller; **vector clocks are architecturally forced, the dial is optional.** ⚠️ His catch: **a request
+  carries W *or* R_read, never both** (read XOR write), and no-stale-reads is the *pair* `R_read+W>R` (a strong
+  writer AND reader) — a `R_read=2` read over `W=1` writes is 3, not >3, still stale. And **our dial is
+  cluster-wide, not per-request** (Dynamo's ideal); noted as the demo's simplification. `CAP.md` marked
+  AS-BUILT throughout (§1 gate, §9 presence≠version closed, §11 gather-all + dial-is-7B, §12 7A done). The CAP
+  tab blurb went through several passes and finally **dropped the dial entirely** — it belongs in a dedicated
+  **scorecard section** (a "same requests, two dial settings" controlled experiment), built with 7B.
+- **Two partition-fidelity UI fixes** (`RingViz.tsx`). (1) **No heal packet crosses an active cut** (`ee389a2`)
+  — the packet animation picked its sender from the manager's *partition-blind* owner list, so a within-side
+  copy (n4→n3) was drawn from an owner on the far side; now the sender must be on the holder's side of the cut
+  (`canReach`), else nothing is drawn. Browser-verified across 3 cut shapes incl. an **unassigned bridge node**.
+  A clean instance of "no god's-eye view": the animation faithfully rendered a view that cannot see the
+  partition. (2) **Packets sequence by side** (`f1465a2`) — one side's whole burst plays before the other's,
+  since two at once read as chaos. ⚠️ **Open for tomorrow:** the sequenced pacing is ~8s for a big two-sided
+  heal (PACKET_MS 1900 × two sides) — decide whether to keep or snappier-tune (overlap tails / faster packets
+  under a cut). Also open: whether to suppress cross-partition **ownership links** in the frontend now vs the
+  proper fix — **`/state` reports the partition** so the ring can genuinely split (the flagged backend follow-up,
+  which also unlocks two-colour conflict keys).
 - Full tree green under `-race` (bar the known intermittent `cluster` delete flake, item (e)). Still on
   `cap-demo`, merged to main by hand. **Remaining in the 7A arc:** *the cut* (fault injector, next headline) and
   the *coordinator picker* (`via=n0`, now in progress via background agents); the conflict card is done + wired.
