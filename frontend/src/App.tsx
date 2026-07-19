@@ -43,12 +43,12 @@ const TABS: readonly Tab[] = [
     blurb: () =>
       'Failure mode: the network splits — both sides keep serving, so one key can take two concurrent writes (divergence, not staleness). Vector clocks detect the clash and keep both as siblings for the client to resolve.',
   },
-  {
-    id: 'consistency',
-    label: 'Consistency Dial',
-    blurb: (s) =>
-      `The same cut, tuned. Raise the dial so W + R_read > R (=${s.rf}) and the ring is held: the losing side of a cut REFUSES rather than diverging — availability spent for consistency. Cut the network, set a dial, and let the scorecard measure the trade.`,
-  },
+  // {
+  //   id: 'consistency',
+  //   label: 'Consistency Dial',
+  //   blurb: (s) =>
+  //     `The same cut, tuned. Raise the dial so W + R_read > R (=${s.rf}) and the ring is held: the losing side of a cut REFUSES rather than diverging — availability spent for consistency. Cut the network, set a dial, and let the scorecard measure the trade.`,
+  // },
 ]
 
 // sideState carves one side of a cut out of the god's-eye snapshot into a self-contained State,
