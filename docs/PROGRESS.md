@@ -66,12 +66,18 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
       header on PUT → `SetVersioned`); `handleClientSet` does read-before-write (`currentVersion` merges the
       owners' clocks, `Bump(coordinator)` stamps). Two coordinators that can't see each other bump different
       slots ⇒ concurrent ⇒ both kept — the seam the cut exploits. Heal's `storeOn` carries the version too.
-    - ⬜ **Read + heal version-awareness (next)** — `handleClientGet` gathers owners' versions, reconciles,
-      returns one value **or the sibling set** (conflict *detection*); heal switches to `SnapshotAll` and
-      reconciles concurrent versions onto owners so a stranded `carol` survives; `cleanup` stops dropping a
-      concurrent copy (the presence≠version hole its own comment confesses to).
-    - ⬜ **The cut** (fault injector under the two `http.Client`s) · **coordinator picker** (`via=n0`) ·
-      **the conflict card** (UI).
+    - ✅ **Read + heal version-awareness** — **DONE S19** (`42d1335` read, `814df5d` heal + cleanup).
+      **Read:** `handleClientGet` gathers every reachable owner's versions and folds them with `cache.MergeVersions`
+      — one survivor ⇒ a plain value, two+ ⇒ concurrent siblings under `X-Conflict: n` + a JSON array (conflict
+      *detection*); `servedBy` now names the first owner holding a *surviving* version. **Heal:** `SnapshotAll` +
+      a **per-version** healer (I heal `v` only if no owner ahead of me *covers* it), so a stranded `carol` and a
+      concurrent `bob` both propagate; a dominated local version stands down. **Cleanup:** drops a non-owned copy
+      only once every owner *covers* every version it carries, so a sibling no owner holds is kept and the heal
+      re-armed. Unifying: **presence≠version applied to each mechanism's own decision** (read's who-answers, heal's
+      who-heals, cleanup's is-this-surplus).
+    - ⬜ **The cut** ← *next headline* (fault injector under the two `http.Client`s) · **coordinator picker**
+      (`via=n0`) — **IN PROGRESS** (background agents) · ~~**the conflict card** (UI)~~ **DONE** — built and wired
+      to `X-Conflict` + the siblings array.
   - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
     `Cluster.SetQuorum(w, rRead)` — `rf`/`wq` are fixed at `New()` today. **The only `cluster/` change Phase 7
     asks for.**
@@ -341,8 +347,10 @@ The canonical record. ☑ = taught **and** the quick-check passed · ◐ = parti
 **Phase 3 core COMPLETE (naive on purpose).** Still synchronous (writes hit all owners in-band — no async, no
 hinted handoff), and membership is **static**, so a dead node stays in every ring: the ring still *routes to
 corpses* and every read pays a failed hop before falling back. That earns Phase 4.
-- ☐ Consistency vs availability trade-off — the *code* consequence (versioned values, read-repair) is still open.
-  See Next action (b).
+- ◐ Consistency vs availability trade-off — the *code* consequence is now largely built on `cap-demo` (S18–S19):
+  **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads** (`X-Conflict` + the sibling set),
+  and a **version-aware heal + cleanup** (a stranded concurrent sibling survives). Open: the cut, the dial (`W`/
+  `R_read`), and the coordinator picker. See the 7A build arc under Next action (f).
 
 ### Phase 4 — Failure detection
 - ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each `heartbeatInterval`
@@ -519,6 +527,41 @@ re-replicate.
 
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
+
+### Session 19 — 2026-07-18 · reads detect conflicts; heal + cleanup go version-aware
+**Build only, two committed increments on `cap-demo`** (no quiz — he asked to skip). This closes the build-arc
+item `⬜ Read + heal version-awareness`, and the through-line is one sentence: **presence≠version, applied to
+each mechanism's own decision** — the read's which-owner-answered, the heal's who-is-the-healer, the cleanup's
+is-this-surplus. All three carried the same blindness; all three are closed here.
+
+- **Reads detect conflicts** (`42d1335`). `handleClientGet` no longer stops at the first hit — it **gathers every
+  reachable owner's versions** and folds them with a new exported `cache.MergeVersions` (wrapping the internal
+  `reconcile`, so the invariant has one home). One survivor ⇒ a plain value (the unchanged client contract);
+  two+ ⇒ concurrent siblings, returned as a JSON array under a new `X-Conflict: n` header — **none dominates, so
+  picking one would destroy an acked write.** `servedBy` now names the first owner holding a **surviving**
+  version, not merely the first that answered — presence≠version, at the header level. Wired end to end:
+  `cluster.ReadResult` gained `Conflict`/`Siblings`, `cluster.Get` parses `X-Conflict`, `/get` emits both, and
+  the frontend conflict card renders off the same two fields.
+  - ⚠️ **Behaviour change, not a regression:** a conflict-aware read *cannot stop early*, so a healthy read now
+    hits **every** owner instead of hitting the primary and marking replicas "skipped." `TestReadPathNamesEvery`
+    `OwnerAndWhatItSaid` was updated to gather-all semantics. "skipped" returns in **7B**, when `R_read < R` asks
+    only the first `R_read` owners. New test `TestReadDetectsConcurrentSiblings`.
+- **Heal + cleanup go version-aware** (`814df5d`). Same presence≠version blindness, closed in both:
+  - **Heal:** was `Snapshot()` (one version per key) + a has-the-key probe, so a `bob` on one owner and a
+    concurrent `carol` on another each looked "already present" to the other's healer — **neither sibling ever
+    replicated.** Now `SnapshotAll()` sees every local version and the healer is chosen **per version**: I heal
+    `v` only if no owner ranked ahead of me *covers* it (holds `v` or a dominator). `bob`'s healer and `carol`'s
+    are different owners ⇒ both propagate; a stale local version a dominator covers is stood down and replaced.
+  - **Cleanup:** dropped a non-owned copy once every owner answered "has the key" (presence) — which would
+    **discard a sibling no owner holds** (a write a down owner missed, or one side of a cut), losing an acked
+    write. Now it drops only once every owner **covers every version** the copy carries; an uncovered version is
+    a stranded sibling — kept, with the heal re-armed to propagate it.
+  - New shared helpers `covered` (holds-it-or-a-dominator) and `coveredAhead` (an owner ranked ahead covers it).
+    New tests `TestHealPropagatesStrandedSiblings`, `TestHealReplacesDominatedVersion`, and cleanup's "keeps a
+    concurrent sibling no owner holds."
+- Full tree green under `-race` (bar the known intermittent `cluster` delete flake, item (e)). Still on
+  `cap-demo`, merged to main by hand. **Remaining in the 7A arc:** *the cut* (fault injector, next headline) and
+  the *coordinator picker* (`via=n0`, now in progress via background agents); the conflict card is done + wired.
 
 ### Session 18 — 2026-07-17 · 7A begins — versions built and flowing, on a branch
 **Cold quiz + teach + build, three commits on `cap-demo`.** Opened by confirming the live demo was fixed
