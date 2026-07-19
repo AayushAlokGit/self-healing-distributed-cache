@@ -39,7 +39,7 @@ const TABS: readonly Tab[] = [
     id: 'cap',
     label: 'CAP & Partitions',
     blurb: () =>
-      'Failure mode: the network splits. Both sides keep serving, so one key can take two concurrent writes — divergence, not staleness. Vector clocks detect the clash and keep both as siblings to resolve. Two dials set how fresh an answer must be: a write is confirmed once W copies have it, a read waits for R_read copies to reply. Low is always fast but may be stale; raise both until a read’s copies overlap the writes’ and it is guaranteed the latest value — but a cut-off side then refuses rather than serve a stale one.',
+      'Failure mode: the network splits. Both sides keep serving, so one key can take two concurrent writes — divergence, not staleness. Vector clocks detect the clash and keep both as siblings to resolve. Two dials — W for writes, R_read for reads — set how many copies of a key must take part before it counts. Low: a write lands on one copy and a read trusts the first it finds — fast, but that copy may be behind. High: a write and a read each touch a majority, so they always share a copy and a read cannot miss the latest write — but a node cut off from a majority must refuse instead of answering.',
   },
 ]
 
