@@ -78,7 +78,7 @@ type Cluster struct {
 // From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
-	Kind string `json:"kind"` // kill | revive | pause | resume | cut | mend | set | read | seed | delete | clear | info | heal | cleanup | expire | reclaim
+	Kind string `json:"kind"` // kill | revive | pause | resume | cut | mend | set | read | refuse | conflict | seed | delete | clear | info | heal | cleanup | repair | expire | reclaim
 	Msg  string `json:"msg"`
 
 	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim/cleanup: the node that freed the memory
@@ -417,9 +417,18 @@ func (c *Cluster) Set(key, value string, ttl time.Duration, via string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		c.logger().Error("write rejected by coordinator", "key", key, "coordinator", coord, "status", resp.StatusCode)
+		reason := strings.TrimSpace(string(body))
+		c.logger().Error("write rejected by coordinator", "key", key, "coordinator", coord, "status", resp.StatusCode, "reason", reason)
+		// A 503 is the dial's CP refusal (fewer than W owners reachable): narrate it, so the log
+		// shows availability being spent for consistency. Other statuses (a bad via → 400) are the
+		// caller's error, not a cluster-behaviour event.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			c.mu.Lock()
+			c.logf("refuse", "write to %q via %s refused — %s (it won't accept a write it can't make durable on a quorum)", key, coordName(via), reason)
+			c.mu.Unlock()
+		}
 		return fmt.Errorf("set %s: status %d", key, resp.StatusCode)
 	}
 
@@ -432,9 +441,9 @@ func (c *Cluster) Set(key, value string, ttl time.Duration, via string) error {
 		// with the coordinator's authoritative instant; in-process, they differ by the
 		// length of one HTTP hop.
 		c.deadlines[key] = time.Now().Add(ttl)
-		c.logf("set", "wrote %q via a coordinator, expiring in %s", key, ttl)
+		c.logf("set", "wrote %q via %s, expiring in %s", key, coordName(via), ttl)
 	} else {
-		c.logf("set", "wrote %q via a coordinator", key)
+		c.logf("set", "wrote %q via %s", key, coordName(via))
 	}
 	c.mu.Unlock()
 	c.logger().Debug("write ok", "key", key, "coordinator", coord, "ttl", ttl, "took", time.Since(start).Round(time.Millisecond))
@@ -553,6 +562,10 @@ func (c *Cluster) Get(key, via string) (ReadResult, error) {
 				return ReadResult{}, fmt.Errorf("get %s: bad conflict body: %w", key, err)
 			}
 			res.Conflict, res.Found = true, true
+			c.mu.Lock()
+			c.logf("conflict", "read of %q surfaced %d concurrent siblings (%s) — writes that never saw each other, both kept",
+				key, len(res.Siblings), strings.Join(res.Siblings, " | "))
+			c.mu.Unlock()
 			c.logger().Debug("read hit conflict", "key", key, "coordinator", res.Coordinator,
 				"siblings", len(res.Siblings), "took", took)
 			return res, nil
@@ -571,8 +584,15 @@ func (c *Cluster) Get(key, via string) (ReadResult, error) {
 		c.logger().Debug("read miss", "key", key, "took", took)
 		return res, nil
 	default:
-		c.logger().Error("read failed: all owners unreachable",
-			"key", key, "coordinator", coord, "status", resp.StatusCode, "took", took)
+		reason := strings.TrimSpace(string(body))
+		c.logger().Error("read failed", "key", key, "coordinator", coord, "status", resp.StatusCode, "reason", reason, "took", took)
+		// 503 is the dial's CP refusal (fewer than R_read owners answered); 502 is every owner
+		// unreachable — a different fact, not a consistency choice, so only the 503 narrates.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			c.mu.Lock()
+			c.logf("refuse", "read of %q via %s refused — %s (it won't answer without a quorum that guarantees the latest write)", key, coordName(via), reason)
+			c.mu.Unlock()
+		}
 		return ReadResult{}, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
 }
@@ -783,6 +803,15 @@ func (c *Cluster) anyLiveAddrLocked() string {
 	}
 	sort.Strings(live)
 	return c.addrs[live[0]]
+}
+
+// coordName is the coordinator label for an event: the named via, or "a coordinator" when the
+// caller let any live node take it (via=="").
+func coordName(via string) string {
+	if via == "" {
+		return "a coordinator"
+	}
+	return via
 }
 
 // logf appends an event to the dashboard's activity strip, and mirrors it into the

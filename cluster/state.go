@@ -3,6 +3,7 @@ package cluster
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/node"
@@ -169,6 +170,39 @@ func (c *Cluster) State() State {
 				From: id,
 				Keys: keys,
 			})
+		}
+
+		// And its read-repairs: a read caught a lagging owner up. Grouped by the owner that
+		// converged (id was the coordinator that noticed and pushed), so a burst of reads that
+		// fixed the same replica reads as one line.
+		if repairs := n.DrainRepairLog(); len(repairs) > 0 {
+			byOwner := map[string]map[string]bool{}
+			for _, r := range repairs {
+				if byOwner[r.To] == nil {
+					byOwner[r.To] = map[string]bool{}
+				}
+				byOwner[r.To][r.Key] = true
+			}
+			tos := make([]string, 0, len(byOwner))
+			for to := range byOwner {
+				tos = append(tos, to)
+			}
+			sort.Strings(tos)
+			for _, to := range tos {
+				keys := make([]string, 0, len(byOwner[to]))
+				for k := range byOwner[to] {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				c.appendEvent(Event{
+					Kind: "repair",
+					Msg: fmt.Sprintf("read-repair: %s caught up on %d key%s (%s) — a lagging replica converged on a read, not a membership change",
+						to, len(keys), plural(len(keys)), strings.Join(keys, ", ")),
+					From: id,
+					To:   to,
+					Keys: keys,
+				})
+			}
 		}
 	}
 

@@ -348,6 +348,14 @@ button:disabled:hover { transform: none; background: rgb(var(--btn) / 0.16); }
 /* cleanup is heal running backwards — the surplus copies a heal left behind — so it takes
    heal's green, muted: no client can observe it, and nothing is lost. */
 .tag.cleanup { --tag: var(--ok); --tag-ink: var(--ok-ink); }
+/* CAP events. cut breaks the network (warn), mend restores it (ok). refuse is availability
+   spent for consistency — the dial's CP "no" — so it borrows kill's red; conflict is divergence
+   surfaced (the louder amber a client can observe); repair is convergence, like a heal. */
+.tag.cut { --tag: var(--warn); --tag-ink: #ffe08a; }
+.tag.mend { --tag: var(--ok); --tag-ink: var(--ok-ink); }
+.tag.refuse { --tag: var(--danger); --tag-ink: var(--danger-ink); }
+.tag.conflict { --tag: var(--warn); --tag-ink: #ffd280; }
+.tag.repair { --tag: var(--ok); --tag-ink: var(--ok-ink); }
 
 /* One block = one fault plus the heal copies it caused, nested under it. */
 .block { border-bottom: 1px solid rgb(var(--steel) / 0.06); padding: 3px 0; }

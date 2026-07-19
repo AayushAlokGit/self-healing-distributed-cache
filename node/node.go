@@ -121,8 +121,11 @@ type Node struct {
 	// written only by the heal goroutine and drained only by the manager.
 	healLogMu  sync.Mutex
 	healLog    []HealCopy
-	cleanupLog [][]string // one entry per pass: the keys it dropped
-	healCauses []string   // membership changes seen since the last heal pass
+	cleanupLog [][]string   // one entry per pass: the keys it dropped
+	repairLog  []RepairCopy // read-repair convergences; written by the READ path, so several
+	//                          request goroutines may append at once — the lock matters more here
+	//                          than for the single-threaded heal.
+	healCauses []string // membership changes seen since the last heal pass
 
 	// healthPaused stalls this node's /health responses without stopping the rest of
 	// it: a live node that looks dead to peers, for the false-positive demo.
@@ -1223,7 +1226,7 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 // Synchronous and self-limiting: once every owner covers the surviving set it stores nothing, so a
 // converged read pays only the checks. A production store would run this off the read path.
 func (n *Node) readRepair(key string, owners []owner, outcomes []string, held [][]cache.Entry, merged []cache.Entry) {
-	repaired := 0
+	repaired := map[string]bool{} // owners caught up, deduped (an owner missing two siblings is one convergence)
 	for i, o := range owners {
 		if outcomes[i] != OutcomeHit && outcomes[i] != OutcomeMiss {
 			continue // unreachable: out of read-repair's reach
@@ -1238,12 +1241,44 @@ func (n *Node) readRepair(key string, owners []owner, outcomes []string, held []
 				n.logger().Warn("read-repair: store failed", "key", key, "owner", o.id, "err", err)
 				continue
 			}
-			repaired++
+			repaired[o.id] = true
 		}
 	}
-	if repaired > 0 {
-		n.logger().Info("read-repair converged a lagging replica", "key", key, "copies", repaired)
+	if len(repaired) > 0 {
+		ids := slices.Sorted(maps.Keys(repaired))
+		n.recordRepair(key, ids)
+		n.logger().Info("read-repair converged a lagging replica", "key", key, "owners", strings.Join(ids, ","))
 	}
+}
+
+// RepairCopy is one read-repair convergence: an owner (To) that a read caught up on a key.
+type RepairCopy struct {
+	To  string
+	Key string
+}
+
+// recordRepair files the owners a read caught up on key. Bounded like the heal/cleanup logs.
+func (n *Node) recordRepair(key string, owners []string) {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	for _, to := range owners {
+		n.repairLog = append(n.repairLog, RepairCopy{To: to, Key: key})
+	}
+	if over := len(n.repairLog) - maxHealLog; over > 0 {
+		n.repairLog = slices.Delete(n.repairLog, 0, over)
+	}
+}
+
+// DrainRepairLog returns the read-repair convergences since the last drain, and clears it.
+func (n *Node) DrainRepairLog() []RepairCopy {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	if len(n.repairLog) == 0 {
+		return nil
+	}
+	out := n.repairLog
+	n.repairLog = nil
+	return out
 }
 
 // holdsAny reports whether have contains a version whose clock equals one in want. Used to

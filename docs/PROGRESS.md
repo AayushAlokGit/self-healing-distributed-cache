@@ -613,6 +613,15 @@ become siblings). Then part 2 (refusal = the CP end; the checkerboard; and the t
   re-owns and serves the very write the held ring refused). Full tree green under `-race`. Still on `cap-demo`.
 - **Layout, this session too** (his asks): key table shows per-side owners under a cut (roomier two-row cards);
   Write/Read moved to a side-by-side row in the left column; the partition renders as two independent rings.
+- **Activity-log narration for the new system** (his ask — the ordered event log was a standout deliverable, so
+  the CAP mechanisms deserved it too). New manager-appended events: **`refuse`** (a `503` — the dial's CP "no",
+  on a write or read; only the 503, not a 502-all-unreachable) and **`conflict`** (a read surfaced concurrent
+  siblings, values inline). New node-drained event: **`repair`** (a read-repair convergence — `node.repairLog` →
+  `DrainRepairLog` → `State` appends, grouped by the caught-up owner, mirroring the heal/cleanup drain). Enhanced
+  **`set`** to name the coordinator (`via`). Frontend: tag colours for `cut`/`mend`/`refuse`/`conflict`/`repair`
+  (refuse=red, conflict=amber, repair/mend=green). Browser-verified end to end: the log narrated the checkerboard
+  (writes via n3 accepted, via n0 refused), the dial changes, the divergence, four conflict reads, and the
+  read-repair catch-up — all in causal order in the one shared list.
 
 ### Session 20 — 2026-07-19 · `/state` reports the partition — the ring genuinely splits
 **Build + browser verification, on `cap-demo`.** Closed the S19 follow-up: the cut was tracked client-side, so a
