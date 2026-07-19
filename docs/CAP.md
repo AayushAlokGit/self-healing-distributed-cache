@@ -1,7 +1,9 @@
 # CAP, partitions, and the consistency dial — Phase 7 design
 
-**Status: taught, not built.** Turns CAP from three letters into a *button a stranger can press* and a
-*table our cluster produces* (§12). The deliverable is numbers, not a diagram.
+**Status: 7A BUILT & verified end-to-end (S18–S19, branch `cap-demo`); the dial (7B) is still design.** Turns
+CAP from three letters into a *button a stranger can press* and a *table our cluster produces* (§12). The
+deliverable is numbers, not a diagram. Where building it caught up with (or corrected) the design, it's marked
+**⇒ AS BUILT** in place.
 
 > ⚠️ **Two things this doc deliberately does not say.** It does not call the strong end of the dial **"CP"** —
 > it is Cassandra's `QUORUM`, *stronger than eventual*, not *consistent* (§13). And the version scheme is a
@@ -24,6 +26,11 @@ keeps running perfectly — a cut cable, a firewall rule, a lost datacenter link
 
 So the cut belongs **under the HTTP clients** (`n.client`, `n.healthClient`), not as a flag in `Node`. No
 handler ever learns partitions exist — correct, because a partition is a property of the network, not a node.
+
+> **⇒ AS BUILT (7A):** `node.gate` — one mutex-guarded set of blocked peer addresses, **shared by both
+> clients**, that refuses a blocked peer in `RoundTrip` (so a keep-alive connection pooled before the cut is
+> refused too). `Cluster.Cut(sideA, sideB)` / `Mend` drive it; a blocked request fails fast, indistinguishable
+> from a dead node — exactly §2.
 
 ---
 
@@ -178,8 +185,12 @@ So a version has **two jobs**:
 ### Consistency is impossible without versions — not harder, impossible.
 Both branches of CAP dead-end at the same missing field: **CP needs it on every read** (pick the current
 value from overlapping replies — the staleness job, needed *even on a perfectly healthy cluster*);
-**AP needs it after a heal** (reconcile divergence — today the heal asks *"do you have it?"*, hears `200`,
-skips — `presence ≠ version`, flagged since S9).
+**AP needs it after a heal** (reconcile divergence).
+
+> **⇒ AS BUILT (7A):** the old heal asked *"do you have it?"*, heard `200`, and skipped — `presence ≠ version`,
+> flagged since S9. Now the **read**, the **heal**, and **cleanup** all reconcile by version: the read gathers
+> every owner and returns siblings; the heal picks a **per-version healer** (a stranded concurrent sibling
+> propagates); cleanup keeps a sibling no owner covers. The S9 gap is closed in all three.
 
 ### The clocks — one question hiding as two
 Stamp each write so reconciliation can order them. Three families, **not** equivalent:
@@ -290,13 +301,19 @@ being concurrent.** That is consensus. That is Raft. **Out of scope** (§13).
 Not a second system: **turn one dial and the same code behaves differently under an identical failure.**
 The difference is **two numbers**:
 
-| the dial | **keeps both** (eventual) | **refuses one** (quorum) | where it lives |
+| the dial | **keeps both** (eventual, `ONE`) | **refuses one** (`QUORUM`) | where it lives |
 |---|---|---|---|
-| **W** — acks before "done" | **1** | **2** | `defaultWriteQuorum` |
-| **R_read** — replies before a read answers | **1** *(first reachable hit)* | **2** | `handleClientGet`'s `break` |
+| **W** — acks before "done" | **1** | **2** | `defaultWriteQuorum` (`SetReplication`) |
+| **R_read** — owners a read asks before answering | **1** | **2** | `SetQuorum` — **7B, not built** |
 
 ⚠️ **Not "AP → CP."** The strong end is **Cassandra's `QUORUM`**, not a CP system (§13). It is *stronger than
 eventual*; it is not *consistent*.
+
+> **⇒ AS BUILT (7A):** the dial is **7B and not built** — `W` is fixed at `New()` and there is no `R_read`
+> knob yet. 7A's read is **gather-all**: it asks *every* reachable owner and reconciles, because a
+> conflict-aware read *cannot stop at the first hit* without missing a concurrent sibling — that **removed the
+> old `handleClientGet` `break`**. So R_read sits pinned at its max today (maximum detection); the `ONE`
+> setting, and the "skipped" owners in the read trace, return in 7B when the dial can lower it.
 
 **What rides along** — implied by the setting, never chosen beside it:
 
@@ -359,17 +376,19 @@ heal preserved divergence **forever** — that isn't a consistency level, it's t
 with a demo built on it. Versions are a prerequisite (§11), so they moved into 7A and the arc lost a step.
 `CAP_DEMO.md` is the demo spec.)*
 
-- **7.0 — a second cluster, a second tab. Nothing new to see.** This demo leaves the network cut for minutes
+- **7.0 — a second cluster, a second tab. Nothing new to see.** ✅ **DONE S17.** This demo leaves the network cut for minutes
   while you write to both sides; it cannot share a ring with the Phase 6 replication demo. **`cluster/` needs
   no changes** — nodes already bind `127.0.0.1:0` (the OS assigns ports, so two clusters can't collide) and
   there is **no package-level mutable state** to share (`HLD.md` §4, verified under `-race`). The work is
   `cmd/server` (a cluster map + an `/api/{cluster}/…` prefix) and the frontend. Ships as an empty second ring.
-- **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Let a
-  client pick its coordinator (`via=n0` / `via=n4`); every value gains a vector clock (§9). The heal stops
-  asking *"do you have it?"* and starts asking ***"did these two ever see each other?"*** — it **detects the
-  clash and keeps both**, then puts the two vectors on screen and asks *you*. Closes the S9 gap; read-repair
-  for free. A complete demo on its own.
-- **7B — the dial.** `W=2`, `R_read=2`, ring held fixed. Same cut, opposite behaviour: availability becomes
+- **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** ✅ **DONE
+  S18–S19, verified E2E** (browser: cut `{n0,n2,n4}|{n1,n3}`, wrote `milk,eggs` via n0 and `milk,bread` via n3,
+  both accepted, mend, the heal kept both, a read showed the conflict card). A client picks its coordinator
+  (`via=n0` / `via=n4`); every value carries a vector clock (§9). The heal stopped asking *"do you have it?"*
+  and started asking ***"did these two ever see each other?"*** — it **detects the clash and keeps both**, then
+  puts the two values on screen and asks *you*. Closes the S9 gap. ⚠️ **Detection, not read-repair:** a read
+  *surfaces* the siblings; it does **not** write the merge back (repair-on-read is a named follow-up).
+- **7B — the dial. Still design, not built.** `W=2`, `R_read=2`, ring held fixed. Same cut, opposite behaviour: availability becomes
   a property of the key, **no key served on both sides**, no clash to resolve — because the losing side
   **refuses** with a `503` rather than accepting a write it can't reconcile, while the node holding the data
   sits right there saying no. ⚠️ *Not* "no collisions ever" — healthy-network concurrency still collides
