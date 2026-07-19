@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
-import type { State } from '../api'
+import type { Cut, State } from '../api'
 import { COLORS, colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, ownershipArcs } from '../geometry'
 
 // Slow enough that a key is visibly seen travelling between nodes; the stagger is capped
@@ -9,8 +9,16 @@ const PACKET_STAGGER_MS = 140
 const MAX_STAGGER_MS = 2200
 const SHOCK_MS = 1100
 
-export function RingViz({ state, prev }: { state: State; prev: State | null }) {
+export function RingViz({ state, prev, cut }: { state: State; prev: State | null; cut?: Cut | null }) {
   const layerRef = useRef<SVGGElement>(null)
+  // Which side of an active cut each node sits on, for the light on-ring tint. Empty when
+  // there is no cut, so every node renders exactly as before.
+  const sideOf = useMemo(() => {
+    const m: Record<string, 'a' | 'b'> = {}
+    cut?.sideA.forEach((id) => (m[id] = 'a'))
+    cut?.sideB.forEach((id) => (m[id] = 'b'))
+    return m
+  }, [cut])
   // Must stay memoised: `angles` is an effect dependency, so a fresh object each render
   // would re-run the diff below and fire the same packets twice.
   const angles = useMemo(() => markerAngles(state.nodes), [state.nodes])
@@ -139,10 +147,11 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
         {state.nodes.map((n) => {
           const [x, y] = xy(angles[n.id], NODE_R)
           const color = colorFor(n.id)
+          const side = sideOf[n.id]
           return (
             <g
               key={n.id}
-              className={'nodeg ' + (n.alive ? 'alive' : 'dead')}
+              className={'nodeg ' + (n.alive ? 'alive' : 'dead') + (side ? ' side-' + side : '')}
               transform={`translate(${x},${y})`}
             >
               <circle className="halo" r={26} fill={n.alive ? color : 'none'} stroke={color} />
@@ -151,6 +160,12 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
               <text className="sub" y={34}>
                 {n.alive ? `${n.keyCount} keys` : 'dead'}
               </text>
+              {/* A side tag while partitioned: which half of the cut this node can talk to. */}
+              {side && (
+                <text className="side-tag" x={24} y={-20}>
+                  {side.toUpperCase()}
+                </text>
+              )}
             </g>
           )
         })}

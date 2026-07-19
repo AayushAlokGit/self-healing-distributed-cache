@@ -58,6 +58,15 @@ export interface VNode {
   node: string
 }
 
+// A network cut splits the live nodes into two sides that cannot hear each other. It is NOT
+// part of the /state snapshot (state.go was untouched), so the dashboard is the only thing
+// that knows a cut is live — it tracks the issued cut in its own client state and a reload
+// forgets it. This mirrors the /cut request body.
+export interface Cut {
+  sideA: string[]
+  sideB: string[]
+}
+
 // One entry in the activity log, in causal order. from/to/keys/cause are set on
 // kind === 'heal' only.
 export interface ClusterEvent {
@@ -148,6 +157,12 @@ export function createApi(cluster: string) {
 
     killNode: (id: string) => post<void>('/kill', { id }, `kill ${id}`),
     reviveNode: (id: string) => post<void>('/revive', { id }, `revive ${id}`),
+
+    // Split the cluster in two: neither side hears the other, both keep serving. The backend
+    // 400s on an empty side, a node that isn't currently alive/known, or one named on both
+    // sides — surfaced verbatim on the panel's error line. mend clears whatever cut is active.
+    cut: (sideA: string[], sideB: string[]) => post<void>('/cut', { sideA, sideB }, 'cut network'),
+    mend: () => post<void>('/mend', {}, 'mend network'),
 
     // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs. via picks the
     // coordinator node; omit or empty means auto (the backend picks any live node).

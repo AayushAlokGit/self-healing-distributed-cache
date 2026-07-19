@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
-import { API_BASE, createApi, type State } from './api'
+import { API_BASE, createApi, type Cut, type State } from './api'
 import { ActivityLog } from './components/ActivityLog'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
+import { PartitionPanel } from './components/PartitionPanel'
 import { ReadPanel } from './components/ReadPanel'
 import { RingViz } from './components/RingViz'
 import { Stats } from './components/Stats'
@@ -38,7 +39,7 @@ const TABS: readonly Tab[] = [
     id: 'cap',
     label: 'CAP & Partitions',
     blurb: () =>
-      'The same ring, on its own cluster. Network-cut controls and the consistency dial land next — for now, kill a node here and the other tab never notices.',
+      'The same ring, on its own cluster. Cut the network in two and each side keeps serving — a write to the same key on both sides becomes a conflict the cache keeps both of.',
   },
 ]
 
@@ -76,6 +77,13 @@ export default function App() {
 
 function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void }) {
   const { state, prev, connected, refresh } = useClusterState()
+
+  // The active cut is client-only: /state does not report it (state.go was untouched), so
+  // the dashboard — the only issuer of cuts — is the sole source of truth. A reload forgets
+  // it (a known limitation until /state carries the partition). Only the CAP tab issues cuts;
+  // Dashboard remounts per tab (key={tab.id} in App), so this is null everywhere else.
+  const [cut, setCut] = useState<Cut | null>(null)
+  const isCap = tab.id === 'cap'
 
   return (
     <>
@@ -115,14 +123,34 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           <div className="offline-badge">⚠ backend unreachable — is `go run ./cmd/server` running?</div>
         ))}
 
+      {cut && (
+        <div className="partition-banner">
+          <span className="bolt">✂</span>
+          <b>NETWORK PARTITIONED</b>
+          <span className="detail">
+            Side A ({cut.sideA.join(', ')}) and Side B ({cut.sideB.join(', ')}) cannot hear each
+            other — both keep serving.
+          </span>
+        </div>
+      )}
+
       {state ? (
         <div className="grid">
           <div className="left">
-            <RingViz state={state} prev={prev} />
+            <RingViz state={state} prev={prev} cut={cut} />
             <KeyTable keys={state.keys} onAction={refresh} />
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
+            {isCap && (
+              <PartitionPanel
+                nodes={state.nodes}
+                cut={cut}
+                onCut={setCut}
+                onMend={() => setCut(null)}
+                onAction={refresh}
+              />
+            )}
             <WritePanel nodes={state.nodes} onAction={refresh} />
             <ReadPanel nodes={state.nodes} />
             <ActivityLog events={state.events} />

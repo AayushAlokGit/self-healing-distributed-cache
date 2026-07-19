@@ -225,6 +225,55 @@ input:focus, .via-select:focus { outline: none; border-color: rgb(var(--cyan)); 
 /* A request that failed outright, as opposed to a cache miss. */
 .api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }
 
+/* --- Network partition (THE CUT) --------------------------------------------- */
+/* Side A borrows cyan, Side B amber — the same two accents the ring tint uses, so the
+   banner, the panel and the ring all name the sides the same way. */
+
+/* Full-width warning while a cut is live: impossible to miss, so nobody reads the split ring
+   as a broken cluster. */
+.partition-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 16px; padding: 10px 15px; border-radius: 12px;
+  background: rgb(var(--warn) / 0.12); border: 1px solid rgb(var(--warn) / 0.42);
+  color: #ffe08a; font-size: 12.5px;
+  animation: partitionpulse 1.4s ease-in-out infinite;
+}
+.partition-banner b { color: rgb(var(--warn)); letter-spacing: 1.4px; font-size: 12px; }
+.partition-banner .bolt { font-size: 15px; }
+.partition-banner .detail { color: var(--muted); }
+@keyframes partitionpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--warn) / 0.22); }
+  50% { box-shadow: 0 0 18px 2px rgb(var(--warn) / 0.16); }
+}
+
+/* Assignment editor: one row per live node, an A|B segmented toggle on the right. */
+.cut-assign { display: flex; flex-direction: column; gap: 6px; margin-bottom: 11px; }
+.cut-row { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 9px; background: var(--well); border: 1px solid var(--hair); }
+.cut-row .id { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 7px; flex: 1; }
+.cut-row .swatch { width: 10px; height: 10px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
+.cut-seg { display: flex; gap: 4px; }
+.cut-seg .seg { padding: 4px 11px; font-size: 11px; font-weight: 700; }
+.cut-seg .seg.on-a { --btn: var(--cyan); background: rgb(var(--btn) / 0.32); color: #8be9fd; }
+.cut-seg .seg.on-b { --btn: var(--warn); background: rgb(var(--btn) / 0.32); color: #ffe08a; }
+
+.cut-actions { display: flex; gap: 8px; }
+.cut-actions button:first-child { flex: 0 0 auto; }
+.cut-actions .primary { flex: 1; width: auto; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:disabled:hover { transform: none; background: rgb(var(--btn) / 0.16); }
+
+/* Active-cut view: the two sides, side by side, split by scissors. */
+.cut-sides { display: flex; align-items: stretch; gap: 8px; margin-bottom: 12px; }
+.cut-side { flex: 1; padding: 9px 11px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); }
+.cut-side-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-bottom: 7px; }
+.cut-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.cut-divider { align-self: center; color: rgb(var(--warn)); font-size: 18px; }
+
+/* On-ring side tag while partitioned. */
+.side-tag { font-size: 12px; font-weight: 800; text-anchor: middle; dominant-baseline: middle; }
+.nodeg.side-a .side-tag { fill: rgb(var(--cyan)); }
+.nodeg.side-b .side-tag { fill: rgb(var(--warn)); }
+
 /* The log grows without bound, so it scrolls. */
 .log { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; }
 .ev { display: flex; gap: 9px; align-items: baseline; padding: 5px 2px; font-size: 12px; animation: slidein 0.35s ease; }
