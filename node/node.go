@@ -427,27 +427,52 @@ func (n *Node) healLoop() {
 	}
 }
 
-// heal re-asserts the replication invariant: every current owner of every key this
-// node holds must have a copy. Check-first — ask before copying — so a flapped node
-// costs zero copies and a revived empty node is repopulated.
+// covered reports whether entries already hold v or a version that dominates it, so pushing
+// v would add nothing. Concurrent siblings are NOT covered — preserving them is the point.
+func covered(entries []cache.Entry, v cache.Entry) bool {
+	for _, e := range entries {
+		switch vclock.Compare(v.Version, e.Version) {
+		case vclock.Before, vclock.Equal:
+			return true
+		}
+	}
+	return false
+}
+
+// coveredAhead reports whether some owner ranked ahead of rank demonstrably holds v or a
+// dominator of it — making that owner v's healer (or marking v stale), so this node stands
+// down for v. An unreachable owner ahead does not count: unconfirmed is not deferred-to.
+func coveredAhead(ownerEntries [][]cache.Entry, reachable []bool, rank int, v cache.Entry) bool {
+	for i := 0; i < rank && i < len(ownerEntries); i++ {
+		if reachable[i] && covered(ownerEntries[i], v) {
+			return true
+		}
+	}
+	return false
+}
+
+// heal re-asserts the replication invariant: every current owner must hold every version
+// this node holds. Check-first — ask before copying — so a flapped node costs zero copies
+// and a revived empty node is repopulated.
 //
-// The healer for a key is the first owner, in ring order, that actually holds it:
-// permission to push follows the data, not the ring position. Otherwise a revived node
-// promoted back to primary has nothing to send while the holders behind it stand down,
-// and the key is stranded below R forever.
+// The healer for a VERSION is the first owner, in ring order, that holds it (or a dominator):
+// permission to push follows the data, not the ring position, and it is decided per-version,
+// not per-key. Two concurrent siblings on different owners each get their own healer, so a
+// stranded carol propagates instead of living forever on one node. A version an owner ahead
+// already covers is stood down; so is a stale local version a dominator elsewhere will replace.
 func (n *Node) heal() {
 	// Batched by target: one pass pushing 8 keys to n4 is one record, not eight.
 	moved := map[string][]string{}
 
 	start := time.Now()
-	snapshot := n.cache.Snapshot()
-	causes := n.drainHealCauses() // what my heartbeat saw that made this pass happen
+	snapshot := n.cache.SnapshotAll() // every version of every key I hold, not just one
+	causes := n.drainHealCauses()     // what my heartbeat saw that made this pass happen
 	var healerFor, deferred, alreadyPresent, unreachable, failed int
 
 	log := n.logger()
 	log.Debug("heal started", "keys_held", len(snapshot), "cause", strings.Join(causes, "; "))
 
-	for key, entry := range snapshot {
+	for key, versions := range snapshot {
 		select {
 		case <-n.done:
 			log.Debug("heal aborted: node closing", "copies", len(moved))
@@ -460,9 +485,9 @@ func (n *Node) heal() {
 			continue // no live owner at all: nowhere to send it
 		}
 
-		// My rank among this key's owners, or last if I am not one: a holder left over
-		// from an older ring must still be able to heal, or a key whose owners all lack
-		// it would have no sender at all.
+		// My rank among this key's owners, or last if I am a leftover holder from an older
+		// ring — such a holder must still be able to heal, or a version no owner has yet
+		// would have no sender at all.
 		rank := len(owners)
 		for i, o := range owners {
 			if o.id == n.id {
@@ -471,49 +496,61 @@ func (n *Node) heal() {
 			}
 		}
 
-		// Stand down if an owner ahead of me holds the key: that node is the healer, and
-		// two senders would duplicate every copy.
-		standDown := false
-		for _, o := range owners[:min(rank, len(owners))] {
-			if _, has, err := n.fetchFrom(o.addr, key); err == nil && has {
-				standDown = true
-				break
+		// Fetch every owner's version set once and reuse it across my local versions. An
+		// owner I cannot reach stays unreachable and is retried on a later pass.
+		ownerEntries := make([][]cache.Entry, len(owners))
+		reachable := make([]bool, len(owners))
+		for i, o := range owners {
+			if o.id == n.id {
+				ownerEntries[i], reachable[i] = versions, true
+				continue
 			}
-		}
-		if standDown {
-			deferred++
-			log.Debug("heal: stood down, an owner ahead of me holds this key", "key", key)
-			continue
+			es, _, err := n.fetchFrom(o.addr, key)
+			if err != nil {
+				continue // reachable[i] stays false: a later pass retries
+			}
+			ownerEntries[i], reachable[i] = es, true
 		}
 
-		healerFor++
-		for _, o := range owners {
-			if o.id == n.id {
-				continue // I have it; that's why I'm the healer
-			}
-			_, has, err := n.fetchFrom(o.addr, key)
-			switch {
-			case err != nil:
-				unreachable++ // can't copy to a node we can't reach; a later pass retries
-				log.Debug("heal: owner unreachable, key stays under-replicated", "key", key, "owner", o.id, "err", err)
-				continue
-			case has:
-				alreadyPresent++ // no copy needed
-				log.Debug("heal: owner already has key, no copy", "key", key, "owner", o.id)
+		// Heal each version independently: presence != version reaches the heal's own
+		// sender-selection. I heal v only if no owner ahead of me already covers it; else
+		// that owner is v's healer, or v is a stale local copy a dominator will replace.
+		healed := false
+		for _, v := range versions {
+			if coveredAhead(ownerEntries, reachable, rank, v) {
 				continue
 			}
-			// entry.Expires, not a fresh TTL: the copy inherits the deadline the key
-			// already had, or its own rescue would hand it a new lease on life. The version
-			// travels too, so the copy reconciles against a divergent replica instead of
-			// clobbering it.
-			if err := n.storeOn(o.addr, key, entry.Value, entry.Version, entry.Expires); err != nil {
-				failed++
-				log.Warn("heal: copy failed, key still under-replicated", "key", key, "owner", o.id, "err", err)
-				continue // record only copies that actually landed
+			healed = true
+			for i, o := range owners {
+				if o.id == n.id {
+					continue // I have it; that's why I'm the healer
+				}
+				switch {
+				case !reachable[i]:
+					unreachable++ // can't copy to a node we can't reach; a later pass retries
+				case covered(ownerEntries[i], v):
+					alreadyPresent++ // owner already holds v or a dominator
+				default:
+					// v.Expires, not a fresh TTL: the copy inherits the deadline the key
+					// already had, or its rescue would hand it a new lease on life.
+					if err := n.storeOn(o.addr, key, v.Value, v.Version, v.Expires); err != nil {
+						failed++
+						log.Warn("heal: copy failed, version still under-replicated", "key", key, "owner", o.id, "err", err)
+						continue // record only copies that actually landed
+					}
+					n.healCopies.Add(1)
+					moved[o.id] = append(moved[o.id], key)
+					// Keep the owner's view current so a later local version's covered-check
+					// sees what we just pushed and does not re-send it.
+					ownerEntries[i] = cache.MergeVersions(ownerEntries[i], []cache.Entry{v})
+					log.Debug("heal: copied version", "key", key, "to", o.id)
+				}
 			}
-			n.healCopies.Add(1)
-			moved[o.id] = append(moved[o.id], key)
-			log.Debug("heal: copied key", "key", key, "to", o.id)
+		}
+		if healed {
+			healerFor++
+		} else {
+			deferred++
 		}
 	}
 
@@ -564,10 +601,11 @@ func (n *Node) heal() {
 // drops only after all R owners confirm, so the count cannot fall below R however they
 // interleave. An owner never reaches the drop, so the owners cannot clean each other up.
 //
-// ⚠️ It assumes the dropped copy is no fresher than the owners'. Writes go to owners, so that
-// holds — except for a write a *down* owner missed, which heal's presence check will not
-// repair. Cleanup can therefore discard a fresher copy and keep a staler one. No client can
-// observe it (reads only ask owners), but it is presence≠version, and only versions close it.
+// Version-aware: a copy is dropped only if every owner covers each version it carries — holds
+// that version, or a dominator of it. A version no owner covers is a stranded sibling (a write
+// a down owner missed, or one side of a cut): kept, not dropped, and the heal re-armed to
+// propagate it. So cleanup can never discard an acked write the owners have not yet seen — the
+// presence≠version hole the old has-the-key check left open. See TestCleanupKeepsAStrandedSibling.
 func (n *Node) cleanup() {
 	start := time.Now()
 	log := n.logger()
@@ -575,7 +613,7 @@ func (n *Node) cleanup() {
 	dropped := make([]string, 0, 8)
 	var kept int
 
-	for key := range n.cache.Snapshot() {
+	for key, versions := range n.cache.SnapshotAll() {
 		select {
 		case <-n.done:
 			return
@@ -590,14 +628,27 @@ func (n *Node) cleanup() {
 			continue // I own this key. Holding it is the point.
 		}
 
-		// I am not an owner. Every owner must confirm it holds the key before I let go.
+		// I am not an owner. I let go only once every owner covers every version I hold. An
+		// owner that cannot be reached, or one missing a version I have (a stranded sibling),
+		// ends the matter: dropping then would lose a write the owners do not have.
 		confirmed := true
 		for _, o := range owners {
-			_, has, err := n.fetchFrom(o.addr, key)
-			if err != nil || !has {
+			ownerEntries, _, err := n.fetchFrom(o.addr, key)
+			if err != nil {
 				confirmed = false
-				log.Debug("cleanup: keeping a key I do not own — an owner cannot confirm it",
-					"key", key, "owner", o.id, "reachable", err == nil, "has", has)
+				log.Debug("cleanup: keeping a key I do not own — an owner is unreachable",
+					"key", key, "owner", o.id)
+				break
+			}
+			for _, v := range versions {
+				if !covered(ownerEntries, v) {
+					confirmed = false
+					log.Debug("cleanup: keeping a version no owner holds — a stranded sibling",
+						"key", key, "owner", o.id)
+					break
+				}
+			}
+			if !confirmed {
 				break
 			}
 		}

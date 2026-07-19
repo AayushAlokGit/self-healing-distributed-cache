@@ -143,6 +143,81 @@ func TestReadDetectsConcurrentSiblings(t *testing.T) {
 	}
 }
 
+// sortedValues pulls the values off a set of entries, sorted, so an unordered version set can
+// be compared with slices.Equal.
+func sortedValues(es []cache.Entry) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.Value
+	}
+	slices.Sort(out)
+	return out
+}
+
+// A stranded sibling must propagate. bob lives on one owner and a concurrent carol on another,
+// each on a single node and so under-replicated. Under the old presence-based heal each looked
+// "already present" to the other's healer — has-the-key was true — so neither sibling ever
+// moved and both stayed stuck below R forever. The version-aware heal heals per version: bob's
+// healer and carol's healer are different owners, so after a heal every owner holds BOTH.
+func TestHealPropagatesStrandedSiblings(t *testing.T) {
+	ids := []string{"n0", "n1", "n2"}
+	nodes := startCluster(t, ids...)
+	setReplication(nodes, 3, 1)
+
+	owners := ownersOf(ids, "k", 3) // all three, primary first
+	var empty vclock.Clock
+	bob := empty.Bump("n0")   // {n0:1}
+	carol := empty.Bump("n1") // {n1:1} — concurrent with bob: neither dominates
+
+	// Split the siblings: bob on one owner, carol on another, the third holds neither.
+	putVersioned(t, nodes[owners[0]], "k", "bob", bob)
+	putVersioned(t, nodes[owners[1]], "k", "carol", carol)
+	if got := len(kvEntries(t, nodes[owners[2]], "k")); got != 0 {
+		t.Fatalf("baseline: the third owner should hold nothing, has %d entries", got)
+	}
+
+	// Heal every owner (order-independent: each heals the versions it holds).
+	for _, id := range owners {
+		nodes[id].heal()
+	}
+
+	for _, id := range owners {
+		if got := sortedValues(kvEntries(t, nodes[id], "k")); !slices.Equal(got, []string{"bob", "carol"}) {
+			t.Fatalf("owner %s holds %v after heal, want both siblings [bob carol]", id, got)
+		}
+	}
+	t.Logf("both siblings replicated to all %d owners — bob and carol each healed by their own owner", len(owners))
+}
+
+// The heal REPLACES a dominated version, it never preserves it. One owner holds a later write
+// that dominates another owner's older one. Healing must push the winner onto the staler owner
+// (dropping the loser) and must never push the loser back — "covered" means holds-it-or-a-
+// dominator, so the stale version stands down while the dominator propagates. This is the
+// dominance case the concurrent-sibling test above does not exercise.
+func TestHealReplacesDominatedVersion(t *testing.T) {
+	ids := []string{"n0", "n1", "n2"}
+	nodes := startCluster(t, ids...)
+	setReplication(nodes, 3, 1)
+
+	owners := ownersOf(ids, "k", 3)
+	older := vclock.Clock{"w": 1}
+	newer := older.Bump("w") // {w:2} — dominates older
+
+	putVersioned(t, nodes[owners[0]], "k", "new", newer)
+	putVersioned(t, nodes[owners[1]], "k", "old", older)
+
+	for _, id := range owners {
+		nodes[id].heal()
+	}
+
+	for _, id := range owners {
+		if got := sortedValues(kvEntries(t, nodes[id], "k")); !slices.Equal(got, []string{"new"}) {
+			t.Fatalf("owner %s holds %v after heal, want only the dominator [new]", id, got)
+		}
+	}
+	t.Logf("the dominator replaced the stale copy on every owner; the loser was never pushed back")
+}
+
 // A write reads the current version off the owners, bumps the coordinator's slot, and stamps
 // the result. Sequential writes therefore dominate and collapse to one value — no conflict,
 // because each writer saw the last write before making its own.
