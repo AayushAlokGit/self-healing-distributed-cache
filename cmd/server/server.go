@@ -178,6 +178,33 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// Cut splits the cluster in two so neither side can reach the other (data and health),
+	// the fault the CAP demo is built on. A via that is not a live node — here, any id on
+	// either side — is the caller's mistake, so coordStatus maps *NoSuchNodeError to a 400.
+	handle("POST /api/{cluster}/cut", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SideA []string `json:"sideA"`
+			SideB []string `json:"sideB"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if len(body.SideA) == 0 || len(body.SideB) == 0 {
+			writeErr(w, http.StatusBadRequest, "cut needs two non-empty sides")
+			return
+		}
+		if err := c.Cut(body.SideA, body.SideB); err != nil {
+			writeErr(w, coordStatus(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	handle("POST /api/{cluster}/mend", func(c *cluster.Cluster, w http.ResponseWriter, _ *http.Request) {
+		c.Mend()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
 	// A hint at the root, since the UI lives elsewhere. It names the clusters, so anyone
 	// curling this can find the routes without reading the source.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {

@@ -69,7 +69,7 @@ type Cluster struct {
 // From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
-	Kind string `json:"kind"` // kill | revive | pause | resume | set | read | seed | delete | clear | info | heal | cleanup | expire | reclaim
+	Kind string `json:"kind"` // kill | revive | pause | resume | cut | mend | set | read | seed | delete | clear | info | heal | cleanup | expire | reclaim
 	Msg  string `json:"msg"`
 
 	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim/cleanup: the node that freed the memory
@@ -244,6 +244,86 @@ func (c *Cluster) Pause(id string, paused bool) error {
 		c.logf("resume", "resumed %s's health — if it beat the grace period, no heal storm", id)
 	}
 	return nil
+}
+
+// Cut installs a network partition: no node on sideA can reach any node on sideB, for data
+// and health alike, and the reverse. Neither side crashes — each keeps running, stops hearing
+// the other's heartbeats, convicts it, shrinks its ring to its own members, and serves
+// independently. That divergence is the whole CAP demo (CAP.md §2–3): the same key can then be
+// written on both sides, and because neither coordinator could see the other's write, the two
+// come out vector-clock CONCURRENT and are both kept on the heal.
+//
+// Every named id must be a live node (a killed or unknown id is a *NoSuchNodeError, mapped to a
+// 400 by the control API) and the two sides must be disjoint; a node named in neither side is
+// simply left reachable by both. Addresses are resolved up front so a bad id fails the whole
+// cut rather than half-applying it. Log an activity event like Kill/Pause do. Mend clears it.
+//
+// The cut is symmetric even though each node blocks only its OWN outgoing traffic: A refuses to
+// dial B and B refuses to dial A, so every A<->B pair is dead both ways (see node.SetBlockedPeers).
+func (c *Cluster) Cut(sideA, sideB []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	seen := make(map[string]bool, len(sideA)+len(sideB))
+	for _, id := range append(append([]string{}, sideA...), sideB...) {
+		if seen[id] {
+			return fmt.Errorf("node %s named on both sides of the cut", id)
+		}
+		seen[id] = true
+	}
+
+	addrsA, err := c.addrsForLocked(sideA)
+	if err != nil {
+		return err
+	}
+	addrsB, err := c.addrsForLocked(sideB)
+	if err != nil {
+		return err
+	}
+
+	// Each side's nodes block the opposite side's addresses.
+	for _, id := range sideA {
+		c.nodes[id].SetBlockedPeers(addrsB)
+	}
+	for _, id := range sideB {
+		c.nodes[id].SetBlockedPeers(addrsA)
+	}
+
+	c.logf("cut", "cut the network: {%s} | {%s} — neither side can hear the other, so each convicts the far side and serves alone",
+		strings.Join(sideA, ","), strings.Join(sideB, ","))
+	c.logger().Warn("network partitioned (fault injected)",
+		"side_a", strings.Join(sideA, ","),
+		"side_b", strings.Join(sideB, ","),
+	)
+	return nil
+}
+
+// Mend heals a cut: every live node's block set is cleared, so all peers can reach each other
+// again. Within a failure timeout the heartbeat re-admits the far side, the ring grows back,
+// and the heal reconciles what diverged — keeping any concurrent siblings written on both
+// sides (CAP.md §9). Idempotent: mending an uncut cluster clears nothing.
+func (c *Cluster) Mend() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, n := range c.nodes {
+		n.SetBlockedPeers(nil)
+	}
+	c.logf("mend", "mended the network — both sides can talk again; the heal will reconcile what diverged")
+	c.logger().Info("network partition healed", "nodes", len(c.nodes))
+}
+
+// addrsForLocked resolves each id to its live node's address, refusing with *NoSuchNodeError
+// the moment one is not currently a live node — the same rule as coordAddrLocked, since a cut
+// against a dead node is as meaningless as coordinating through one. Caller holds c.mu.
+func (c *Cluster) addrsForLocked(ids []string) ([]string, error) {
+	addrs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, live := c.nodes[id]; !live {
+			return nil, &NoSuchNodeError{ID: id}
+		}
+		addrs = append(addrs, c.addrs[id])
+	}
+	return addrs, nil
 }
 
 // Set writes a key through a live node. via names which node coordinates: "" keeps the

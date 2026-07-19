@@ -69,6 +69,12 @@ type Node struct {
 	client    *http.Client
 	closeOnce sync.Once
 
+	// blocker gates both HTTP clients: a partition fault (Cluster.Cut) fills it with the
+	// addresses on the far side of a cut, and every request to them fails fast. It lives
+	// under the clients, not in the alive/ring view, because a partition is a property of
+	// the network, not a node (CAP.md §1). See partition.go.
+	blocker *blocker
+
 	// log is installed by whoever runs the node and discards until then. Atomic
 	// because the heartbeat and heal goroutines read it while SetLogger may write it.
 	log atomic.Pointer[slog.Logger]
@@ -122,11 +128,15 @@ type Node struct {
 // New creates a node with the given id and capacity. addr may end in ":0" to let
 // the OS pick a free port, which Addr reports back after Start. Call Close.
 func New(id, addr string, capacity int) *Node {
+	// One gate shared by both clients: cut the network and data AND heartbeats stop
+	// together, which is what makes each side of a partition convict the other (CAP.md §2).
+	blk := &blocker{}
 	n := &Node{
 		id:                id,
 		cache:             cache.New(capacity),
 		addr:              addr,
-		client:            &http.Client{Timeout: forwardTimeout},
+		blocker:           blk,
+		client:            &http.Client{Timeout: forwardTimeout, Transport: newGatedTransport(blk)},
 		peers:             map[string]string{},
 		lastSeen:          map[string]time.Time{},
 		alive:             map[string]bool{},
@@ -135,7 +145,7 @@ func New(id, addr string, capacity int) *Node {
 		heartbeatInterval: defaultHeartbeatInterval,
 		failureTimeout:    defaultFailureTimeout,
 		healGracePeriod:   defaultHealGracePeriod,
-		healthClient:      &http.Client{Timeout: defaultFailureTimeout},
+		healthClient:      &http.Client{Timeout: defaultFailureTimeout, Transport: newGatedTransport(blk)},
 		done:              make(chan struct{}),
 		healTrigger:       make(chan struct{}, 1),
 	}
