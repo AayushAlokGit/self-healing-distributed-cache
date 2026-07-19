@@ -32,19 +32,20 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
   the *topology* is collapsed — the protocol is real) and S9 Q5's **no god's-eye view exists** (the
   dashboard's omniscient state is impossible in a real deployment, because *dead* is a **belief**, not a
   property; an honest dashboard would show N disagreeing views).
-- **(b) Read-repair-on-read** ← *the cheapest of the three replica-convergence mechanisms 7A left unbuilt.*
-  The read (`handleClientGet`) **already gathers every owner and reconciles**, so it holds the winning
-  version *and* knows which owners returned a stale or dominated copy — it just **doesn't write it back.**
-  Have it `storeOn` the reconciled value to the owners that lacked it. Closes the real gap S19 surfaced: a
-  replica that **misses a write while alive-but-not-declared-dead** (a blip shorter than the 500ms timeout, or
-  an error during the best-effort write) stays stale **until the key is rewritten or a membership change fires
-  the heal** — because the heal is **event-driven, not continuous**, the read *detects* staleness but does not
-  repair it, and there is **no periodic anti-entropy.** Siblings across a cut the heal already handles; this
-  catches the *lagging-but-alive* replica the heal never sees. *(Versioned values + conflict detection are
-  DONE — 7A; presence≠version is closed in read/heal/cleanup. Only the write-back remains.)* The two heavier
-  cousins stay unbuilt on purpose, named not hidden (`HLD §9`, `CAP §13`): **hinted handoff** (queue a write
-  for a down owner) and **Merkle-tree anti-entropy** (continuous background sync; our heal is its event-driven
-  cousin).
+- ✅ **(b) Read-repair-on-read — DONE S21.** The read (`handleClientGet`) already gathered every owner and
+  reconciled; now `readRepair` `storeOn`s each surviving version back to any reachable owner that doesn't
+  `covered()` it, so a **lagging-but-alive** replica (one that missed a write while never declared dead — a blip
+  under the 500ms timeout, or a failed best-effort write) converges **on the read** instead of waiting for an
+  overwrite or a membership-change heal (the heal is event-driven, so it never sees this replica). Traps avoided,
+  each a comment: propagate **all** siblings (make a conflict consistent, don't resolve it); carry **each
+  version's own deadline** (else a frequently-read expiring key resurrects — the heal-resurrect bug's twin); only
+  **reachable** owners and only on a **returned value** (a refusal/404 repairs nothing); presence≠version via
+  `covered`. Synchronous + self-limiting (a converged read stores nothing); a production store would run it off
+  the read path. Test `TestReadRepairsAStaleReplica` (repairs a blocked-out replica on read, idempotent second
+  read). *Optional follow-up: surface it in the activity log (needs a drain like `DrainHealLog`).* The two
+  heavier cousins stay unbuilt on purpose, named not hidden (`HLD §9`, `CAP §13`): **hinted handoff** (queue a
+  write for a down owner) and **Merkle-tree anti-entropy** (continuous background sync; our heal is its
+  event-driven cousin).
 - **(c) `HEAD /kv/{key}`** — a cheap, real win. `fetchFrom` is a `GET`, so every *"do you have this key?"*
   probe **downloads the whole value**. A `HEAD` makes the check free and roughly halves heal traffic.
 - **(d) NOT the arc-diff heal** (touch only the ring arcs that changed owner). S9 Q7 sketched it and argued
@@ -401,8 +402,9 @@ corpses* and every read pays a failed hop before falling back. That earns Phase 
   **the cut** — a partition under the HTTP clients that lets both sides accept a write, the heal keep both, and a
   read surface the conflict — (S20) **`/state` reports the partition so the ring splits into two** (per-side rings,
   reload-faithful), and (S21) **the dial** (`W`/`R_read` with a held ring — refusals, checkerboard, live
-  scorecard). Browser-verified end to end. Open: read-repair-on-read (a read currently *detects* a conflict; it
-  doesn't write the merge back). See (b).
+  scorecard), and (S21) **read-repair-on-read** — a read now writes each surviving version back to any reachable
+  owner that lacked it (`readRepair`), so a lagging-but-alive replica converges on the read. Browser-verified end
+  to end. The heavier convergence cousins (hinted handoff, Merkle anti-entropy) stay unbuilt on purpose — see (b).
 
 ### Phase 4 — Failure detection
 - ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each `heartbeatInterval`

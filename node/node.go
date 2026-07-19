@@ -1198,6 +1198,52 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		log.Debug("read miss", "key", key)
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+
+	// Read-repair: now that the reachable owners are reconciled, push each surviving version back
+	// to any reachable owner that lacks it, so a replica that missed a write converges on READ
+	// instead of waiting for a membership change to fire the heal — which is event-driven, so it
+	// never sees a lagging-but-alive replica. Guarded to the cases that RETURNED a value (a refusal
+	// or a 404 repairs nothing), and best-effort. See readRepair for the invariants.
+	if !reachedNone && answered >= rq && len(merged) > 0 {
+		n.readRepair(key, owners, outcomes, held, merged)
+	}
+}
+
+// readRepair stores every surviving version onto each reachable owner that does not already cover
+// it. Called only after a read returned a value. The invariants, each a trap avoided:
+//   - only reachable owners (hit or miss): we cannot repair what we did not reach; the next read
+//     or a membership-change heal gets the rest.
+//   - propagate ALL siblings: on a conflict this makes the sibling set consistent on every owner,
+//     it does NOT pick a winner — picking one would destroy an acked write (the 7A invariant).
+//   - carry each version's own deadline (e.Expires), never a fresh one: else a frequently-read
+//     expiring key would be perpetually resurrected (the heal-resurrected-expiring-key bug's twin).
+//   - presence != version: repair an owner holding a stale/dominated copy or missing a sibling,
+//     via covered() — not merely one that "has the key".
+//
+// Synchronous and self-limiting: once every owner covers the surviving set it stores nothing, so a
+// converged read pays only the checks. A production store would run this off the read path.
+func (n *Node) readRepair(key string, owners []owner, outcomes []string, held [][]cache.Entry, merged []cache.Entry) {
+	repaired := 0
+	for i, o := range owners {
+		if outcomes[i] != OutcomeHit && outcomes[i] != OutcomeMiss {
+			continue // unreachable: out of read-repair's reach
+		}
+		for _, e := range merged {
+			if covered(held[i], e) {
+				continue // already holds this surviving version (or a dominator of it)
+			}
+			if o.id == n.id {
+				n.cache.SetVersioned(key, e.Value, e.Version, e.Expires)
+			} else if err := n.storeOn(o.addr, key, e.Value, e.Version, e.Expires); err != nil {
+				n.logger().Warn("read-repair: store failed", "key", key, "owner", o.id, "err", err)
+				continue
+			}
+			repaired++
+		}
+	}
+	if repaired > 0 {
+		n.logger().Info("read-repair converged a lagging replica", "key", key, "copies", repaired)
+	}
 }
 
 // holdsAny reports whether have contains a version whose clock equals one in want. Used to
