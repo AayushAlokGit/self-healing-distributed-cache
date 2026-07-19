@@ -32,9 +32,19 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
   the *topology* is collapsed — the protocol is real) and S9 Q5's **no god's-eye view exists** (the
   dashboard's omniscient state is impossible in a real deployment, because *dead* is a **belief**, not a
   property; an honest dashboard would show N disagreeing views).
-- **(b) Versioned values + read-repair** — the highest-value *code* change. S9 Q4 named why: **presence ≠
-  version.** The heal asks *"do you have key k?"* and a `200` means "somebody has **a** value," not "**the**
-  value" — so a divergent key is **skipped and the conflict preserved forever.**
+- **(b) Read-repair-on-read** ← *the cheapest of the three replica-convergence mechanisms 7A left unbuilt.*
+  The read (`handleClientGet`) **already gathers every owner and reconciles**, so it holds the winning
+  version *and* knows which owners returned a stale or dominated copy — it just **doesn't write it back.**
+  Have it `storeOn` the reconciled value to the owners that lacked it. Closes the real gap S19 surfaced: a
+  replica that **misses a write while alive-but-not-declared-dead** (a blip shorter than the 500ms timeout, or
+  an error during the best-effort write) stays stale **until the key is rewritten or a membership change fires
+  the heal** — because the heal is **event-driven, not continuous**, the read *detects* staleness but does not
+  repair it, and there is **no periodic anti-entropy.** Siblings across a cut the heal already handles; this
+  catches the *lagging-but-alive* replica the heal never sees. *(Versioned values + conflict detection are
+  DONE — 7A; presence≠version is closed in read/heal/cleanup. Only the write-back remains.)* The two heavier
+  cousins stay unbuilt on purpose, named not hidden (`HLD §9`, `CAP §13`): **hinted handoff** (queue a write
+  for a down owner) and **Merkle-tree anti-entropy** (continuous background sync; our heal is its event-driven
+  cousin).
 - **(c) `HEAD /kv/{key}`** — a cheap, real win. `fetchFrom` is a `GET`, so every *"do you have this key?"*
   probe **downloads the whole value**. A `HEAD` makes the check free and roughly halves heal traffic.
 - **(d) NOT the arc-diff heal** (touch only the ring arcs that changed owner). S9 Q7 sketched it and argued

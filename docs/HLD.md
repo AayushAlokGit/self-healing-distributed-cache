@@ -49,12 +49,31 @@ better — it removes the *need* for them by **preventing** the conflict:
   resolution needed. The conflict does not vanish — it becomes a **refused write** on the minority side
   of a partition. Consistent always; unavailable to the minority.
 
+**Within AP there is a second fork — and it names *which* AP system we are.** Detecting a conflict still
+leaves the question of what to *do* with it, and the Dynamo family splits on the answer: **Dynamo and Riak
+surface the siblings and let the client reconcile** (the shopping-cart merge); **Cassandra picks
+last-write-wins — silently dropping the loser.** Both are leaderless-AP-consistent-hashing; only the
+conflict rule differs. We chose **siblings, not LWW** — the branch that *never silently loses an acked
+write*, at the cost of handing you a conflict to resolve. So "Dynamo-style" here is specific: **the
+Dynamo/Riak side on conflicts, not the Cassandra LWW side.** (This axis is *independent* of the dial
+below: the `W`/`R_read` knob is Cassandra's *tunable-consistency* idea, our *conflict rule* is Dynamo/Riak's
+— we borrow the dial from one and the resolution from the other.)
+
 So the `W` / `R_read` dial (Tab 2) is **Cassandra-style tunable consistency, not a CP switch.** Turning
 it toward `QUORUM` (`R_read + W > RF`) buys read-recency — but the currency is **availability** (the
 minority partition must refuse), and even maxed it is *not* linearizable: a quorum makes the latest
 write *reachable*, it does not *serialize* concurrent ones, so siblings still appear and the vector
 clocks are still needed at every setting. **Full/linearizable consistency is a different architecture** —
 consensus and a serialization point, i.e. a CP rebuild, not a dial position.
+
+**What the dial really is: delegation.** It doesn't make the store "more consistent" — it declines to
+*decide for you* how fresh a read must be, and hands that choice to the caller **per request**, because
+*"how much staleness will you accept for this one?"* is the application's question and differs per
+operation (append-a-log tolerates eventual; read-the-row-I-just-wrote does not). So the two mechanisms are
+**not peers**: the **vector clocks are architecturally forced** (leaderless-AP makes concurrency
+unavoidable — remove them and it is a different system), while the **dial is optional** — a store serving
+one fixed consistency need could ship at a single setting. *Siblings define **what the system is**; the
+dial defines **how much of the consistency decision it leaves to the client.***
 
 *One honest artifact of being AP:* the manager's god's-eye dashboard **cannot see a partition** — it
 kills no one, so it still counts every node alive. *Dead* is a per-node **belief**, not a global fact.
