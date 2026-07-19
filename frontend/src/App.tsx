@@ -123,8 +123,8 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
-            <WritePanel onAction={refresh} />
-            <ReadPanel />
+            <WritePanel nodes={state.nodes} onAction={refresh} />
+            <ReadPanel nodes={state.nodes} />
             <ActivityLog events={state.events} />
           </div>
         </div>

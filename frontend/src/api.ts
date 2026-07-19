@@ -138,16 +138,21 @@ export function createApi(cluster: string) {
       return { ...s, nodes: s.nodes ?? [], keys: s.keys ?? [], vnodes: s.vnodes ?? [], events: s.events ?? [] }
     },
 
-    async getKey(key: string): Promise<ReadResult> {
-      const res = await ok(await fetch(base + '/get?key=' + encodeURIComponent(key)), `read ${key}`)
+    // via picks the coordinator node; omit or empty means auto (the backend picks any live node).
+    async getKey(key: string, via?: string): Promise<ReadResult> {
+      let q = '/get?key=' + encodeURIComponent(key)
+      if (via) q += '&via=' + encodeURIComponent(via)
+      const res = await ok(await fetch(base + q), `read ${key}`)
       return res.json()
     },
 
     killNode: (id: string) => post<void>('/kill', { id }, `kill ${id}`),
     reviveNode: (id: string) => post<void>('/revive', { id }, `revive ${id}`),
 
-    // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs.
-    setKey: (key: string, value: string, ttlMs: number) => post<void>('/set', { key, value, ttlMs }, `write ${key}`),
+    // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs. via picks the
+    // coordinator node; omit or empty means auto (the backend picks any live node).
+    setKey: (key: string, value: string, ttlMs: number, via?: string) =>
+      post<void>('/set', via ? { key, value, ttlMs, via } : { key, value, ttlMs }, `write ${key}`),
     seedKeys: (n: number) => post<void>('/seed', { n }, `seed ${n} keys`),
 
     // POST, not DELETE: the control API allows GET/POST only, so a DELETE fails the browser's

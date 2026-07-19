@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -55,10 +56,12 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 
 	handle("POST /api/{cluster}/set", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		// Milliseconds, matching the ttlMs KeyState reports back. <= 0 or absent means
-		// the key never expires.
+		// the key never expires. Via names which node coordinates the write ("" = any live
+		// node); a via that is not live comes back as a 400 via coordStatus.
 		var body struct {
 			Key, Value string
-			TTLMs      int64 `json:"ttlMs"`
+			TTLMs      int64  `json:"ttlMs"`
+			Via        string `json:"via"`
 		}
 		if !readJSON(w, r, &body) {
 			return
@@ -71,8 +74,8 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 		if body.TTLMs > 0 {
 			ttl = time.Duration(body.TTLMs) * time.Millisecond
 		}
-		if err := c.Set(body.Key, body.Value, ttl); err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+		if err := c.Set(body.Key, body.Value, ttl, body.Via); err != nil {
+			writeErr(w, coordStatus(err), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -84,9 +87,11 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 			writeErr(w, http.StatusBadRequest, "key is required")
 			return
 		}
-		res, err := c.Get(key)
+		// via names which node coordinates the read ("" = any live node); a via naming a node
+		// that is not live is a 400, so reads on either side of a partition are deterministic.
+		res, err := c.Get(key, r.URL.Query().Get("via"))
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+			writeErr(w, coordStatus(err), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -310,6 +315,19 @@ func nodeAction(fn func(*cluster.Cluster, string) error) clusterHandler {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
+}
+
+// coordStatus maps a coordinator-resolution failure to an HTTP status. Naming a via that is
+// not a live node is the caller's mistake — a 400 — and it must fail loudly, since a
+// deterministic coordinator is the whole reason via exists. Every other failure (no live node
+// at all, the coordinator unreachable mid-request) is the cluster's, not the request's, so it
+// stays a 502, matching the no-via behavior these handlers had before.
+func coordStatus(err error) int {
+	var nse *cluster.NoSuchNodeError
+	if errors.As(err, &nse) {
+		return http.StatusBadRequest
+	}
+	return http.StatusBadGateway
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

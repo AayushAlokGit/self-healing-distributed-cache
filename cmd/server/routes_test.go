@@ -95,6 +95,47 @@ func TestAClusterActionCannotReachTheOtherCluster(t *testing.T) {
 	}
 }
 
+// The HTTP surface of the coordinator picker. set takes a "via" body field, get takes a
+// "via" query param, and both must route through exactly that node — the response's
+// coordinator proves it. A via naming a node that is not live is a 400, not a silent reroute:
+// the partition demo depends on being able to name which side coordinates.
+func TestViaPicksTheCoordinatorOverHTTP(t *testing.T) {
+	h := twoClusters(t)
+
+	if w := do(t, h, http.MethodPost, "/api/cap/set", `{"key":"k","value":"v","via":"n3"}`); w.Code != http.StatusOK {
+		t.Fatalf("set via n3: %d — %s", w.Code, w.Body)
+	}
+	w := do(t, h, http.MethodGet, "/api/cap/get?key=k&via=n3", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get via n3: %d — %s", w.Code, w.Body)
+	}
+	var got struct {
+		Found       bool
+		Coordinator string
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode get via n3: %v", err)
+	}
+	if !got.Found || got.Coordinator != "n3" {
+		t.Errorf("get via n3: found=%v coordinator=%q, want true/n3 — via must pin the coordinator", got.Found, got.Coordinator)
+	}
+
+	// Kill the named node: it is no longer a valid via, so set and get that name it are 400s,
+	// never a silent reroute to a live node.
+	if w := do(t, h, http.MethodPost, "/api/cap/kill", `{"id":"n3"}`); w.Code != http.StatusOK {
+		t.Fatalf("kill n3: %d — %s", w.Code, w.Body)
+	}
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/cap/set", `{"key":"k","value":"v","via":"n3"}`}, // just killed
+		{http.MethodGet, "/api/cap/get?key=k&via=n3", ""},                       // just killed
+		{http.MethodGet, "/api/cap/get?key=k&via=n9", ""},                       // never existed
+	} {
+		if w := do(t, h, tc.method, tc.path, tc.body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s %s via a dead/unknown node = %d, want 400 — %s", tc.method, tc.path, w.Code, w.Body)
+		}
+	}
+}
+
 // An unknown name must 404, not fall through to a default. Serving "some cluster" to a
 // caller who named one is a silent wrong answer.
 func TestAnUnknownClusterIs404(t *testing.T) {

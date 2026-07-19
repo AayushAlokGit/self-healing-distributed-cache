@@ -246,16 +246,23 @@ func (c *Cluster) Pause(id string, paused bool) error {
 	return nil
 }
 
-// Set writes a key through a live node; any node can coordinate. A ttl of 0 means
-// the key never expires. Errors if no node is up.
+// Set writes a key through a live node. via names which node coordinates: "" keeps the
+// old behavior (any live node), a node id routes the write through exactly that node — the
+// partition demo drives one write through n0 and another through n3, and needs to choose.
+// A via that is not a live node is an error (see coordAddrLocked). A ttl of 0 means the key
+// never expires. Errors if no node is up.
 //
 // The ttl travels as a duration only on this first hop: the coordinator turns it into
 // an absolute deadline, and every replica and heal copy gets that same instant.
-func (c *Cluster) Set(key, value string, ttl time.Duration) error {
+func (c *Cluster) Set(key, value string, ttl time.Duration, via string) error {
 	start := time.Now()
 	c.mu.Lock()
-	coord := c.anyLiveAddrLocked()
+	coord, err := c.coordAddrLocked(via)
 	c.mu.Unlock()
+	if err != nil {
+		c.logger().Warn("write dropped: named coordinator is not live", "key", key, "via", via, "err", err)
+		return err
+	}
 	if coord == "" {
 		c.logger().Error("write dropped: no live node to coordinate it", "key", key)
 		return fmt.Errorf("no live node to coordinate the write")
@@ -368,13 +375,20 @@ func parseReadPath(s string) []ReadHop {
 	return hops
 }
 
-// Get reads a key through a live node. Found is false on a clean miss; err is set
-// only when no node could serve it.
-func (c *Cluster) Get(key string) (ReadResult, error) {
+// Get reads a key through a live node. via names which node coordinates: "" picks any live
+// node (the old behavior), a node id routes the read through exactly that node, so the
+// reported Coordinator is deterministic — reading one side of a partition means naming the
+// node on that side. A via that is not a live node is an error (see coordAddrLocked). Found
+// is false on a clean miss; err is set only when no node could serve it.
+func (c *Cluster) Get(key, via string) (ReadResult, error) {
 	start := time.Now()
 	c.mu.Lock()
-	coord := c.anyLiveAddrLocked()
+	coord, err := c.coordAddrLocked(via)
 	c.mu.Unlock()
+	if err != nil {
+		c.logger().Warn("read dropped: named coordinator is not live", "key", key, "via", via, "err", err)
+		return ReadResult{}, err
+	}
 	if coord == "" {
 		c.logger().Error("read dropped: no live node to coordinate it", "key", key)
 		return ReadResult{}, fmt.Errorf("no live node to coordinate the read")
@@ -446,8 +460,9 @@ func (c *Cluster) Seed(n int) error {
 
 	start := time.Now()
 	for i := first; i < first+n; i++ {
-		// ttl 0: seeded keys are permanent, so the ring never empties itself mid-demo.
-		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i), 0); err != nil {
+		// ttl 0: seeded keys are permanent, so the ring never empties itself mid-demo. via ""
+		// lets any live node coordinate — seeding is not a per-node demo, it just fills the ring.
+		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i), 0, ""); err != nil {
 			c.logger().Error("seed stopped early: a write failed",
 				"key", fmt.Sprintf("key:%d", i), "seeded_so_far", i-first, "err", err)
 			return err
@@ -592,6 +607,34 @@ func (c *Cluster) Close() {
 	}
 	c.nodes = map[string]*node.Node{}
 	c.logger().Info("cluster stopped", "nodes_stopped", stopped)
+}
+
+// NoSuchNodeError is returned when a caller names a coordinator (via) that is not a
+// currently live node — either killed or never part of this cluster. It is a distinct type,
+// not a bare fmt.Errorf, so a handler can tell "you asked for a node that isn't there" (a
+// 400: the request named something bad) apart from "the cluster is down" (a 502: the request
+// was fine). The whole point of via is determinism, so a dead name must fail loudly rather
+// than fall back to another node.
+type NoSuchNodeError struct{ ID string }
+
+func (e *NoSuchNodeError) Error() string { return "no such live node: " + e.ID }
+
+// coordAddrLocked resolves which live node's address should coordinate a request. Empty via
+// keeps the old behavior: anyLiveAddrLocked picks the first live node, and its address — or
+// "" when the whole cluster is down — comes straight back with a nil error. A non-empty via
+// names a specific coordinator and must resolve to a node that is live RIGHT NOW: c.nodes
+// holds only live nodes (a kill deletes the id, a revive re-adds it), so a via absent from it
+// is killed or unknown, and we refuse with *NoSuchNodeError rather than silently pick someone
+// else. c.addrs is keyed by every known id, live or not, so it is safe to read once liveness
+// is confirmed. Caller holds c.mu.
+func (c *Cluster) coordAddrLocked(via string) (string, error) {
+	if via == "" {
+		return c.anyLiveAddrLocked(), nil
+	}
+	if _, alive := c.nodes[via]; !alive {
+		return "", &NoSuchNodeError{ID: via}
+	}
+	return c.addrs[via], nil
 }
 
 // anyLiveAddrLocked returns some live node's address, deterministically. Caller

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"slices"
 	"sort"
 	"strconv"
@@ -64,7 +65,7 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 
 	// (1) Healthy: every owner holds the key, so a gather-all read hits all R; the primary
 	// holds the winning version and is the servedBy.
-	res, err := c.Get(key)
+	res, err := c.Get(key, "")
 	if err != nil || !res.Found {
 		t.Fatalf("get %q on a healthy cluster: (%+v, %v)", key, res, err)
 	}
@@ -89,7 +90,7 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 	//
 	// Must run BEFORE the kill: afterwards an owner of this key could be the dead node,
 	// which reports unreachable, and the assertion would pass or fail on a hash.
-	miss, err := c.Get("key:never-written")
+	miss, err := c.Get("key:never-written", "")
 	if err != nil {
 		t.Fatalf("get on a missing key should be a clean miss, not an error: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 	if err := c.Kill(primary); err != nil {
 		t.Fatalf("kill %s: %v", primary, err)
 	}
-	res, err = c.Get(key)
+	res, err = c.Get(key, "")
 	if err != nil || !res.Found {
 		t.Fatalf("get %q after killing its primary should still serve: (%+v, %v)", key, res, err)
 	}
@@ -139,6 +140,56 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 	}
 	if res.ServedBy == primary {
 		t.Fatalf("primary %s is dead; it cannot be servedBy; path=%s", primary, outcomes(res))
+	}
+}
+
+// via names which node coordinates a request, so the partition demo can drive a write
+// through the node on one side of a cut and a read through the node on the other. Two things
+// must hold: the coordinator the read reports back is EXACTLY the node named (no falling back
+// to another live node — that determinism is the whole point), and a via naming a dead or
+// unknown node is refused with *NoSuchNodeError rather than silently rerouted.
+func TestViaRoutesThroughTheNamedCoordinator(t *testing.T) {
+	c := New(3, 1, 500*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	// anyLiveAddrLocked always picks n0 (first alphabetically), so a via that lands the read
+	// on n2 or n4 proves via actually overrode the default rather than coinciding with it.
+	for _, id := range []string{"n0", "n2", "n4"} {
+		if err := c.Set("k", "v", 0, id); err != nil {
+			t.Fatalf("set via %s: %v", id, err)
+		}
+		res, err := c.Get("k", id)
+		if err != nil {
+			t.Fatalf("get via %s: %v", id, err)
+		}
+		if res.Coordinator != id {
+			t.Errorf("get via %s was coordinated by %q, want %s — via must pin the coordinator", id, res.Coordinator, id)
+		}
+	}
+
+	// A killed node is no longer a valid coordinator: refuse, do not reroute to a live one.
+	if err := c.Kill("n2"); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	var nse *NoSuchNodeError
+	if _, err := c.Get("k", "n2"); !errors.As(err, &nse) {
+		t.Errorf("get via a killed node should be *NoSuchNodeError, got %v", err)
+	}
+	if err := c.Set("k", "v", 0, "n2"); !errors.As(err, &nse) {
+		t.Errorf("set via a killed node should be *NoSuchNodeError, got %v", err)
+	}
+
+	// An id that was never part of the cluster is the same error, and it names the node so a
+	// handler (and the dashboard) can surface which via was bad.
+	_, err := c.Get("k", "n9")
+	if !errors.As(err, &nse) || nse.ID != "n9" {
+		t.Fatalf("get via an unknown node should be *NoSuchNodeError{n9}, got %v", err)
+	}
+	if err.Error() != "no such live node: n9" {
+		t.Errorf("via error message = %q, want %q", err.Error(), "no such live node: n9")
 	}
 }
 
@@ -171,7 +222,7 @@ func TestClusterDemoFlow(t *testing.T) {
 	}
 
 	// Read a key back through the cluster. With every node up, its primary answers.
-	res, err := c.Get(victimKey)
+	res, err := c.Get(victimKey, "")
 	if err != nil || !res.Found {
 		t.Fatalf("get %q before kill: (%+v, %v)", victimKey, res, err)
 	}
@@ -188,7 +239,7 @@ func TestClusterDemoFlow(t *testing.T) {
 
 	// Reads keep serving immediately via fallback, even while under-replicated. Assert
 	// who answered, not just that a value came back.
-	res, err = c.Get(victimKey)
+	res, err = c.Get(victimKey, "")
 	if err != nil || !res.Found {
 		t.Fatalf("get %q right after kill should still serve via fallback: (%+v, %v)", victimKey, res, err)
 	}
@@ -514,7 +565,7 @@ func TestHealDoesNotResurrectAnExpiringKey(t *testing.T) {
 
 	const key, ttl = "session:abc", 3 * time.Second
 	writtenAt := time.Now()
-	if err := c.Set(key, "aayush", ttl); err != nil {
+	if err := c.Set(key, "aayush", ttl, ""); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
@@ -554,7 +605,7 @@ func TestHealDoesNotResurrectAnExpiringKey(t *testing.T) {
 	// Wait out the ORIGINAL deadline. A healed copy given a fresh TTL is still alive here.
 	time.Sleep(time.Until(writtenAt.Add(ttl)) + 750*time.Millisecond)
 
-	res, err := c.Get(key)
+	res, err := c.Get(key, "")
 	if err != nil {
 		t.Fatalf("get after expiry: %v", err)
 	}
@@ -575,7 +626,7 @@ func TestKeyWithoutTTLNeverExpires(t *testing.T) {
 	}
 	t.Cleanup(c.Close)
 
-	if err := c.Set("permanent", "v", 0); err != nil {
+	if err := c.Set("permanent", "v", 0, ""); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	ks, ok := keyState(c.State(), "permanent")
@@ -616,7 +667,7 @@ func TestExpiryIsOneEventPerKeyNotPerReplica(t *testing.T) {
 	t.Cleanup(c.Close)
 
 	const key = "doomed"
-	if err := c.Set(key, "v", 150*time.Millisecond); err != nil {
+	if err := c.Set(key, "v", 150*time.Millisecond, ""); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
@@ -650,7 +701,7 @@ func TestExpiryIsOneEventPerKeyNotPerReplica(t *testing.T) {
 	}
 
 	// And the client agrees: gone means gone, whoever still has the bytes.
-	if res, err := c.Get(key); err != nil || res.Found {
+	if res, err := c.Get(key, ""); err != nil || res.Found {
 		t.Fatalf("an expired key must not be readable: (%+v, %v)", res, err)
 	}
 }
@@ -681,7 +732,7 @@ func TestKilledNodesKeysAreNotReportedAsExpired(t *testing.T) {
 	// A long TTL: nothing here is allowed to expire during the test.
 	const keys = 6
 	for i := range keys {
-		if err := c.Set("live:"+strconv.Itoa(i), "v", time.Hour); err != nil {
+		if err := c.Set("live:"+strconv.Itoa(i), "v", time.Hour, ""); err != nil {
 			t.Fatalf("set: %v", err)
 		}
 	}
@@ -720,7 +771,7 @@ func TestReclaimEventNamesTheNodeAndTheReason(t *testing.T) {
 	}
 	t.Cleanup(c.Close)
 
-	if err := c.Set("doomed", "v", 100*time.Millisecond); err != nil {
+	if err := c.Set("doomed", "v", 100*time.Millisecond, ""); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 
@@ -758,7 +809,7 @@ func TestAKeyThatDiesBetweenTwoPollsStillReportsItsExpiry(t *testing.T) {
 	}
 	t.Cleanup(c.Close)
 
-	if err := c.Set("blink", "v", 100*time.Millisecond); err != nil {
+	if err := c.Set("blink", "v", 100*time.Millisecond, ""); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	time.Sleep(400 * time.Millisecond) // it lives and dies with nobody watching
@@ -894,7 +945,7 @@ func TestShrinkingClusterKeepsEveryKey(t *testing.T) {
 			t.Errorf("key %q: want exactly 1 holder on a 1-node cluster, got %v", k.Key, k.Holders)
 		}
 	}
-	if res, err := c.Get("key:0"); err != nil || !res.Found {
+	if res, err := c.Get("key:0", ""); err != nil || !res.Found {
 		t.Fatalf("key:0 must still be readable from the last node: (%+v, %v)", res, err)
 	}
 	t.Logf("survived down to 1 node with all %d keys intact — cleanup dropped nothing it could not confirm", before)
@@ -930,7 +981,7 @@ func TestDeleteRemovesEveryCopyAndStaysDeleted(t *testing.T) {
 	if _, still := keyState(c.State(), key); still {
 		t.Fatalf("%q is still on the ring right after the delete", key)
 	}
-	if res, err := c.Get(key); err != nil || res.Found {
+	if res, err := c.Get(key, ""); err != nil || res.Found {
 		t.Fatalf("a deleted key must not be readable: (%+v, %v)", res, err)
 	}
 

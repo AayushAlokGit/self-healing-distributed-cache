@@ -1,6 +1,7 @@
 import { type CSSProperties, useState } from 'react'
-import { type ReadHop, type ReadResult } from '../api'
+import { type NodeState, type ReadHop, type ReadResult } from '../api'
 import { useApi, useApiError } from '../hooks'
+import { CoordinatorSelect, liveVia } from './CoordinatorSelect'
 import { ErrorLine } from './ErrorLine'
 import { NodeChip } from './NodeChip'
 
@@ -70,8 +71,9 @@ function Siblings({ values }: { values: string[] }) {
 }
 
 // No onAction: a read changes nothing in the cluster, so there is no new state to fetch.
-export function ReadPanel() {
+export function ReadPanel({ nodes }: { nodes: NodeState[] }) {
   const [readKey, setReadKey] = useState('')
+  const [via, setVia] = useState('') // coordinator node id; '' = auto
   const [result, setResult] = useState<ReadResult | null>(null)
   const { getKey } = useApi()
   const { err, run } = useApiError()
@@ -81,7 +83,7 @@ export function ReadPanel() {
   const read = async () => {
     if (!readKey.trim()) return
     setResult(null)
-    await run(async () => setResult(await getKey(readKey.trim())))
+    await run(async () => setResult(await getKey(readKey.trim(), liveVia(nodes, via))))
   }
 
   // A conflict is still a hit — the key exists, it just carries more than one value — so the
@@ -99,6 +101,8 @@ export function ReadPanel() {
         <input placeholder="key to read" value={readKey} onChange={(e) => setReadKey(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && read()} />
         <button onClick={read}>Read</button>
       </div>
+
+      <CoordinatorSelect nodes={nodes} via={via} onVia={setVia} />
 
       {result && (
         <div className={'result' + (result.found ? '' : ' miss') + (isConflict ? ' conflict' : '')}>
