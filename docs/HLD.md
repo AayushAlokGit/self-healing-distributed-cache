@@ -67,9 +67,17 @@ clocks are still needed at every setting. **Full/linearizable consistency is a d
 consensus and a serialization point, i.e. a CP rebuild, not a dial position.
 
 **What the dial really is: delegation.** It doesn't make the store "more consistent" — it declines to
-*decide for you* how fresh a read must be, and hands that choice to the caller **per request**, because
-*"how much staleness will you accept for this one?"* is the application's question and differs per
-operation (append-a-log tolerates eventual; read-the-row-I-just-wrote does not). So the two mechanisms are
+*decide for you* and lets each operation set its own bar: a **write** picks **W** (copies that must ack), a
+**read** picks **R_read** (copies that must reply). A request is a read *or* a write, so it carries **one**
+of the two, never both — and no-stale-reads emerges only when they **overlap** (`R_read + W > RF`), i.e. it
+takes a strong writer *and* a strong reader, never one request alone (a `R_read=2` read over `W=1` writes is
+`3`, not `> 3` — no overlap, still stale). *"How much staleness will you accept?"* is the application's
+question, and it differs per operation (append-a-log tolerates eventual; read-the-row-I-just-wrote does not).
+> ⚠️ **Real Dynamo/Cassandra set this per request** (the client sends a consistency level with each call);
+> **our demo collapses it to one cluster-wide dial** so a viewer flips a single control and watches behaviour
+> flip. The per-request version is the ideal; the cluster dial is the demo's simplification.
+
+So the two mechanisms are
 **not peers**: the **vector clocks are architecturally forced** (leaderless-AP makes concurrency
 unavoidable — remove them and it is a different system), while the **dial is optional** — a store serving
 one fixed consistency need could ship at a single setting. *Siblings define **what the system is**; the
