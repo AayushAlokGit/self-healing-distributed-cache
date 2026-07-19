@@ -4,7 +4,11 @@
 versions are needed). **This doc is about the demo:** what a stranger clicks, what happens, and what the
 screen shows.
 
-**Status:** design only — taught, not built.
+**Status: BUILT & browser-verified (S18–S21, branch `cap-demo`).** The cut, the coordinator picker, the conflict
+card, the two-ring split view, the consistency `DialPanel`, and the `Scorecard` are all live. The scorecard's
+controlled experiment was verified: QUORUM `5/5/0`, ONE `10/0/5` (accepted / refused / conflicts). *Some
+step-by-step passages below are still written in the future tense from the design phase; the mechanism they
+describe is built — treat "will show" as "shows".*
 
 **Running example:** 5 nodes `n0..n4`, `R=3` (3 copies per key), one cut: **A = {n0,n1,n2}** | **B = {n3,n4}**.
 

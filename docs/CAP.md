@@ -1,8 +1,10 @@
 # CAP, partitions, and the consistency dial — Phase 7 design
 
-**Status: 7A BUILT & verified end-to-end (S18–S19, branch `cap-demo`); the dial (7B) is still design.** Turns
-CAP from three letters into a *button a stranger can press* and a *table our cluster produces* (§12). The
-deliverable is numbers, not a diagram. Where building it caught up with (or corrected) the design, it's marked
+**Status: Phase 7 BUILT & verified end-to-end (S18–S21, branch `cap-demo`).** 7.0 (two clusters), 7A (the cut,
+vector clocks, conflict-detecting read/heal/cleanup, the coordinator picker), **7B (the dial — `W`/`R_read` with
+a held ring, a `DialPanel` + `Scorecard`)**, and **read-repair-on-read** are all built and browser-verified.
+Turns CAP from three letters into a *button a stranger can press* and a *table our cluster produces* (§12). The
+deliverable is numbers, not a diagram. Where building caught up with (or corrected) the design, it's marked
 **⇒ AS BUILT** in place.
 
 > ⚠️ **Two things this doc deliberately does not say.** It does not call the strong end of the dial **"CP"** —
@@ -304,22 +306,25 @@ The difference is **two numbers**:
 | the dial | **keeps both** (eventual, `ONE`) | **refuses one** (`QUORUM`) | where it lives |
 |---|---|---|---|
 | **W** — acks before "done" | **1** | **2** | `defaultWriteQuorum` (`SetReplication`) |
-| **R_read** — owners a read asks before answering | **1** | **2** | `SetQuorum` — **7B, not built** |
+| **R_read** — owners a read asks before answering | **1** | **2** | `SetQuorum(w, rRead)` — **⇒ AS BUILT (7B)** |
 
 ⚠️ **Not "AP → CP."** The strong end is **Cassandra's `QUORUM`**, not a CP system (§13). It is *stronger than
 eventual*; it is not *consistent*.
 
-> **⇒ AS BUILT (7A):** the dial is **7B and not built** — `W` is fixed at `New()` and there is no `R_read`
-> knob yet. 7A's read is **gather-all**: it asks *every* reachable owner and reconciles, because a
-> conflict-aware read *cannot stop at the first hit* without missing a concurrent sibling — that **removed the
-> old `handleClientGet` `break`**. So R_read sits pinned at its max today (maximum detection); the `ONE`
-> setting, and the "skipped" owners in the read trace, return in 7B when the dial can lower it.
+> **⇒ AS BUILT (7B):** `cluster.SetQuorum(w, rRead)` sets both numbers on every node (inherited by `wireAll`/
+> `Revive`), `POST /quorum` and a dashboard `DialPanel` drive it, and `State` reports `W`/`RRead`. The read
+> stayed **gather-all** and R_read is enforced as a **reachable-count threshold**: gather every reachable owner,
+> reconcile, then **refuse `503` if fewer than R_read answered** — *not* an early-stop after R_read hits.
+> Early-stop would miss a concurrent sibling on a later owner, and an unseen conflict is a silently-picked
+> winner, so it would break 7A's detection. The threshold keeps detection intact **and** still forbids a stale
+> read: with `R_read+W>R`, the R_read owners that answered must include a W-writer. `R_read=1` is byte-for-byte
+> 7A (there `answered==0` is the only sub-threshold case, already the 502).
 
 **What rides along** — implied by the setting, never chosen beside it:
 
 | | **keeps both** | **refuses one** | why |
 |---|---|---|---|
-| **ring drops silent nodes** | **yes** — re-route | **no** — the fixed denominator | §8. Quorum needs the ring held still or `W=2` is a rubber stamp; eventual needs the shrink to stay maximally available. `ring.Remove` in `heartbeatRound` |
+| **ring drops silent nodes** | **yes** — re-route | **no** — the fixed denominator | §8. **⇒ AS BUILT (7B):** `node.holdRing` gates `ring.Remove`/`Add` in `heartbeatRound`; `SetQuorum` sets it `= w+rRead>R`. Quorum needs the ring held or `W=2` is a rubber stamp; eventual needs the shrink to stay available. |
 
 **What is a prerequisite** — built once in 7A, and the dial never touches it:
 
@@ -352,9 +357,11 @@ satisfied by an invented set, and the quorum is a rubber stamp.
 
 ```
 READ:   owners := ring.Owners(key)          // held fixed at quorum, shrunk at eventual
-        ask owners in ring order until R_read successes, or run out
-        if successes < R_read:  503          // quorum refuses here; eventual (R_read=1) never gets here
-        return the reply whose vector dominates — or EVERY sibling, if none does
+        ask EVERY reachable owner, reconcile their versions   // gather-all, NOT early-stop (keeps detection)
+        if answered == 0:        502
+        if answered <  R_read:   503          // quorum refuses; eventual (R_read=1) never gets here
+        reply := the version that dominates — or EVERY sibling, if none does
+        read-repair: store reply back onto any reachable owner missing it   // §9, converges a lagging replica
 WRITE:  owners := ring.Owners(key)
         write to all; if acks < W: 503; else ack   // quorum refuses; eventual (W=1) never gets here
 ```
@@ -386,13 +393,15 @@ with a demo built on it. Versions are a prerequisite (§11), so they moved into 
   both accepted, mend, the heal kept both, a read showed the conflict card). A client picks its coordinator
   (`via=n0` / `via=n4`); every value carries a vector clock (§9). The heal stopped asking *"do you have it?"*
   and started asking ***"did these two ever see each other?"*** — it **detects the clash and keeps both**, then
-  puts the two values on screen and asks *you*. Closes the S9 gap. ⚠️ **Detection, not read-repair:** a read
-  *surfaces* the siblings; it does **not** write the merge back (repair-on-read is a named follow-up).
-- **7B — the dial. Still design, not built.** `W=2`, `R_read=2`, ring held fixed. Same cut, opposite behaviour: availability becomes
-  a property of the key, **no key served on both sides**, no clash to resolve — because the losing side
-  **refuses** with a `503` rather than accepting a write it can't reconcile, while the node holding the data
-  sits right there saying no. ⚠️ *Not* "no collisions ever" — healthy-network concurrency still collides
-  (§10), which is the demo's closing move.
+  puts the two values on screen and asks *you*. Closes the S9 gap. **⇒ Read-repair AS BUILT (S21):** the read now
+  also writes each surviving version back to any reachable owner missing it (`readRepair`), so a
+  lagging-but-alive replica converges **on the read**, not only on a membership-change heal — detection *and*
+  repair now.
+- **7B — the dial. ✅ DONE S21, verified E2E.** `W=2`, `R_read=2`, ring held fixed (`holdRing`). Same cut, opposite
+  behaviour: availability becomes a property of the key, **no key served on both sides**, no clash to resolve —
+  the losing side **refuses** with a `503` rather than accepting a write it can't reconcile, while the node
+  holding the data sits right there saying no. A `DialPanel` + `Scorecard` run the controlled experiment (below)
+  live. ⚠️ *Not* "no collisions ever" — healthy-network concurrency still collides (§10), the demo's closing move.
 
 **The deliverable — CAP as a measurement, not a definition** (worked run in `CAP_DEMO.md` §5: 5 keys, each
 written from both sides during one cut, 10 attempts):
@@ -409,7 +418,9 @@ written from both sides during one cut, 10 attempts):
 
 *This table measures the **partition** scenario. The strong setting shows 0 conflicts because the losing side
 refuses — **not** because quorum stops writes colliding: the §10 healthy-network case is separate, and quorum
-doesn't fix it.* Reproducible by a stranger with a button.
+doesn't fix it.* **⇒ AS BUILT (7B):** the dashboard **Scorecard** produces this table live — one probe row per
+dial setting under the current cut — and it was browser-verified S21 (QUORUM `5/5/0`, ONE `10/0/5`, the same
+five writes). A stranger reproduces it with a button.
 
 ---
 
@@ -429,6 +440,12 @@ leader + CAS / replicated log          →  LINEARIZABLE         (Raft) — stop
 **it prevents them**, by making every write to a key pass through one order so no two are ever concurrent.
 That's the whole difference: rungs 1–2 argue about what to do *after* a clash; rung 3 removes the clash.
 **Detection is the ceiling of any clock (§9); only serialization is above it.**
+
+**Convergence, what's built vs not.** **⇒ AS BUILT (S21): read-repair-on-read** — a read writes each surviving
+version back to any reachable owner missing it, so a *lagging-but-alive* replica converges on read traffic. It is
+**read-triggered, not periodic**: a key nobody reads never repairs. The two heavier cousins stay unbuilt on
+purpose — **hinted handoff** (queue a write for a down owner; below) and **Merkle-tree anti-entropy** (a
+continuous background scan that reconciles even cold keys; our event-driven heal is its poorer cousin).
 
 Also missing, named not hidden:
 - **Tombstones** (`HLD.md` §7) — a delete is not a value, so heal can't tell *deleted* from *missing*.
