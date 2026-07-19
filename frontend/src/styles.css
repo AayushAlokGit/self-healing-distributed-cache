@@ -82,6 +82,11 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 /* min-width: 0 on BOTH columns. A `1fr` track is really minmax(auto, 1fr), and that `auto`
    floor is the item's min-content width, so one unshrinkable child blows out the column. */
 .left, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* Write and Read sit side by side under the ring — the left column is wide, so this uses the
+   width instead of stacking the right column too tall. Collapses to one column when narrow. */
+.io-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.io-row > * { min-width: 0; }
+@media (max-width: 900px) { .io-row { grid-template-columns: 1fr; } }
 
 .stage { position: relative; border-radius: 20px; padding: 8px; overflow: hidden; background-image: radial-gradient(600px 600px at 50% 46%, rgba(30, 44, 70, 0.35), transparent 70%); }
 /* touch-action: manipulation, NOT none: `none` swallows a scroll swipe that starts on the

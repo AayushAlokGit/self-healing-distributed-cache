@@ -142,6 +142,10 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
         <div className="grid">
           <div className="left">
             <RingViz state={state} prev={prev} partition={partition} />
+            <div className="io-row">
+              <WritePanel nodes={state.nodes} onAction={refresh} />
+              <ReadPanel nodes={state.nodes} />
+            </div>
             <KeyTable keys={state.keys} partition={partition} onAction={refresh} />
           </div>
           <div className="side">
@@ -149,8 +153,6 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
             {isCap && (
               <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />
             )}
-            <WritePanel nodes={state.nodes} onAction={refresh} />
-            <ReadPanel nodes={state.nodes} />
             <ActivityLog events={state.events} />
           </div>
         </div>
