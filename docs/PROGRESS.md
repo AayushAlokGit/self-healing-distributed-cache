@@ -593,7 +593,9 @@ reload lost the banner while the backend cut stayed live. Now the manager report
   reload is faithful. `ownershipArcs` took a radius param; the ring draws **two concentric bands** (side A on
   the ring line, side B a thinner outer band), and a key held on both sides is a **two-tone dot** (`splitDot`,
   each half in that side's owner colour). Node A/B tags and the packet `canReach`/side-sequencing from S19 now
-  source their `sideOf` from `partition`.
+  source their `sideOf` from `partition`. The **Key-ownership table** was the same fiction one layer down — it
+  rendered the single-ring `owners`; now under a cut it shows both sides (`A …owners  B …owners`), mirroring the
+  ring so the two views can't drift.
 - **Browser-verified.** Cut `{n0,n2,n4}|{n1,n3}` → banner + split ring (gold/purple outer = B, cyan/pink/green
   inner = A) + two-tone keys (key:2 half-purple/half-pink = n1 on B, n2 on A). **Full reload → CAP tab → all
   reconstructed from `/state`** (the bug, fixed). Mend → single ring back. `NODES ALIVE` stayed 5/5 throughout.

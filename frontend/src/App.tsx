@@ -142,7 +142,7 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
         <div className="grid">
           <div className="left">
             <RingViz state={state} prev={prev} partition={partition} />
-            <KeyTable keys={state.keys} onAction={refresh} />
+            <KeyTable keys={state.keys} partition={partition} onAction={refresh} />
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />

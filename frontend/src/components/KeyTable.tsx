@@ -1,12 +1,36 @@
 import { useEffect, useState } from 'react'
-import { type KeyState } from '../api'
+import { type KeyState, type Partition } from '../api'
 import { ttlText } from '../format'
 import { colorFor } from '../geometry'
 import { useApi, useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
 
-// owners[0] is the primary (the first node clockwise); the rest are its replicas.
-export function KeyTable({ keys, onAction }: { keys: KeyState[]; onAction: () => void }) {
+// One owner run: owners[0] is the primary (first node clockwise), the rest replicas.
+function OwnerChips({ owners }: { owners: string[] }) {
+  return (
+    <>
+      {owners.map((o, i) => (
+        <span
+          key={o}
+          className={'oid' + (i === 0 ? ' primary' : '')}
+          style={
+            i === 0
+              ? { background: colorFor(o), borderColor: colorFor(o), color: '#08101c' }
+              : { color: colorFor(o), borderColor: colorFor(o) }
+          }
+          title={o + (i === 0 ? ' — primary (first node clockwise)' : ' — replica')}
+        >
+          {o}
+        </span>
+      ))}
+    </>
+  )
+}
+
+// owners[0] is the primary (the first node clockwise); the rest are its replicas. Under a cut
+// each side has its OWN owners (each rings only what it can reach), so the table shows both —
+// mirroring the split ring, where the god's-eye single-ring `owners` would be a fiction no node holds.
+export function KeyTable({ keys, partition, onAction }: { keys: KeyState[]; partition: Partition | null; onAction: () => void }) {
   const sorted = [...keys].sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))
   const expiring = keys.filter((k) => k.ttlMs >= 0).length
 
@@ -65,45 +89,49 @@ export function KeyTable({ keys, onAction }: { keys: KeyState[]; onAction: () =>
         <div className="keygrid">
           {sorted.map((k) => (
             <div className={'keychip' + (k.underReplicated ? ' under' : '')} key={k.key}>
-              <span className="kname">{k.key}</span>
-              {k.ttlMs >= 0 && (
-                <span
-                  className={'ttl' + (k.ttlMs < 10_000 ? ' soon' : '')}
-                  title={`expires in ${ttlText(k.ttlMs)} — every replica dies at the same instant`}
-                >
-                  ⏳ {ttlText(k.ttlMs)}
-                </span>
-              )}
-              <span className="owners">
-                {k.owners.map((o, i) => (
-                  <span
-                    key={o}
-                    className={'oid' + (i === 0 ? ' primary' : '')}
-                    style={
-                      i === 0
-                        ? { background: colorFor(o), borderColor: colorFor(o), color: '#08101c' }
-                        : { color: colorFor(o), borderColor: colorFor(o) }
-                    }
-                    title={o + (i === 0 ? ' — primary (first node clockwise)' : ' — replica')}
+              <div className="key-head">
+                <span className="kname">{k.key}</span>
+                <span className="key-head-right">
+                  {k.ttlMs >= 0 && (
+                    <span
+                      className={'ttl' + (k.ttlMs < 10_000 ? ' soon' : '')}
+                      title={`expires in ${ttlText(k.ttlMs)} — every replica dies at the same instant`}
+                    >
+                      ⏳ {ttlText(k.ttlMs)}
+                    </span>
+                  )}
+                  {k.underReplicated && (
+                    <span className="warn" title="under-replicated — re-replicating">
+                      ⚠
+                    </span>
+                  )}
+                  <button
+                    className="key-del"
+                    onClick={() => del(k.key)}
+                    disabled={busy === k.key}
+                    title={`delete ${k.key} from every node, owner or not`}
+                    aria-label={`delete ${k.key}`}
                   >
-                    {o}
-                  </span>
-                ))}
-                {k.underReplicated && (
-                  <span className="warn" title="under-replicated — re-replicating">
-                    ⚠
-                  </span>
+                    ✕
+                  </button>
+                </span>
+              </div>
+              <div className="owners">
+                {partition && k.ownersA && k.ownersB ? (
+                  <>
+                    <span className="owner-run">
+                      <span className="side-badge side-a" title="side A owners — A rings only its own reachable nodes">A</span>
+                      <OwnerChips owners={k.ownersA} />
+                    </span>
+                    <span className="owner-run">
+                      <span className="side-badge side-b" title="side B owners — B rings only its own reachable nodes">B</span>
+                      <OwnerChips owners={k.ownersB} />
+                    </span>
+                  </>
+                ) : (
+                  <OwnerChips owners={k.owners} />
                 )}
-              </span>
-              <button
-                className="key-del"
-                onClick={() => del(k.key)}
-                disabled={busy === k.key}
-                title={`delete ${k.key} from every node, owner or not`}
-                aria-label={`delete ${k.key}`}
-              >
-                ✕
-              </button>
+              </div>
             </div>
           ))}
         </div>

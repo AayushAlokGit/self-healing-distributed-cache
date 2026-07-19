@@ -113,17 +113,21 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .card-head h2 { margin: 0; }
 
-.keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; max-height: 300px; overflow-y: auto; }
-.keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
+.keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: 10px; max-height: 340px; overflow-y: auto; padding-right: 2px; }
+/* Each key is a small two-row card: name + ttl/delete on top, owners below. The owners wrap,
+   so a cut's two per-side runs never force the chip wider than its column. */
+.keychip { display: flex; flex-direction: column; gap: 7px; padding: 9px 11px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
+.keychip .key-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.keychip .key-head-right { display: flex; align-items: center; gap: 7px; }
 .keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
-.keychip .owners { display: flex; gap: 4px; align-items: center; }
-.oid { font-size: 10.5px; line-height: 1.5; padding: 0 5px; }
+.keychip .owners { display: flex; flex-wrap: wrap; gap: 5px 6px; align-items: center; }
+.owner-run { display: inline-flex; align-items: center; gap: 4px; } /* a side's badge + owners stay together on wrap */
+.oid { font-size: 10.5px; line-height: 1.6; padding: 0 5px; }
 .oid.primary { box-shadow: 0 0 8px rgba(255, 255, 255, 0.14); }
 .keychip.under { border-color: rgb(var(--danger) / 0.5); box-shadow: 0 0 12px rgb(var(--danger) / 0.12); }
 .keychip .warn { color: rgb(var(--danger)); font-size: 12px; animation: healpulse 1.15s ease-in-out infinite; }
-.keychip .ttl { margin-left: auto; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.keychip .ttl { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .keychip .ttl.soon { color: var(--danger-ink); font-weight: 700; }
-.keychip .owners { flex-shrink: 0; }
 
 /* Dim until the row is hovered or the button is keyboard-focused — visible enough to find,
    quiet enough that 40 of them do not read as 40 warnings. Never fully hidden: on a touch
@@ -274,6 +278,11 @@ button:disabled:hover { transform: none; background: rgb(var(--btn) / 0.16); }
 .cut-divider { align-self: center; color: rgb(var(--warn)); font-size: 18px; }
 
 /* On-ring side tag while partitioned. */
+/* A|B labels before each side's owner run in the key table, under a cut. */
+.side-badge { font-size: 9px; font-weight: 800; letter-spacing: 0.5px; padding: 0 3px; margin: 0 2px 0 1px; border-radius: 3px; }
+.side-badge.side-a { color: rgb(var(--cyan)); background: rgb(var(--cyan) / 0.12); }
+.side-badge.side-b { color: rgb(var(--warn)); background: rgb(var(--warn) / 0.12); }
+
 .side-tag { font-size: 12px; font-weight: 800; text-anchor: middle; dominant-baseline: middle; }
 .nodeg.side-a .side-tag { fill: rgb(var(--cyan)); }
 .nodeg.side-b .side-tag { fill: rgb(var(--warn)); }
