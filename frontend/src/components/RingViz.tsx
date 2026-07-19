@@ -66,13 +66,26 @@ export function RingViz({ state, prev, cut }: { state: State; prev: State | null
     }
 
     const heldBefore = new Map(prev.keys.map((k) => [k.key, new Set(k.holders)]))
+    // Under a cut, traffic cannot cross between the two sides — so neither can a heal packet.
+    // The god's-eye snapshot is partition-blind (a key's owners span both sides), so a copy that
+    // really happened WITHIN a side would otherwise be drawn from an owner on the far side — a
+    // packet flying across the cut that never physically happened. Restrict the sender to a node
+    // that can still reach the holder; if none can, the "gain" is the other side re-replicating on
+    // its own and we draw nothing. Empty sideOf (no cut) makes canReach always true — unchanged.
+    const canReach = (from: string, to: string) => {
+      const fs = sideOf[from], ts = sideOf[to]
+      return !(fs && ts && fs !== ts)
+    }
     let launched = 0
     for (const k of state.keys) {
       const had = heldBefore.get(k.key) ?? new Set<string>()
       for (const holder of k.holders) {
         if (had.has(holder)) continue
-        // Prefer a live owner as the sender; fall back to any other holder.
-        const src = k.owners.find((o) => o !== holder && angles[o] !== undefined) ?? k.holders.find((o) => o !== holder)
+        // Prefer a live owner as the sender; fall back to any other holder — but only one on the
+        // holder's side of the cut, since the copy could not have crossed it.
+        const src =
+          k.owners.find((o) => o !== holder && angles[o] !== undefined && canReach(o, holder)) ??
+          k.holders.find((o) => o !== holder && canReach(o, holder))
         if (src === undefined) continue
         flyPacket(angles[src], angles[holder], colorFor(holder), Math.min(launched * PACKET_STAGGER_MS, MAX_STAGGER_MS))
         launched++
@@ -85,7 +98,7 @@ export function RingViz({ state, prev, cut }: { state: State; prev: State | null
       if (was === undefined || was === n.alive) continue
       shock(angles[n.id], n.alive ? '#34d399' : '#ff5470')
     }
-  }, [state, prev, angles])
+  }, [state, prev, angles, sideOf])
 
   return (
     <div className="stage">
