@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { type Cut, type NodeState } from '../api'
+import { type NodeState, type Partition } from '../api'
 import { colorFor } from '../geometry'
 import { useApi, useApiError } from '../hooks'
 import { ErrorLine } from './ErrorLine'
@@ -23,15 +23,14 @@ function SideList({ label, ids }: { label: string; ids: string[] }) {
   )
 }
 
-// PartitionPanel drives THE CUT. Assignment lives in local state (which node is on which
-// side); the *active* cut lives one level up in the Dashboard, because the banner and the
-// ring tint need it too. cut !== null means a cut is live — the editor is replaced by the two
-// sides plus a Mend button, since re-cutting on top of a cut is not a case the demo needs.
-export function PartitionPanel({ nodes, cut, onCut, onMend, onAction }: {
+// PartitionPanel drives THE CUT. Assignment (which node is on which side) lives in local
+// state until you cut; the *active* cut comes from /state (the `partition` prop), so the panel
+// reflects the real backend cut and a reload is faithful. partition !== null means a cut is
+// live — the editor is replaced by the two sides plus a Mend button, since re-cutting on top
+// of a cut is not a case the demo needs.
+export function PartitionPanel({ nodes, partition, onAction }: {
   nodes: NodeState[]
-  cut: Cut | null
-  onCut: (c: Cut) => void
-  onMend: () => void
+  partition: Partition | null
   onAction: () => void
 }) {
   const { cut: cutApi, mend } = useApi()
@@ -58,20 +57,20 @@ export function PartitionPanel({ nodes, cut, onCut, onMend, onAction }: {
     setSides(next)
   }
 
+  // On success just refresh — the next /state poll carries the active cut (or its absence),
+  // so the panel, banner and ring all update from one source of truth.
   const doCut = async () => {
     if (sideA.length === 0 || sideB.length === 0) {
       fail('each side needs at least one live node')
       return
     }
     if (await run(() => cutApi(sideA, sideB))) {
-      onCut({ sideA, sideB })
       onAction()
     }
   }
 
   const doMend = async () => {
     if (await run(() => mend())) {
-      onMend()
       onAction()
     }
   }
@@ -80,16 +79,16 @@ export function PartitionPanel({ nodes, cut, onCut, onMend, onAction }: {
     <div className="card">
       <h2>Network partition · THE CUT</h2>
 
-      {cut ? (
+      {partition ? (
         <>
           <p className="panel-hint">
             The cluster is split. Each side serves alone; a write to the same key on both sides
             becomes a conflict the cache keeps both of (see Read · GET).
           </p>
           <div className="cut-sides">
-            <SideList label="Side A" ids={cut.sideA} />
+            <SideList label="Side A" ids={partition.sideA} />
             <div className="cut-divider" aria-hidden>✂</div>
-            <SideList label="Side B" ids={cut.sideB} />
+            <SideList label="Side B" ids={partition.sideB} />
           </div>
           <button className="primary" onClick={doMend}>
             Mend network

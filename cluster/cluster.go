@@ -58,6 +58,14 @@ type Cluster struct {
 	// Time means the key never expires. See State.
 	deadlines map[string]time.Time
 
+	// cutA/cutB are the two sides of the active partition, nil when the network is whole.
+	// This is the ONLY place the cut is remembered as human-readable sides: the nodes hold
+	// it as opaque blocked-address sets (node.gate), and reporting it in State needs the ids.
+	// The manager may hold this view precisely because it INJECTED the cut — no node has it
+	// (a node only knows "I can't reach peer X"), which is docs/HLD §9's "no god's-eye view"
+	// landing as a code fact. See Cut/Mend and State.
+	cutA, cutB []string
+
 	// log is the durable server log, distinct from events above. Discards until
 	// SetLogger. Atomic because Set and Get read it without holding c.mu.
 	log atomic.Pointer[slog.Logger]
@@ -289,6 +297,13 @@ func (c *Cluster) Cut(sideA, sideB []string) error {
 		c.nodes[id].SetBlockedPeers(addrsA)
 	}
 
+	// Remember the sides so State can report the partition (the banner survives a reload,
+	// and each side's ring can be drawn as it actually is). Copy the slices — the caller
+	// still owns theirs. A cut on top of a cut just replaces the record, which matches the
+	// nodes: SetBlockedPeers overwrote, it did not union.
+	c.cutA = append([]string{}, sideA...)
+	c.cutB = append([]string{}, sideB...)
+
 	c.logf("cut", "cut the network: {%s} | {%s} — neither side can hear the other, so each convicts the far side and serves alone",
 		strings.Join(sideA, ","), strings.Join(sideB, ","))
 	c.logger().Warn("network partitioned (fault injected)",
@@ -308,6 +323,7 @@ func (c *Cluster) Mend() {
 	for _, n := range c.nodes {
 		n.SetBlockedPeers(nil)
 	}
+	c.cutA, c.cutB = nil, nil
 	c.logf("mend", "mended the network — both sides can talk again; the heal will reconcile what diverged")
 	c.logger().Info("network partition healed", "nodes", len(c.nodes))
 }

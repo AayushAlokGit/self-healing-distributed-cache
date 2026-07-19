@@ -20,6 +20,11 @@ export interface KeyState {
   // Remaining life in ms; -1 means the key never expires. The server sends the remainder,
   // not a deadline, so the countdown never depends on the browser's clock.
   ttlMs: number
+  // Under an active cut, the owners as each side sees them — each side rings only its own
+  // reachable nodes, so a key can have a different owner per side. Absent when the network
+  // is whole; then `owners` (the single alive ring) is authoritative.
+  ownersA?: string[]
+  ownersB?: string[]
 }
 
 // One owner's outcome during a read. Rank 0 is the primary; the rest are its replicas.
@@ -58,13 +63,22 @@ export interface VNode {
   node: string
 }
 
-// A network cut splits the live nodes into two sides that cannot hear each other. It is NOT
-// part of the /state snapshot (state.go was untouched), so the dashboard is the only thing
-// that knows a cut is live — it tracks the issued cut in its own client state and a reload
-// forgets it. This mirrors the /cut request body.
+// A network cut splits the live nodes into two sides that cannot hear each other. This shape
+// mirrors the /cut request body (what the panel sends).
 export interface Cut {
   sideA: string[]
   sideB: string[]
+}
+
+// Partition is the ACTIVE cut as /state reports it, so the banner and split ring survive a
+// reload — the server, not the dashboard, is now the source of truth for whether a cut is
+// live. vnodesA/vnodesB are each side's ring points: a side rings only what it can reach, so
+// the two disagree about who owns which arc, and that is exactly what the split ring draws.
+export interface Partition {
+  sideA: string[]
+  sideB: string[]
+  vnodesA: VNode[]
+  vnodesB: VNode[]
 }
 
 // One entry in the activity log, in causal order. from/to/keys/cause are set on
@@ -87,6 +101,8 @@ export interface State {
   aliveCount: number
   totalHealCopies: number
   events: ClusterEvent[]
+  // Present only while the network is cut; absent/null means whole.
+  partition?: Partition | null
 }
 
 // Where the cluster lives. Empty in dev: Vite proxies /api to :8080, so it is same-origin

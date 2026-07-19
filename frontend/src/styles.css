@@ -320,6 +320,9 @@ button:disabled:hover { transform: none; background: rgb(var(--btn) / 0.16); }
 /* --- SVG ---------------------------------------------------------------------- */
 .ringbase { fill: none; stroke: rgb(var(--steel) / 0.12); stroke-width: 1.5; }
 .varc { fill: none; stroke-width: 16; opacity: 0.9; transition: stroke 0.5s ease; filter: saturate(1.1); }
+/* Under a cut, side B's ownership is a thinner outer band concentric with side A's, so both
+   rings the two sides actually hold are visible at once. */
+.side-b-arc { stroke-width: 8; opacity: 0.7; }
 /* Radius stays an SVG attribute (r={5}), never a CSS `r` declaration: CSS `r` is not
    universally supported, and a browser that ignores it renders r=0 — no dots at all. The
    phone override below only enlarges it where it works, so it degrades safely. */
@@ -328,6 +331,14 @@ button:disabled:hover { transform: none; background: rgb(var(--btn) / 0.16); }
 @keyframes underpulse {
   0%, 100% { r: 5; filter: drop-shadow(0 0 2px rgb(var(--danger))); }
   50% { r: 8; filter: drop-shadow(0 0 8px rgb(var(--danger))); }
+}
+/* A two-tone key dot: one half per side's owner colour, for a key split across the cut. Its
+   halves are paths, so the r-based underpulse can't drive it — pulse the drop-shadow instead. */
+.keydot-split path { stroke: #0b1220; stroke-width: 1.2; }
+.keydot-split.under { animation: underpulse-split 1s ease-in-out infinite; }
+@keyframes underpulse-split {
+  0%, 100% { filter: drop-shadow(0 0 2px rgb(var(--danger))); }
+  50% { filter: drop-shadow(0 0 8px rgb(var(--danger))); }
 }
 .keylabel { font-size: 10px; fill: #a7bcdb; dominant-baseline: middle; pointer-events: none; font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
 .keyleader { stroke: rgb(var(--steel) / 0.3); stroke-width: 1; }

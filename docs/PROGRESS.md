@@ -97,10 +97,17 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
         node blocks only its own outgoing dials. Gated at RoundTrip (not DialContext) so a keep-alive connection
         pooled before the cut is refused too.
       - **The conflict card + cut UI** (FE `1f10793`): the card renders siblings off `X-Conflict` + the array;
-        a `PartitionPanel` (per-node A|B toggles), a "NETWORK PARTITIONED" banner, and ring A/B tags. ⚠️ The cut
-        is tracked **client-side** — `/state` reports no partition, so a page reload loses the banner (the
-        backend cut stays live). **Next follow-up:** report partition state in `/state`, which also unlocks
-        per-key two-colour conflict markers on the ring.
+        a `PartitionPanel` (per-node A|B toggles), a "NETWORK PARTITIONED" banner, and ring A/B tags. ~~⚠️ The
+        cut is tracked **client-side** — `/state` reports no partition, so a page reload loses the banner.~~
+        **CLOSED S20 (below): `/state` reports the partition, the ring genuinely splits, two-colour keys landed.**
+      - ✅ **`/state` reports the partition — the split ring (S20).** `Cluster` now records the active cut
+        (`cutA/cutB`, set in `Cut`, cleared in `Mend`); `State()` returns a `Partition{sideA,sideB,vnodesA,vnodesB}`
+        and per key `OwnersA`/`OwnersB` from **two per-side rings** (side A = alive − B, side B = alive − A; a
+        bridge node lands in both). Under-replication is judged **per side**. Frontend: banner + split ring driven
+        by `state.partition` (client-only `cut` deleted, so a reload is faithful); the ring draws **two concentric
+        ownership bands**, a key held on both sides renders **two-tone** (each half = that side's owner). Browser-
+        verified: cut → banner/split-ring/two-tone keys, **reload → all reconstructed from `/state`**, mend → clean;
+        `NODES ALIVE` stayed 5/5 (no god's-eye view). Test `TestStateReportsPartitionWithPerSideOwnership`.
     - ✅ **Verified end-to-end in the browser (S19).** Cut `{n0,n2,n4} | {n1,n3}` → wrote `cart=milk,eggs` via
       **n0** and `cart=milk,bread` via **n3** (both accepted, each side serving alone) → mend → the version-aware
       heal reconciled (activity log: `HEAL n0→n1`, `n1→n0`, `n1→n2`; cleanup dropped surplus, **not** the
@@ -379,10 +386,11 @@ corpses* and every read pays a failed hop before falling back. That earns Phase 
 - ◐ Consistency vs availability trade-off — the *code* consequence is built and **demonstrated E2E** on
   `cap-demo` (S18–S19): **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads**
   (`X-Conflict` + the sibling set), a **version-aware heal + cleanup** (a stranded concurrent sibling survives),
-  the **coordinator picker** (`via`), and **the cut** — a partition under the HTTP clients that lets both sides
-  accept a write, the heal keep both, and a read surface the conflict. Browser-verified end to end.
-  Open: **7B, the dial** (`W`/`R_read` — refusals, checkerboard, scorecard) and read-repair-on-read (a read
-  currently *detects* a conflict; it doesn't write the merge back). See the 7A build arc under Next action (f).
+  the **coordinator picker** (`via`), **the cut** — a partition under the HTTP clients that lets both sides
+  accept a write, the heal keep both, and a read surface the conflict — and (S20) **`/state` reports the
+  partition so the ring genuinely splits** (two per-side rings, two-colour keys, reload-faithful).
+  Browser-verified end to end. Open: **7B, the dial** (`W`/`R_read` — refusals, checkerboard, scorecard) and
+  read-repair-on-read (a read currently *detects* a conflict; it doesn't write the merge back). See (f).
 
 ### Phase 4 — Failure detection
 - ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each `heartbeatInterval`
@@ -559,6 +567,44 @@ re-replicate.
 
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
+
+### Session 20 — 2026-07-19 · `/state` reports the partition — the ring genuinely splits
+**Build + browser verification, on `cap-demo`.** Closed the S19 follow-up: the cut was tracked client-side, so a
+reload lost the banner while the backend cut stayed live. Now the manager reports it and the ring splits.
+
+- **The concept, first (the honesty question).** *Who is allowed to know there's a partition?* No **node** can —
+  each only knows "I can't reach peer X," and can't tell a cut from a crash (Phase-4's silence). But the
+  **manager** injected the cut, so it may report the sides the same way it reports a Kill: out-of-band control-
+  plane knowledge, honest as a readout, dishonest only if we pretended a node computed it. Aayush's own framing
+  sharpened it: consistent hashing's **minimal-movement** survives a partition (each side only re-owns the far
+  side's arcs), but **global agreement on ownership** was never a ring property — it held only *because
+  membership views agreed* (his S18 answer). A cut breaks that precondition by construction, so **there is no
+  longer one ring — there are two, and they disagree.** The current single god's-eye ring is the *fiction*; the
+  split render is the honest one. And the shrink is **mandatory**, not cosmetic: a side that kept the far nodes
+  in its ring would route to unreachable owners and *refuse* — that's CP; AP requires each side to shrink,
+  re-own, and keep serving.
+- **Backend (`cluster/`).** `Cluster` records the active cut (`cutA/cutB`); `State()` returns
+  `Partition{sideA,sideB,vnodesA,vnodesB}` + per-key `OwnersA`/`OwnersB` from two per-side rings (side A =
+  alive − B, side B = alive − A; a bridge node lands in both). **Under-replication judged per side** — a key
+  complete for its side no longer paints under-replicated for the whole cut. Helpers `ringOver`/`vnodesOf`/
+  `setOf`. New test `TestStateReportsPartitionWithPerSideOwnership` (no polling: per-side owners come from the
+  manager's ring math over the stored sides, correct the instant `Cut` returns).
+- **Frontend.** Deleted the client-only `cut` state; banner + panel + ring now read `state.partition`, so a
+  reload is faithful. `ownershipArcs` took a radius param; the ring draws **two concentric bands** (side A on
+  the ring line, side B a thinner outer band), and a key held on both sides is a **two-tone dot** (`splitDot`,
+  each half in that side's owner colour). Node A/B tags and the packet `canReach`/side-sequencing from S19 now
+  source their `sideOf` from `partition`.
+- **Browser-verified.** Cut `{n0,n2,n4}|{n1,n3}` → banner + split ring (gold/purple outer = B, cyan/pink/green
+  inner = A) + two-tone keys (key:2 half-purple/half-pink = n1 on B, n2 on A). **Full reload → CAP tab → all
+  reconstructed from `/state`** (the bug, fixed). Mend → single ring back. `NODES ALIVE` stayed 5/5 throughout.
+  Honest artifact under a live cut: **COPIES 60/36** (gold) — each side re-replicates among itself, so total
+  copies exceed the single-ring's intended 36; converges after mend+heal+cleanup.
+- **Process.** `gofmt`/`vet`/`tsc`/`vite build` clean; all Go packages green under `-race` **except** the known
+  pre-existing `TestDeleteFindsCopiesTheRingNoLongerNames` load-flake (item e; 5/5 in isolation, untouched).
+  Separately, a background **Plan agent** produced the full **7B "dial"** implementation spec (teach-then-build,
+  not code) — held for the next session; key call: the strong dial setting must **hold the ring fixed**
+  (`node/`, gate `ring.Remove`/`Add`), and read enforcement is gather-all + a reachable-count threshold (not
+  early-stop, which would break 7A conflict detection). Still on `cap-demo`, merged to main by hand.
 
 ### Session 19 — 2026-07-18 · 7A COMPLETE — conflict-aware reads, version-aware heal/cleanup, the coordinator picker, the cut; verified E2E
 **Build + browser verification, seven commits on `cap-demo`** (no quiz — he asked to skip). This closes the

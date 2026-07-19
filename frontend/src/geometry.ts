@@ -41,12 +41,22 @@ function arcPath(a1: number, a2: number, r: number): string {
 }
 
 // The segment from one virtual point to the next clockwise belongs to the NEXT point's
-// node. Requires vnodes sorted by angle.
-export function ownershipArcs(vnodes: { angle: number; node: string }[]) {
+// node. Requires vnodes sorted by angle. r defaults to the ring radius; a cut draws each
+// side's ownership as its own concentric band, so it passes two different radii.
+export function ownershipArcs(vnodes: { angle: number; node: string }[], r: number = RING) {
   return vnodes.map((v, i) => {
     const next = vnodes[(i + 1) % vnodes.length]
-    return { d: arcPath(v.angle, next.angle, RING), owner: next.node }
+    return { d: arcPath(v.angle, next.angle, r), owner: next.node }
   })
+}
+
+// splitDot returns the left and right semicircle paths of a radius-r dot at (cx, cy), for a
+// key owned by a different node on each side of a cut — one half in each side's owner colour.
+export function splitDot(cx: number, cy: number, r: number) {
+  return {
+    left: `M ${cx} ${cy - r} A ${r} ${r} 0 0 0 ${cx} ${cy + r} Z`,
+    right: `M ${cx} ${cy - r} A ${r} ${r} 0 0 1 ${cx} ${cy + r} Z`,
+  }
 }
 
 const LABEL_R = KEY_R - 13

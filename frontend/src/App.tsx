@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { API_BASE, createApi, type Cut, type State } from './api'
+import { API_BASE, createApi, type State } from './api'
 import { ActivityLog } from './components/ActivityLog'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
@@ -78,11 +78,11 @@ export default function App() {
 function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void }) {
   const { state, prev, connected, refresh } = useClusterState()
 
-  // The active cut is client-only: /state does not report it (state.go was untouched), so
-  // the dashboard — the only issuer of cuts — is the sole source of truth. A reload forgets
-  // it (a known limitation until /state carries the partition). Only the CAP tab issues cuts;
-  // Dashboard remounts per tab (key={tab.id} in App), so this is null everywhere else.
-  const [cut, setCut] = useState<Cut | null>(null)
+  // The active cut now comes from /state: the server is the source of truth, so a reload
+  // keeps the banner and the split ring. (It used to be client-only React state, which a
+  // refresh forgot while the backend cut stayed live.) Null on every non-CAP tab, since only
+  // the CAP demo issues cuts.
+  const partition = state?.partition ?? null
   const isCap = tab.id === 'cap'
 
   return (
@@ -127,13 +127,13 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           <div className="offline-badge">⚠ backend unreachable — is `go run ./cmd/server` running?</div>
         ))}
 
-      {cut && (
+      {partition && (
         <div className="partition-banner">
           <span className="bolt">✂</span>
           <b>NETWORK PARTITIONED</b>
           <span className="detail">
-            Side A ({cut.sideA.join(', ')}) and Side B ({cut.sideB.join(', ')}) cannot hear each
-            other — both keep serving.
+            Side A ({partition.sideA.join(', ')}) and Side B ({partition.sideB.join(', ')}) cannot
+            hear each other — both keep serving.
           </span>
         </div>
       )}
@@ -141,19 +141,13 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
       {state ? (
         <div className="grid">
           <div className="left">
-            <RingViz state={state} prev={prev} cut={cut} />
+            <RingViz state={state} prev={prev} partition={partition} />
             <KeyTable keys={state.keys} onAction={refresh} />
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
             {isCap && (
-              <PartitionPanel
-                nodes={state.nodes}
-                cut={cut}
-                onCut={setCut}
-                onMend={() => setCut(null)}
-                onAction={refresh}
-              />
+              <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />
             )}
             <WritePanel nodes={state.nodes} onAction={refresh} />
             <ReadPanel nodes={state.nodes} />

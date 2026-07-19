@@ -14,11 +14,26 @@ import (
 type State struct {
 	Nodes           []NodeState `json:"nodes"`
 	Keys            []KeyState  `json:"keys"`
-	VNodes          []VNode     `json:"vnodes"` // virtual points, for the tick layer
+	VNodes          []VNode     `json:"vnodes"` // virtual points of the alive ring, for the tick layer
 	RF              int         `json:"rf"`
 	AliveCount      int         `json:"aliveCount"`
 	TotalHealCopies int64       `json:"totalHealCopies"`
 	Events          []Event     `json:"events"` // kills, writes AND heals, in order
+
+	// Partition is the active network cut, nil when the network is whole. Reported so a
+	// reload keeps the banner and the ring can split into the two rings the sides actually
+	// hold. Only the manager sees this — it injected the cut (docs/HLD §9).
+	Partition *Partition `json:"partition,omitempty"`
+}
+
+// Partition is one active cut: the two sides Cut was given, plus each side's ring points.
+// A side convicts the far side and rings only what it can reach, so VNodesA and VNodesB
+// disagree about who owns which arc — that disagreement is the whole CAP story, drawn.
+type Partition struct {
+	SideA   []string `json:"sideA"`
+	SideB   []string `json:"sideB"`
+	VNodesA []VNode  `json:"vnodesA"` // side A's ring: alive nodes minus side B
+	VNodesB []VNode  `json:"vnodesB"` // side B's ring: alive nodes minus side A
 }
 
 // NodeState is one physical node's status and ring position.
@@ -38,6 +53,13 @@ type KeyState struct {
 	Owners          []string `json:"owners"`  // intended, from the alive ring
 	Holders         []string `json:"holders"` // actual, from node caches
 	UnderReplicated bool     `json:"underReplicated"`
+
+	// OwnersA/OwnersB are the key's owners as each side of an active cut sees them: each
+	// side rings only its own reachable nodes, so a key can have a different owner per side
+	// (side A convicted side B, so it re-owns B's arcs, and vice versa). Nil (omitted) when
+	// the network is whole — then Owners, from the single alive ring, is authoritative.
+	OwnersA []string `json:"ownersA,omitempty"`
+	OwnersB []string `json:"ownersB,omitempty"`
 
 	// TTLMs is the key's remaining life in milliseconds; -1 means it never expires.
 	// A remainder, not a deadline: an absolute instant would be read against the
@@ -66,9 +88,39 @@ func (c *Cluster) State() State {
 
 	// Where keys *should* live. Must use the same virtual-point count as the nodes, or
 	// the owners shown here would not match the ones the nodes route and heal by.
-	r := ring.NewWithReplicas(c.ringReplicas)
-	for _, id := range aliveIDs {
-		r.Add(id)
+	r := c.ringOver(aliveIDs)
+
+	// Under an active cut, each side rings only what it can reach: a cut blocks A<->B, so
+	// side A's view is every alive node EXCEPT side B (and vice versa). An unassigned bridge
+	// node is reachable by both, so it lands in both views. inA/inB are membership sets for
+	// the per-side under-replication check below. Computing reach from aliveIDs (not from the
+	// stored sides) stays correct even if a node is killed after the cut — it just drops out.
+	var partition *Partition
+	var ringA, ringB *ring.Ring
+	var inA, inB map[string]bool
+	if c.cutA != nil {
+		blockedFromA := setOf(c.cutB) // A cannot reach B
+		blockedFromB := setOf(c.cutA)
+		reachA := make([]string, 0, len(aliveIDs))
+		reachB := make([]string, 0, len(aliveIDs))
+		inA, inB = map[string]bool{}, map[string]bool{}
+		for _, id := range aliveIDs {
+			if !blockedFromA[id] {
+				reachA = append(reachA, id)
+				inA[id] = true
+			}
+			if !blockedFromB[id] {
+				reachB = append(reachB, id)
+				inB[id] = true
+			}
+		}
+		ringA, ringB = c.ringOver(reachA), c.ringOver(reachB)
+		partition = &Partition{
+			SideA:   append([]string{}, c.cutA...),
+			SideB:   append([]string{}, c.cutB...),
+			VNodesA: vnodesOf(ringA),
+			VNodesB: vnodesOf(ringB),
+		}
 	}
 
 	// Actual placement: union of what live nodes hold.
@@ -167,22 +219,78 @@ func (c *Cluster) State() State {
 			ttlMs = max(exp.Sub(now).Milliseconds(), 0)
 		}
 
-		st.Keys = append(st.Keys, KeyState{
-			Key:             k,
-			Angle:           angleOf(ring.Hash(k)),
-			Owners:          r.GetClockwiseN(k, c.rf),
-			Holders:         holders,
-			UnderReplicated: len(holders) < wantCopies,
-			TTLMs:           ttlMs,
-		})
+		ks := KeyState{
+			Key:     k,
+			Angle:   angleOf(ring.Hash(k)),
+			Owners:  r.GetClockwiseN(k, c.rf),
+			Holders: holders,
+			TTLMs:   ttlMs,
+		}
+
+		if partition != nil {
+			// Each side sees its own owners, and "fully replicated" is judged per side: a key
+			// written on side A can only reach side A's nodes, so its target is min(rf, |side A|),
+			// not min(rf, |all alive|). Judging it globally would paint a key that is complete for
+			// its side as under-replicated the whole time the cut is up. A bridge holder is
+			// reachable by both, so it counts toward both sides.
+			ks.OwnersA = ringA.GetClockwiseN(k, c.rf)
+			ks.OwnersB = ringB.GetClockwiseN(k, c.rf)
+			ha, hb := 0, 0
+			for _, h := range holders {
+				if inA[h] {
+					ha++
+				}
+				if inB[h] {
+					hb++
+				}
+			}
+			urA := ha > 0 && ha < min(c.rf, len(inA))
+			urB := hb > 0 && hb < min(c.rf, len(inB))
+			ks.UnderReplicated = urA || urB
+		} else {
+			ks.UnderReplicated = len(holders) < wantCopies
+		}
+
+		st.Keys = append(st.Keys, ks)
 	}
 
-	// Virtual points, alive nodes only — the ring routes to those.
-	for _, p := range r.Points() {
-		st.VNodes = append(st.VNodes, VNode{Angle: angleOf(p.Hash), Node: p.Node})
-	}
+	// Virtual points of the alive ring — the ring routes to those. Under a cut the frontend
+	// draws Partition.VNodesA/B instead; this stays the whole-network ring for the normal case.
+	st.VNodes = vnodesOf(r)
+	st.Partition = partition
 
 	return st
+}
+
+// ringOver builds a ring of the given ids at the demo virtual-point count. Every ring the
+// dashboard reasons about — the whole-network one and each side of a cut — must use the same
+// count, or two rings would disagree about ownership for a reason that is not the partition.
+func (c *Cluster) ringOver(ids []string) *ring.Ring {
+	r := ring.NewWithReplicas(c.ringReplicas)
+	for _, id := range ids {
+		r.Add(id)
+	}
+	return r
+}
+
+// vnodesOf turns a ring's virtual points into the dashboard's angle-tagged form. Non-nil
+// even for an empty ring, so the JSON is [] not null and the frontend's .map is safe.
+func vnodesOf(r *ring.Ring) []VNode {
+	pts := r.Points()
+	out := make([]VNode, 0, len(pts))
+	for _, p := range pts {
+		out = append(out, VNode{Angle: angleOf(p.Hash), Node: p.Node})
+	}
+	return out
+}
+
+// setOf is a membership set of ids.
+func setOf(ids []string) map[string]bool {
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
 }
 
 // noteExpiries emits one event per key whose deadline has passed since the last poll.

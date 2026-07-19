@@ -109,6 +109,88 @@ func TestCutProducesConcurrentSiblingsBothKeptOnHeal(t *testing.T) {
 	t.Logf("cut produced concurrent siblings %v, both kept across the heal", res.Siblings)
 }
 
+// State must report an active cut so a reloaded dashboard keeps the banner, and it must report
+// each side's ring as that side actually holds it — every key gets a DIFFERENT owner per side,
+// because side A rings only {n0,n2,n4} and side B only {n1,n3} (docs/HLD §9: only the manager,
+// which injected the cut, can hold both views). Unlike the sibling test, this needs no polling:
+// the per-side owners come from the manager's own ring math over the stored sides, not from each
+// node detecting the partition, so they are correct the instant Cut returns.
+func TestStateReportsPartitionWithPerSideOwnership(t *testing.T) {
+	c := New(3, 1, 200*time.Millisecond, "n0", "n1", "n2", "n3", "n4")
+	if err := c.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} {
+		if err := c.Set(k, "v", 0, ""); err != nil {
+			t.Fatalf("seed %q: %v", k, err)
+		}
+	}
+
+	if p := c.State().Partition; p != nil {
+		t.Fatalf("no cut yet, State().Partition should be nil, got %+v", p)
+	}
+
+	sideA, sideB := []string{"n0", "n2", "n4"}, []string{"n1", "n3"}
+	if err := c.Cut(sideA, sideB); err != nil {
+		t.Fatalf("cut: %v", err)
+	}
+
+	p := c.State().Partition
+	if p == nil {
+		t.Fatal("after a cut, State().Partition must be set so a reload keeps the banner")
+	}
+	if !slices.Equal(p.SideA, sideA) || !slices.Equal(p.SideB, sideB) {
+		t.Fatalf("reported sides %v | %v, want %v | %v", p.SideA, p.SideB, sideA, sideB)
+	}
+
+	// Each side's ring points name only that side's nodes.
+	inA, inB := map[string]bool{"n0": true, "n2": true, "n4": true}, map[string]bool{"n1": true, "n3": true}
+	for _, v := range p.VNodesA {
+		if !inA[v.Node] {
+			t.Errorf("side A ring holds a point for %s, which is not on side A", v.Node)
+		}
+	}
+	for _, v := range p.VNodesB {
+		if !inB[v.Node] {
+			t.Errorf("side B ring holds a point for %s, which is not on side B", v.Node)
+		}
+	}
+
+	// Every key diverges: with a clean split and no bridge node, side A's owners come from
+	// {n0,n2,n4} and side B's from {n1,n3} — disjoint sets, so no key can share an owner.
+	keys := c.State().Keys
+	if len(keys) == 0 {
+		t.Fatal("expected the seeded keys to appear in State")
+	}
+	for _, k := range keys {
+		if len(k.OwnersA) == 0 || len(k.OwnersB) == 0 {
+			t.Errorf("key %q under a cut must carry per-side owners, got A=%v B=%v", k.Key, k.OwnersA, k.OwnersB)
+			continue
+		}
+		for _, o := range k.OwnersA {
+			if !inA[o] {
+				t.Errorf("key %q side-A owner %s is not on side A", k.Key, o)
+			}
+		}
+		for _, o := range k.OwnersB {
+			if !inB[o] {
+				t.Errorf("key %q side-B owner %s is not on side B", k.Key, o)
+			}
+		}
+		if k.OwnersA[0] == k.OwnersB[0] {
+			t.Errorf("key %q has the same primary %s on both sides; the sides are disjoint, so it must differ", k.Key, k.OwnersA[0])
+		}
+	}
+
+	// Mend clears it: the banner comes down, per-side owners disappear.
+	c.Mend()
+	if p := c.State().Partition; p != nil {
+		t.Errorf("after mend, State().Partition must be nil, got %+v", p)
+	}
+}
+
 // A cut must name only live nodes: a killed or unknown id is refused with *NoSuchNodeError, the
 // same error via uses, so the control API can map it to a 400 rather than half-applying a cut.
 func TestCutRejectsDeadOrUnknownNodes(t *testing.T) {
