@@ -35,6 +35,10 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .title h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; font-weight: 700; }
 .title h1 .accent { background: linear-gradient(90deg, #22d3ee, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .title p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+/* The system identity sits between the h1 and the tabs: what this whole thing IS, above the
+   per-tab blurb that says what one tab shows. A touch of bottom margin sets it off from the nav. */
+.title .identity { margin-bottom: 8px; max-width: 70ch; }
+.title .identity strong { color: var(--ink); font-weight: 600; }
 
 /* One tab per demo cluster — which demo you are looking at, so it sits second only to the
    h1: above the 12.5px blurb, well above the 11.5px action buttons. Sized between the
@@ -78,8 +82,18 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 /* min-width: 0 on BOTH columns. A `1fr` track is really minmax(auto, 1fr), and that `auto`
    floor is the item's min-content width, so one unshrinkable child blows out the column. */
 .left, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* Write and Read sit side by side under the ring — the left column is wide, so this uses the
+   width instead of stacking the right column too tall. Collapses to one column when narrow. */
+.io-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.io-row > * { min-width: 0; }
+@media (max-width: 900px) { .io-row { grid-template-columns: 1fr; } }
 
 .stage { position: relative; border-radius: 20px; padding: 8px; overflow: hidden; background-image: radial-gradient(600px 600px at 50% 46%, rgba(30, 44, 70, 0.35), transparent 70%); }
+/* A partition renders two independent rings side by side — the honest picture (a cut splits an AP
+   system into two clusters), each drawn by its own RingViz. Collapses to a stack when narrow. */
+.split-stage { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .split-stage { grid-template-columns: 1fr; } }
+.ring-title { position: absolute; top: 12px; left: 14px; z-index: 2; font-size: 12px; font-weight: 800; letter-spacing: 0.6px; color: var(--ink); background: rgb(10 16 28 / 0.55); border: 1px solid var(--hair); border-radius: 999px; padding: 3px 10px; }
 /* touch-action: manipulation, NOT none: `none` swallows a scroll swipe that starts on the
    ring, which reads as a frozen page. Nothing here handles gestures. */
 svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display: block; margin: 0 auto; touch-action: manipulation; }
@@ -109,17 +123,21 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .card-head h2 { margin: 0; }
 
-.keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; max-height: 300px; overflow-y: auto; }
-.keychip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
+.keygrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: 10px; max-height: 340px; overflow-y: auto; padding-right: 2px; }
+/* Each key is a small two-row card: name + ttl/delete on top, owners below. The owners wrap,
+   so a cut's two per-side runs never force the chip wider than its column. */
+.keychip { display: flex; flex-direction: column; gap: 7px; padding: 9px 11px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); font-size: 12px; transition: 0.2s; }
+.keychip .key-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.keychip .key-head-right { display: flex; align-items: center; gap: 7px; }
 .keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
-.keychip .owners { display: flex; gap: 4px; align-items: center; }
-.oid { font-size: 10.5px; line-height: 1.5; padding: 0 5px; }
+.keychip .owners { display: flex; flex-wrap: wrap; gap: 5px 6px; align-items: center; }
+.owner-run { display: inline-flex; align-items: center; gap: 4px; } /* a side's badge + owners stay together on wrap */
+.oid { font-size: 10.5px; line-height: 1.6; padding: 0 5px; }
 .oid.primary { box-shadow: 0 0 8px rgba(255, 255, 255, 0.14); }
 .keychip.under { border-color: rgb(var(--danger) / 0.5); box-shadow: 0 0 12px rgb(var(--danger) / 0.12); }
 .keychip .warn { color: rgb(var(--danger)); font-size: 12px; animation: healpulse 1.15s ease-in-out infinite; }
-.keychip .ttl { margin-left: auto; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.keychip .ttl { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .keychip .ttl.soon { color: var(--danger-ink); font-weight: 700; }
-.keychip .owners { flex-shrink: 0; }
 
 /* Dim until the row is hovered or the button is keyboard-focused — visible enough to find,
    quiet enough that 40 of them do not read as 40 warnings. Never fully hidden: on a touch
@@ -156,7 +174,13 @@ button.primary:hover { filter: brightness(1.1); }
 
 .kv { display: flex; gap: 8px; margin-bottom: 9px; }
 input { flex: 1; min-width: 0; background: rgba(10, 16, 26, 0.7); border: 1px solid var(--panel-brd); border-radius: 9px; color: var(--ink); padding: 8px 11px; font-family: inherit; font-size: 13px; }
-input:focus { outline: none; border-color: rgb(var(--cyan)); }
+input:focus, .via-select:focus { outline: none; border-color: rgb(var(--cyan)); }
+
+/* Coordinator picker: which node takes the request (auto = any live node). Reuses the input
+   tokens so it reads as the same control family as the key/value fields. */
+.via-row { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.via-row .ttl-label { margin-right: 0; }
+.via-select { flex: 1; min-width: 0; background: rgba(10, 16, 26, 0.7); border: 1px solid var(--panel-brd); border-radius: 9px; color: var(--ink); padding: 7px 10px; font-family: inherit; font-size: 12.5px; cursor: pointer; }
 
 .ttl-row { display: flex; align-items: center; gap: 5px; margin-bottom: 9px; flex-wrap: wrap; }
 .ttl-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-right: 2px; }
@@ -198,8 +222,108 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .read-path .hop.miss .outcome { color: rgb(var(--warn)); }
 /* Never asked, because an owner ahead of it answered first. */
 .read-path .hop.skipped { opacity: 0.42; }
+
+/* A conflict read: the key carries concurrent siblings the cache kept because two writes never
+   saw each other. Amber, not green (a plain hit) and not red (a miss/error) — nothing broke and
+   nothing was lost, both writes were accepted. */
+.result.conflict b.conflict-badge { color: rgb(var(--warn)); }
+.conflict-note { margin: 6px 0 2px; font-size: 11px; line-height: 1.55; color: var(--muted); }
+.siblings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+/* One row per concurrent value. --sib is the per-sibling accent (see SIBLING_ACCENTS in
+   ReadPanel), an RGB triple so the row mixes its own fill, border and left rule from one colour
+   — the same one-colour-drives-everything trick the buttons and event tags use. */
+.sibling {
+  display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 9px;
+  background: rgb(var(--sib) / 0.08); border: 1px solid rgb(var(--sib) / 0.35);
+  border-left: 3px solid rgb(var(--sib));
+}
+.sibling .sib-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgb(var(--sib)); font-variant-numeric: tabular-nums; }
+.sibling .sib-val { font-weight: 700; color: var(--ink); word-break: break-word; }
+
 /* A request that failed outright, as opposed to a cache miss. */
 .api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }
+
+/* --- Network partition (THE CUT) --------------------------------------------- */
+/* Side A borrows cyan, Side B amber — the same two accents the ring tint uses, so the
+   banner, the panel and the ring all name the sides the same way. */
+
+/* Full-width warning while a cut is live: impossible to miss, so nobody reads the split ring
+   as a broken cluster. */
+.partition-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 16px; padding: 10px 15px; border-radius: 12px;
+  background: rgb(var(--warn) / 0.12); border: 1px solid rgb(var(--warn) / 0.42);
+  color: #ffe08a; font-size: 12.5px;
+  animation: partitionpulse 1.4s ease-in-out infinite;
+}
+.partition-banner b { color: rgb(var(--warn)); letter-spacing: 1.4px; font-size: 12px; }
+.partition-banner .bolt { font-size: 15px; }
+.partition-banner .detail { color: var(--muted); }
+@keyframes partitionpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--warn) / 0.22); }
+  50% { box-shadow: 0 0 18px 2px rgb(var(--warn) / 0.16); }
+}
+
+/* Assignment editor: one row per live node, an A|B segmented toggle on the right. */
+.cut-assign { display: flex; flex-direction: column; gap: 6px; margin-bottom: 11px; }
+.cut-row { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 9px; background: var(--well); border: 1px solid var(--hair); }
+.cut-row .id { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 7px; flex: 1; }
+.cut-row .swatch { width: 10px; height: 10px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
+.cut-seg { display: flex; gap: 4px; }
+.cut-seg .seg { padding: 4px 11px; font-size: 11px; font-weight: 700; }
+.cut-seg .seg.on-a { --btn: var(--cyan); background: rgb(var(--btn) / 0.32); color: #8be9fd; }
+.cut-seg .seg.on-b { --btn: var(--warn); background: rgb(var(--btn) / 0.32); color: #ffe08a; }
+
+.cut-actions { display: flex; gap: 8px; }
+.cut-actions button:first-child { flex: 0 0 auto; }
+.cut-actions .primary { flex: 1; width: auto; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:disabled:hover { transform: none; background: rgb(var(--btn) / 0.16); }
+
+/* Consistency dial (7B). Held (W+R_read>R) is the cyan/strong end; eventual is neutral. */
+.dial-presets { display: flex; gap: 8px; margin-bottom: 12px; }
+.dial-presets .preset { flex: 1; padding: 8px; font-size: 11px; font-weight: 700; }
+.dial-presets .preset.on { --btn: var(--cyan); background: rgb(var(--btn) / 0.28); color: #8be9fd; box-shadow: 0 0 0 1px rgb(var(--cyan) / 0.4) inset; }
+.dial-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.dial-label { width: 56px; font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.3px; }
+.dial-seg { display: flex; gap: 5px; }
+.dial-seg .seg { min-width: 34px; padding: 5px 0; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dial-seg .seg.on { --btn: var(--cyan); background: rgb(var(--btn) / 0.3); color: #8be9fd; }
+.dial-readout { margin-top: 12px; padding: 9px 11px; border-radius: 9px; background: rgb(var(--steel) / 0.1); border: 1px solid var(--hair); display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
+.dial-readout b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.dial-readout span { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.dial-readout.held { background: rgb(var(--cyan) / 0.08); border-color: rgb(var(--cyan) / 0.4); }
+.dial-readout.held b { color: #8be9fd; }
+
+/* Scorecard (7B): one row per probe, so flipping the dial and re-probing stacks the comparison. */
+.scorecard-actions { display: flex; gap: 8px; align-items: center; }
+.scorecard-actions .primary { flex: 1; width: auto; }
+.scorecard { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.scorecard th { text-align: right; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); font-weight: 700; padding: 4px 8px; border-bottom: 1px solid var(--hair); }
+.scorecard th:first-child { text-align: left; }
+.scorecard td { padding: 6px 8px; text-align: right; border-bottom: 1px solid rgb(var(--steel) / 0.08); }
+.scorecard td:first-child { text-align: left; font-weight: 600; color: var(--ink); }
+.scorecard td.ok { color: var(--ok-ink); font-weight: 700; }
+.scorecard td.no { color: var(--danger-ink); font-weight: 700; }
+.scorecard td.warn { color: rgb(var(--warn)); font-weight: 700; }
+.scorecard-note { margin: 10px 0 0; }
+
+/* Stats dial tile: the held setting reads in the strong/cyan colour. */
+.stat .v.held { color: #8be9fd; }
+
+/* Active-cut view: the two sides, side by side, split by scissors. */
+.cut-sides { display: flex; align-items: stretch; gap: 8px; margin-bottom: 12px; }
+.cut-side { flex: 1; padding: 9px 11px; border-radius: 10px; background: var(--well); border: 1px solid var(--hair); }
+.cut-side-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-bottom: 7px; }
+.cut-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.cut-divider { align-self: center; color: rgb(var(--warn)); font-size: 18px; }
+
+/* On-ring side tag while partitioned. */
+/* A|B labels before each side's owner run in the key table, under a cut. */
+.side-badge { font-size: 9px; font-weight: 800; letter-spacing: 0.5px; padding: 0 3px; margin: 0 2px 0 1px; border-radius: 3px; }
+.side-badge.side-a { color: rgb(var(--cyan)); background: rgb(var(--cyan) / 0.12); }
+.side-badge.side-b { color: rgb(var(--warn)); background: rgb(var(--warn) / 0.12); }
+
 
 /* The log grows without bound, so it scrolls. */
 .log { max-height: 640px; overflow-y: auto; display: flex; flex-direction: column; }
@@ -224,6 +348,14 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 /* cleanup is heal running backwards — the surplus copies a heal left behind — so it takes
    heal's green, muted: no client can observe it, and nothing is lost. */
 .tag.cleanup { --tag: var(--ok); --tag-ink: var(--ok-ink); }
+/* CAP events. cut breaks the network (warn), mend restores it (ok). refuse is availability
+   spent for consistency — the dial's CP "no" — so it borrows kill's red; conflict is divergence
+   surfaced (the louder amber a client can observe); repair is convergence, like a heal. */
+.tag.cut { --tag: var(--warn); --tag-ink: #ffe08a; }
+.tag.mend { --tag: var(--ok); --tag-ink: var(--ok-ink); }
+.tag.refuse { --tag: var(--danger); --tag-ink: var(--danger-ink); }
+.tag.conflict { --tag: var(--warn); --tag-ink: #ffd280; }
+.tag.repair { --tag: var(--ok); --tag-ink: var(--ok-ink); }
 
 /* One block = one fault plus the heal copies it caused, nested under it. */
 .block { border-bottom: 1px solid rgb(var(--steel) / 0.06); padding: 3px 0; }
@@ -318,6 +450,7 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
   button, .nrow button { padding: 9px 12px; font-size: 12px; }
   /* 16px is the threshold below which iOS Safari zooms in on focus and stays zoomed. */
   input { font-size: 16px; padding: 10px 11px; }
+  .via-select { font-size: 16px; padding: 10px 11px; }
 
   .log { max-height: 60vh; }
   .ev { flex-wrap: wrap; }

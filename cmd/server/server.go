@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -55,10 +56,12 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 
 	handle("POST /api/{cluster}/set", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		// Milliseconds, matching the ttlMs KeyState reports back. <= 0 or absent means
-		// the key never expires.
+		// the key never expires. Via names which node coordinates the write ("" = any live
+		// node); a via that is not live comes back as a 400 via coordStatus.
 		var body struct {
 			Key, Value string
-			TTLMs      int64 `json:"ttlMs"`
+			TTLMs      int64  `json:"ttlMs"`
+			Via        string `json:"via"`
 		}
 		if !readJSON(w, r, &body) {
 			return
@@ -71,8 +74,8 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 		if body.TTLMs > 0 {
 			ttl = time.Duration(body.TTLMs) * time.Millisecond
 		}
-		if err := c.Set(body.Key, body.Value, ttl); err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+		if err := c.Set(body.Key, body.Value, ttl, body.Via); err != nil {
+			writeErr(w, coordStatus(err), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -84,9 +87,11 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 			writeErr(w, http.StatusBadRequest, "key is required")
 			return
 		}
-		res, err := c.Get(key)
+		// via names which node coordinates the read ("" = any live node); a via naming a node
+		// that is not live is a 400, so reads on either side of a partition are deterministic.
+		res, err := c.Get(key, r.URL.Query().Get("via"))
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+			writeErr(w, coordStatus(err), err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -97,6 +102,8 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 			"primary":     res.Primary(),
 			"fallback":    res.Fallback(),
 			"path":        res.Path,
+			"conflict":    res.Conflict,
+			"siblings":    res.Siblings,
 		})
 	})
 
@@ -169,6 +176,51 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	// Cut splits the cluster in two so neither side can reach the other (data and health),
+	// the fault the CAP demo is built on. A via that is not a live node — here, any id on
+	// either side — is the caller's mistake, so coordStatus maps *NoSuchNodeError to a 400.
+	handle("POST /api/{cluster}/cut", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SideA []string `json:"sideA"`
+			SideB []string `json:"sideB"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if len(body.SideA) == 0 || len(body.SideB) == 0 {
+			writeErr(w, http.StatusBadRequest, "cut needs two non-empty sides")
+			return
+		}
+		if err := c.Cut(body.SideA, body.SideB); err != nil {
+			writeErr(w, coordStatus(err), err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	handle("POST /api/{cluster}/mend", func(c *cluster.Cluster, w http.ResponseWriter, _ *http.Request) {
+		c.Mend()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	// Quorum sets the consistency dial: W (write quorum) and R_read (read quorum). An out-of-range
+	// pair is the caller's mistake, so SetQuorum's error maps to a 400. W+R_read>R holds the ring
+	// and forbids stale reads (a partitioned side without a quorum refuses); otherwise it's eventual.
+	handle("POST /api/{cluster}/quorum", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			W     int `json:"w"`
+			RRead int `json:"rRead"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if err := c.SetQuorum(body.W, body.RRead); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "w": body.W, "rRead": body.RRead})
 	})
 
 	// A hint at the root, since the UI lives elsewhere. It names the clusters, so anyone
@@ -308,6 +360,19 @@ func nodeAction(fn func(*cluster.Cluster, string) error) clusterHandler {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
+}
+
+// coordStatus maps a coordinator-resolution failure to an HTTP status. Naming a via that is
+// not a live node is the caller's mistake — a 400 — and it must fail loudly, since a
+// deterministic coordinator is the whole reason via exists. Every other failure (no live node
+// at all, the coordinator unreachable mid-request) is the cluster's, not the request's, so it
+// stays a 502, matching the no-via behavior these handlers had before.
+func coordStatus(err error) int {
+	var nse *cluster.NoSuchNodeError
+	if errors.As(err, &nse) {
+		return http.StatusBadRequest
+	}
+	return http.StatusBadGateway
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

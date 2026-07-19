@@ -28,3 +28,5 @@ go.work.sum
 *.swp
 .DS_Store
 Thumbs.db
+
+LI Posts/

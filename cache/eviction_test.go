@@ -163,7 +163,7 @@ func TestEvictionProbeTracksCorpseDensity(t *testing.T) {
 		now := time.Now()
 		n := 0
 		for _, nd := range c.data {
-			if nd.expired(now) {
+			if nd.fullyExpired(now) {
 				n++
 			}
 		}
@@ -184,7 +184,7 @@ func TestEvictionProbeTracksCorpseDensity(t *testing.T) {
 			for i := range dead {
 				key := "dead:" + strconv.Itoa(i)
 				c.Set(key, "v", time.Hour)
-				c.data[key].expires = past
+				c.data[key].entries[0].Expires = past
 			}
 
 			if got := countExpired(c); got != dead {

@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { type NodeState } from '../api'
 import { ttlText } from '../format'
 import { useApi, useApiError } from '../hooks'
+import { CoordinatorSelect, liveVia } from './CoordinatorSelect'
 import { ErrorLine } from './ErrorLine'
 
 // TTL presets, in ms to match the ttlMs the dashboard reports back. 0 = never expires.
@@ -39,12 +41,13 @@ function parseSeedCount(raw: string): { n?: number; error?: string } {
   return { n }
 }
 
-export function WritePanel({ onAction }: { onAction: () => void }) {
+export function WritePanel({ nodes, onAction }: { nodes: NodeState[]; onAction: () => void }) {
   const [k, setK] = useState('')
   const [v, setV] = useState('')
   const [ttl, setTtl] = useState(0) // ms; 0 = never
   const [custom, setCustom] = useState(false)
   const [customMs, setCustomMs] = useState('')
+  const [via, setVia] = useState('') // coordinator node id; '' = auto
   const [seedCount, setSeedCount] = useState('8')
   const { seedKeys, setKey } = useApi()
   const { err, run, fail } = useApiError()
@@ -65,7 +68,7 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
     }
 
     // Only clear the inputs if the write landed, so a failure can be retried without retyping.
-    if (await run(() => setKey(k.trim(), v, ms))) {
+    if (await run(() => setKey(k.trim(), v, ms, liveVia(nodes, via)))) {
       setK('')
       setV('')
       onAction()
@@ -136,6 +139,8 @@ export function WritePanel({ onAction }: { onAction: () => void }) {
           </span>
         </div>
       )}
+
+      <CoordinatorSelect nodes={nodes} via={via} onVia={setVia} />
 
       <button className="primary" onClick={write}>
         Write key

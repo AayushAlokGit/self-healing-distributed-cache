@@ -1,7 +1,11 @@
 # CAP, partitions, and the consistency dial — Phase 7 design
 
-**Status: taught, not built.** Turns CAP from three letters into a *button a stranger can press* and a
-*table our cluster produces* (§12). The deliverable is numbers, not a diagram.
+**Status: Phase 7 BUILT & verified end-to-end (S18–S21, branch `cap-demo`).** 7.0 (two clusters), 7A (the cut,
+vector clocks, conflict-detecting read/heal/cleanup, the coordinator picker), **7B (the dial — `W`/`R_read` with
+a held ring, a `DialPanel` + `Scorecard`)**, and **read-repair-on-read** are all built and browser-verified.
+Turns CAP from three letters into a *button a stranger can press* and a *table our cluster produces* (§12). The
+deliverable is numbers, not a diagram. Where building caught up with (or corrected) the design, it's marked
+**⇒ AS BUILT** in place.
 
 > ⚠️ **Two things this doc deliberately does not say.** It does not call the strong end of the dial **"CP"** —
 > it is Cassandra's `QUORUM`, *stronger than eventual*, not *consistent* (§13). And the version scheme is a
@@ -24,6 +28,11 @@ keeps running perfectly — a cut cable, a firewall rule, a lost datacenter link
 
 So the cut belongs **under the HTTP clients** (`n.client`, `n.healthClient`), not as a flag in `Node`. No
 handler ever learns partitions exist — correct, because a partition is a property of the network, not a node.
+
+> **⇒ AS BUILT (7A):** `node.gate` — one mutex-guarded set of blocked peer addresses, **shared by both
+> clients**, that refuses a blocked peer in `RoundTrip` (so a keep-alive connection pooled before the cut is
+> refused too). `Cluster.Cut(sideA, sideB)` / `Mend` drive it; a blocked request fails fast, indistinguishable
+> from a dead node — exactly §2.
 
 ---
 
@@ -178,8 +187,12 @@ So a version has **two jobs**:
 ### Consistency is impossible without versions — not harder, impossible.
 Both branches of CAP dead-end at the same missing field: **CP needs it on every read** (pick the current
 value from overlapping replies — the staleness job, needed *even on a perfectly healthy cluster*);
-**AP needs it after a heal** (reconcile divergence — today the heal asks *"do you have it?"*, hears `200`,
-skips — `presence ≠ version`, flagged since S9).
+**AP needs it after a heal** (reconcile divergence).
+
+> **⇒ AS BUILT (7A):** the old heal asked *"do you have it?"*, heard `200`, and skipped — `presence ≠ version`,
+> flagged since S9. Now the **read**, the **heal**, and **cleanup** all reconcile by version: the read gathers
+> every owner and returns siblings; the heal picks a **per-version healer** (a stranded concurrent sibling
+> propagates); cleanup keeps a sibling no owner covers. The S9 gap is closed in all three.
 
 ### The clocks — one question hiding as two
 Stamp each write so reconciliation can order them. Three families, **not** equivalent:
@@ -290,19 +303,28 @@ being concurrent.** That is consensus. That is Raft. **Out of scope** (§13).
 Not a second system: **turn one dial and the same code behaves differently under an identical failure.**
 The difference is **two numbers**:
 
-| the dial | **keeps both** (eventual) | **refuses one** (quorum) | where it lives |
+| the dial | **keeps both** (eventual, `ONE`) | **refuses one** (`QUORUM`) | where it lives |
 |---|---|---|---|
-| **W** — acks before "done" | **1** | **2** | `defaultWriteQuorum` |
-| **R_read** — replies before a read answers | **1** *(first reachable hit)* | **2** | `handleClientGet`'s `break` |
+| **W** — acks before "done" | **1** | **2** | `defaultWriteQuorum` (`SetReplication`) |
+| **R_read** — owners a read asks before answering | **1** | **2** | `SetQuorum(w, rRead)` — **⇒ AS BUILT (7B)** |
 
 ⚠️ **Not "AP → CP."** The strong end is **Cassandra's `QUORUM`**, not a CP system (§13). It is *stronger than
 eventual*; it is not *consistent*.
+
+> **⇒ AS BUILT (7B):** `cluster.SetQuorum(w, rRead)` sets both numbers on every node (inherited by `wireAll`/
+> `Revive`), `POST /quorum` and a dashboard `DialPanel` drive it, and `State` reports `W`/`RRead`. The read
+> stayed **gather-all** and R_read is enforced as a **reachable-count threshold**: gather every reachable owner,
+> reconcile, then **refuse `503` if fewer than R_read answered** — *not* an early-stop after R_read hits.
+> Early-stop would miss a concurrent sibling on a later owner, and an unseen conflict is a silently-picked
+> winner, so it would break 7A's detection. The threshold keeps detection intact **and** still forbids a stale
+> read: with `R_read+W>R`, the R_read owners that answered must include a W-writer. `R_read=1` is byte-for-byte
+> 7A (there `answered==0` is the only sub-threshold case, already the 502).
 
 **What rides along** — implied by the setting, never chosen beside it:
 
 | | **keeps both** | **refuses one** | why |
 |---|---|---|---|
-| **ring drops silent nodes** | **yes** — re-route | **no** — the fixed denominator | §8. Quorum needs the ring held still or `W=2` is a rubber stamp; eventual needs the shrink to stay maximally available. `ring.Remove` in `heartbeatRound` |
+| **ring drops silent nodes** | **yes** — re-route | **no** — the fixed denominator | §8. **⇒ AS BUILT (7B):** `node.holdRing` gates `ring.Remove`/`Add` in `heartbeatRound`; `SetQuorum` sets it `= w+rRead>R`. Quorum needs the ring held or `W=2` is a rubber stamp; eventual needs the shrink to stay available. |
 
 **What is a prerequisite** — built once in 7A, and the dial never touches it:
 
@@ -335,9 +357,11 @@ satisfied by an invented set, and the quorum is a rubber stamp.
 
 ```
 READ:   owners := ring.Owners(key)          // held fixed at quorum, shrunk at eventual
-        ask owners in ring order until R_read successes, or run out
-        if successes < R_read:  503          // quorum refuses here; eventual (R_read=1) never gets here
-        return the reply whose vector dominates — or EVERY sibling, if none does
+        ask EVERY reachable owner, reconcile their versions   // gather-all, NOT early-stop (keeps detection)
+        if answered == 0:        502
+        if answered <  R_read:   503          // quorum refuses; eventual (R_read=1) never gets here
+        reply := the version that dominates — or EVERY sibling, if none does
+        read-repair: store reply back onto any reachable owner missing it   // §9, converges a lagging replica
 WRITE:  owners := ring.Owners(key)
         write to all; if acks < W: 503; else ack   // quorum refuses; eventual (W=1) never gets here
 ```
@@ -359,21 +383,25 @@ heal preserved divergence **forever** — that isn't a consistency level, it's t
 with a demo built on it. Versions are a prerequisite (§11), so they moved into 7A and the arc lost a step.
 `CAP_DEMO.md` is the demo spec.)*
 
-- **7.0 — a second cluster, a second tab. Nothing new to see.** This demo leaves the network cut for minutes
+- **7.0 — a second cluster, a second tab. Nothing new to see.** ✅ **DONE S17.** This demo leaves the network cut for minutes
   while you write to both sides; it cannot share a ring with the Phase 6 replication demo. **`cluster/` needs
   no changes** — nodes already bind `127.0.0.1:0` (the OS assigns ports, so two clusters can't collide) and
   there is **no package-level mutable state** to share (`HLD.md` §4, verified under `-race`). The work is
   `cmd/server` (a cluster map + an `/api/{cluster}/…` prefix) and the frontend. Ships as an empty second ring.
-- **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Let a
-  client pick its coordinator (`via=n0` / `via=n4`); every value gains a vector clock (§9). The heal stops
-  asking *"do you have it?"* and starts asking ***"did these two ever see each other?"*** — it **detects the
-  clash and keeps both**, then puts the two vectors on screen and asks *you*. Closes the S9 gap; read-repair
-  for free. A complete demo on its own.
-- **7B — the dial.** `W=2`, `R_read=2`, ring held fixed. Same cut, opposite behaviour: availability becomes
-  a property of the key, **no key served on both sides**, no clash to resolve — because the losing side
-  **refuses** with a `503` rather than accepting a write it can't reconcile, while the node holding the data
-  sits right there saying no. ⚠️ *Not* "no collisions ever" — healthy-network concurrency still collides
-  (§10), which is the demo's closing move.
+- **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** ✅ **DONE
+  S18–S19, verified E2E** (browser: cut `{n0,n2,n4}|{n1,n3}`, wrote `milk,eggs` via n0 and `milk,bread` via n3,
+  both accepted, mend, the heal kept both, a read showed the conflict card). A client picks its coordinator
+  (`via=n0` / `via=n4`); every value carries a vector clock (§9). The heal stopped asking *"do you have it?"*
+  and started asking ***"did these two ever see each other?"*** — it **detects the clash and keeps both**, then
+  puts the two values on screen and asks *you*. Closes the S9 gap. **⇒ Read-repair AS BUILT (S21):** the read now
+  also writes each surviving version back to any reachable owner missing it (`readRepair`), so a
+  lagging-but-alive replica converges **on the read**, not only on a membership-change heal — detection *and*
+  repair now.
+- **7B — the dial. ✅ DONE S21, verified E2E.** `W=2`, `R_read=2`, ring held fixed (`holdRing`). Same cut, opposite
+  behaviour: availability becomes a property of the key, **no key served on both sides**, no clash to resolve —
+  the losing side **refuses** with a `503` rather than accepting a write it can't reconcile, while the node
+  holding the data sits right there saying no. A `DialPanel` + `Scorecard` run the controlled experiment (below)
+  live. ⚠️ *Not* "no collisions ever" — healthy-network concurrency still collides (§10), the demo's closing move.
 
 **The deliverable — CAP as a measurement, not a definition** (worked run in `CAP_DEMO.md` §5: 5 keys, each
 written from both sides during one cut, 10 attempts):
@@ -390,7 +418,9 @@ written from both sides during one cut, 10 attempts):
 
 *This table measures the **partition** scenario. The strong setting shows 0 conflicts because the losing side
 refuses — **not** because quorum stops writes colliding: the §10 healthy-network case is separate, and quorum
-doesn't fix it.* Reproducible by a stranger with a button.
+doesn't fix it.* **⇒ AS BUILT (7B):** the dashboard **Scorecard** produces this table live — one probe row per
+dial setting under the current cut — and it was browser-verified S21 (QUORUM `5/5/0`, ONE `10/0/5`, the same
+five writes). A stranger reproduces it with a button.
 
 ---
 
@@ -411,6 +441,12 @@ leader + CAS / replicated log          →  LINEARIZABLE         (Raft) — stop
 That's the whole difference: rungs 1–2 argue about what to do *after* a clash; rung 3 removes the clash.
 **Detection is the ceiling of any clock (§9); only serialization is above it.**
 
+**Convergence, what's built vs not.** **⇒ AS BUILT (S21): read-repair-on-read** — a read writes each surviving
+version back to any reachable owner missing it, so a *lagging-but-alive* replica converges on read traffic. It is
+**read-triggered, not periodic**: a key nobody reads never repairs. The two heavier cousins stay unbuilt on
+purpose — **hinted handoff** (queue a write for a down owner; below) and **Merkle-tree anti-entropy** (a
+continuous background scan that reconciles even cold keys; our event-driven heal is its poorer cousin).
+
 Also missing, named not hidden:
 - **Tombstones** (`HLD.md` §7) — a delete is not a value, so heal can't tell *deleted* from *missing*.
 - **Hinted handoff** — a write to a down owner is dropped, not queued.
@@ -429,6 +465,12 @@ Also missing, named not hidden:
    **even on a perfectly healthy network?**
    *(gives read/write overlap ⇒ no stale reads + only one side writes; costs write fault-tolerance — `W=1`
    survives 2 owners down, `W=2` survives 1; **yes, paid every ordinary day.**)*
+   > **Aayush's reframing (S17), which is better than the above.** "Fault-tolerance" makes `W=1` sound like a
+   > free win. It isn't: the write that survives two deaths lives on **one node**, and dies with it. So —
+   > **`W` is how much a `204` is worth.** An ack at `W=1` means *one machine has this*; at `W=2`, *two
+   > machines have this*. `W=1` says yes more often and each yes means less; `W=2` says yes less often and
+   > each yes means more. It is not availability vs *consistency* here, it is availability vs **durability**,
+   > and you pay it on the healthy path.
 2. **What a vector clock does NOT fix.** Side A writes `bob`, side B writes `carol` — concurrent. The vector
    clock finds that neither dominates and keeps both. What did it fix, what did it **not**, and **who decides
    now, on what basis?**

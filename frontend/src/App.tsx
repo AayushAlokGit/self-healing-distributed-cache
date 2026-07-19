@@ -1,9 +1,12 @@
 import { useMemo, useState } from 'react'
-import { API_BASE, createApi, type State } from './api'
+import { API_BASE, createApi, type Partition, type State } from './api'
 import { ActivityLog } from './components/ActivityLog'
+import { DialPanel } from './components/DialPanel'
 import { KeyTable } from './components/KeyTable'
 import { NodePanel } from './components/NodePanel'
+import { PartitionPanel } from './components/PartitionPanel'
 import { ReadPanel } from './components/ReadPanel'
+import { Scorecard } from './components/Scorecard'
 import { RingViz } from './components/RingViz'
 import { Stats } from './components/Stats'
 import { WritePanel } from './components/WritePanel'
@@ -32,15 +35,43 @@ const TABS: readonly Tab[] = [
     id: 'replication',
     label: 'Replication & Self-Heal',
     blurb: (s) =>
-      `Consistent-hash ring · R=${s.rf} replication · heartbeat failure detection · automatic re-replication`,
+      `Failure mode: nodes die. Heartbeats give each node its own view of who is alive; a heal loop restores R=${s.rf} copies. A death costs only staleness — there is one truth to copy.`,
   },
   {
     id: 'cap',
-    label: 'CAP & Partitions',
+    label: 'Partitions & Conflicts',
     blurb: () =>
-      'The same ring, on its own cluster. Network-cut controls and the consistency dial land next — for now, kill a node here and the other tab never notices.',
+      'Failure mode: the network splits — both sides keep serving, so one key can take two concurrent writes (divergence, not staleness). Vector clocks detect the clash and keep both as siblings for the client to resolve.',
   },
+  // {
+  //   id: 'consistency',
+  //   label: 'Consistency Dial',
+  //   blurb: (s) =>
+  //     `The same cut, tuned. Raise the dial so W + R_read > R (=${s.rf}) and the ring is held: the losing side of a cut REFUSES rather than diverging — availability spent for consistency. Cut the network, set a dial, and let the scorecard measure the trade.`,
+  // },
 ]
+
+// sideState carves one side of a cut out of the god's-eye snapshot into a self-contained State,
+// so a plain RingViz can draw that side as the independent cluster it actually is. A side sees
+// every alive node EXCEPT the far side (an unassigned bridge node is reachable by both, so it
+// shows on both) — matching the backend's per-side ring. Owners come from that side's ring
+// (ownersA/ownersB), holders are filtered to nodes this side can reach, and only keys this side
+// actually holds are shown. aliveCount is the side's own count: from here, the far side is dead.
+function sideState(state: State, partition: Partition, side: 'a' | 'b'): State {
+  const far = new Set(side === 'a' ? partition.sideB : partition.sideA)
+  const nodes = state.nodes.filter((n) => n.alive && !far.has(n.id))
+  const near = new Set(nodes.map((n) => n.id))
+  const vnodes = side === 'a' ? partition.vnodesA : partition.vnodesB
+  const want = Math.min(state.rf, nodes.length)
+  const keys = state.keys
+    .map((k) => {
+      const owners = (side === 'a' ? k.ownersA : k.ownersB) ?? k.owners
+      const holders = k.holders.filter((h) => near.has(h))
+      return { ...k, owners, holders, ownersA: undefined, ownersB: undefined, underReplicated: holders.length > 0 && holders.length < want }
+    })
+    .filter((k) => k.holders.length > 0)
+  return { ...state, nodes, keys, vnodes, aliveCount: nodes.length }
+}
 
 export default function App() {
   const [activeId, setActiveId] = useState<string>(TABS[0].id)
@@ -77,6 +108,15 @@ export default function App() {
 function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void }) {
   const { state, prev, connected, refresh } = useClusterState()
 
+  // The active cut now comes from /state: the server is the source of truth, so a reload
+  // keeps the banner and the split ring. (It used to be client-only React state, which a
+  // refresh forgot while the backend cut stayed live.) Null on the replication tab, whose
+  // cluster is never cut.
+  const partition = state?.partition ?? null
+  // Both the partition and the dial demos cut the network; only the dial demo tunes W/R_read.
+  const canCut = tab.id === 'cap' || tab.id === 'consistency'
+  const isDial = tab.id === 'consistency'
+
   return (
     <>
       <header>
@@ -84,6 +124,10 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           <h1>
             Self-Healing <span className="accent">Distributed Cache</span>
           </h1>
+          <p className="identity">
+            A leaderless, <strong>Dynamo-style AP (prioritizes availability) key value store</strong>. Each tab demos a distributed-systems failure
+            mode — and how the cluster survives it.
+          </p>
           <nav className="tabs" role="tablist">
             {TABS.map((t) => (
               <button
@@ -99,7 +143,7 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           </nav>
           {state && <p>{tab.blurb(state)}</p>}
         </div>
-        {state && <Stats state={state} prev={prev} />}
+        {state && <Stats state={state} prev={prev} showDial={isDial} />}
       </header>
 
       {/* Two different readers. Locally, "unreachable" means you forgot to start the backend.
@@ -115,16 +159,51 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           <div className="offline-badge">⚠ backend unreachable — is `go run ./cmd/server` running?</div>
         ))}
 
+      {partition && (
+        <div className="partition-banner">
+          <span className="bolt">✂</span>
+          <b>NETWORK PARTITIONED</b>
+          <span className="detail">
+            Side A ({partition.sideA.join(', ')}) and Side B ({partition.sideB.join(', ')}) cannot
+            hear each other — both keep serving.
+          </span>
+        </div>
+      )}
+
       {state ? (
         <div className="grid">
           <div className="left">
-            <RingViz state={state} prev={prev} />
-            <KeyTable keys={state.keys} onAction={refresh} />
+            {partition ? (
+              <div className="split-stage">
+                <RingViz
+                  state={sideState(state, partition, 'a')}
+                  prev={prev ? sideState(prev, partition, 'a') : null}
+                  sideLabel="Side A"
+                />
+                <RingViz
+                  state={sideState(state, partition, 'b')}
+                  prev={prev ? sideState(prev, partition, 'b') : null}
+                  sideLabel="Side B"
+                />
+              </div>
+            ) : (
+              <RingViz state={state} prev={prev} />
+            )}
+            <div className="io-row">
+              <WritePanel nodes={state.nodes} onAction={refresh} />
+              <ReadPanel nodes={state.nodes} />
+            </div>
+            <KeyTable keys={state.keys} partition={partition} onAction={refresh} />
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
-            <WritePanel onAction={refresh} />
-            <ReadPanel />
+            {canCut && <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />}
+            {isDial && (
+              <>
+                <DialPanel state={state} onAction={refresh} />
+                <Scorecard state={state} onAction={refresh} />
+              </>
+            )}
             <ActivityLog events={state.events} />
           </div>
         </div>

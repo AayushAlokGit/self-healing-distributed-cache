@@ -20,6 +20,11 @@ export interface KeyState {
   // Remaining life in ms; -1 means the key never expires. The server sends the remainder,
   // not a deadline, so the countdown never depends on the browser's clock.
   ttlMs: number
+  // Under an active cut, the owners as each side sees them — each side rings only its own
+  // reachable nodes, so a key can have a different owner per side. Absent when the network
+  // is whole; then `owners` (the single alive ring) is authoritative.
+  ownersA?: string[]
+  ownersB?: string[]
 }
 
 // One owner's outcome during a read. Rank 0 is the primary; the rest are its replicas.
@@ -42,11 +47,38 @@ export interface ReadResult {
   primary?: string
   fallback?: boolean
   path?: ReadHop[]
+  // A conflict: two writes on opposite sides of a network cut never saw each other, so the
+  // cache kept BOTH as concurrent siblings (vector-clock concurrent versions) rather than
+  // picking a winner. On a conflict read, `value` is empty and `siblings` holds every value;
+  // absent/false means the ordinary single-value case, where `value` is authoritative.
+  conflict?: boolean
+  // The concurrent values, present only when conflict is true. Length is always >= 2: one
+  // value is not a conflict. `found` stays true — the key exists, it just has more than one
+  // value — so a conflict is a hit, not a miss.
+  siblings?: string[]
 }
 
 export interface VNode {
   angle: number
   node: string
+}
+
+// A network cut splits the live nodes into two sides that cannot hear each other. This shape
+// mirrors the /cut request body (what the panel sends).
+export interface Cut {
+  sideA: string[]
+  sideB: string[]
+}
+
+// Partition is the ACTIVE cut as /state reports it, so the banner and split ring survive a
+// reload — the server, not the dashboard, is now the source of truth for whether a cut is
+// live. vnodesA/vnodesB are each side's ring points: a side rings only what it can reach, so
+// the two disagree about who owns which arc, and that is exactly what the split ring draws.
+export interface Partition {
+  sideA: string[]
+  sideB: string[]
+  vnodesA: VNode[]
+  vnodesB: VNode[]
 }
 
 // One entry in the activity log, in causal order. from/to/keys/cause are set on
@@ -66,9 +98,15 @@ export interface State {
   keys: KeyState[]
   vnodes: VNode[]
   rf: number
+  // The consistency dial. w + rRead > rf ⇒ no stale reads and the ring is held (a partitioned
+  // side without a quorum refuses); otherwise eventual (both sides of a cut serve on).
+  w: number
+  rRead: number
   aliveCount: number
   totalHealCopies: number
   events: ClusterEvent[]
+  // Present only while the network is cut; absent/null means whole.
+  partition?: Partition | null
 }
 
 // Where the cluster lives. Empty in dev: Vite proxies /api to :8080, so it is same-origin
@@ -126,19 +164,34 @@ export function createApi(cluster: string) {
       const res = await ok(await fetch(base + '/state'), 'state')
       const s = await res.json()
       // Go marshals a nil slice as null, so default every array or the UI blanks.
-      return { ...s, nodes: s.nodes ?? [], keys: s.keys ?? [], vnodes: s.vnodes ?? [], events: s.events ?? [] }
+      return { ...s, nodes: s.nodes ?? [], keys: s.keys ?? [], vnodes: s.vnodes ?? [], events: s.events ?? [], w: s.w ?? 1, rRead: s.rRead ?? 1 }
     },
 
-    async getKey(key: string): Promise<ReadResult> {
-      const res = await ok(await fetch(base + '/get?key=' + encodeURIComponent(key)), `read ${key}`)
+    // via picks the coordinator node; omit or empty means auto (the backend picks any live node).
+    async getKey(key: string, via?: string): Promise<ReadResult> {
+      let q = '/get?key=' + encodeURIComponent(key)
+      if (via) q += '&via=' + encodeURIComponent(via)
+      const res = await ok(await fetch(base + q), `read ${key}`)
       return res.json()
     },
 
     killNode: (id: string) => post<void>('/kill', { id }, `kill ${id}`),
     reviveNode: (id: string) => post<void>('/revive', { id }, `revive ${id}`),
 
-    // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs.
-    setKey: (key: string, value: string, ttlMs: number) => post<void>('/set', { key, value, ttlMs }, `write ${key}`),
+    // Split the cluster in two: neither side hears the other, both keep serving. The backend
+    // 400s on an empty side, a node that isn't currently alive/known, or one named on both
+    // sides — surfaced verbatim on the panel's error line. mend clears whatever cut is active.
+    cut: (sideA: string[], sideB: string[]) => post<void>('/cut', { sideA, sideB }, 'cut network'),
+    mend: () => post<void>('/mend', {}, 'mend network'),
+
+    // The consistency dial: W (write quorum) and R_read (read quorum), cluster-wide. The backend
+    // 400s an out-of-range pair (each must be in [1, R]). w+rRead>R holds the ring, no stale reads.
+    setQuorum: (w: number, rRead: number) => post<void>('/quorum', { w, rRead }, 'set quorum'),
+
+    // ttlMs <= 0 means the key never expires. Same unit as KeyState.ttlMs. via picks the
+    // coordinator node; omit or empty means auto (the backend picks any live node).
+    setKey: (key: string, value: string, ttlMs: number, via?: string) =>
+      post<void>('/set', via ? { key, value, ttlMs, via } : { key, value, ttlMs }, `write ${key}`),
     seedKeys: (n: number) => post<void>('/seed', { n }, `seed ${n} keys`),
 
     // POST, not DELETE: the control API allows GET/POST only, so a DELETE fails the browser's

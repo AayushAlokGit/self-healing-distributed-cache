@@ -8,6 +8,7 @@ package cluster
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,6 +43,7 @@ type Cluster struct {
 	mu           sync.Mutex
 	ids          []string
 	rf, wq       int
+	rrq          int // read quorum (R_read); with wq, the no-stale-read dial. 1 = gather-all default
 	grace        time.Duration
 	ringReplicas int
 	nodes        map[string]*node.Node // live nodes only; a killed id is absent
@@ -57,6 +59,14 @@ type Cluster struct {
 	// Time means the key never expires. See State.
 	deadlines map[string]time.Time
 
+	// cutA/cutB are the two sides of the active partition, nil when the network is whole.
+	// This is the ONLY place the cut is remembered as human-readable sides: the nodes hold
+	// it as opaque blocked-address sets (node.gate), and reporting it in State needs the ids.
+	// The manager may hold this view precisely because it INJECTED the cut — no node has it
+	// (a node only knows "I can't reach peer X"), which is docs/HLD §9's "no god's-eye view"
+	// landing as a code fact. See Cut/Mend and State.
+	cutA, cutB []string
+
 	// log is the durable server log, distinct from events above. Discards until
 	// SetLogger. Atomic because Set and Get read it without holding c.mu.
 	log atomic.Pointer[slog.Logger]
@@ -68,7 +78,7 @@ type Cluster struct {
 // From/To/Keys/Cause are set on heal events only.
 type Event struct {
 	ID   uint64 `json:"id"`
-	Kind string `json:"kind"` // kill | revive | pause | resume | set | read | seed | delete | clear | info | heal | cleanup | expire | reclaim
+	Kind string `json:"kind"` // kill | revive | pause | resume | cut | mend | set | read | refuse | conflict | seed | delete | clear | info | heal | cleanup | repair | expire | reclaim
 	Msg  string `json:"msg"`
 
 	From  string   `json:"from,omitempty"`  // heal: the sender. reclaim/cleanup: the node that freed the memory
@@ -83,6 +93,7 @@ func New(rf, wq int, grace time.Duration, ids ...string) *Cluster {
 		ids:          ids,
 		rf:           rf,
 		wq:           wq,
+		rrq:          1, // R_read=1 until SetQuorum; ring stays AP (holdRing false) by default
 		grace:        grace,
 		ringReplicas: demoRingReplicas,
 		nodes:        make(map[string]*node.Node, len(ids)),
@@ -135,6 +146,7 @@ func (c *Cluster) Start() error {
 		"nodes", len(c.ids),
 		"replication_factor", c.rf,
 		"write_quorum", c.wq,
+		"read_quorum", c.rrq,
 		"grace", c.grace,
 	)
 	return nil
@@ -149,8 +161,41 @@ func (c *Cluster) wireAll() {
 		n.SetRingReplicas(c.ringReplicas) // before SetMembership, which builds the ring
 		n.SetMembership(peers)
 		n.SetReplication(c.rf, c.wq)
+		n.SetReadQuorum(c.rrq)
+		n.SetHoldRing(c.wq+c.rrq > c.rf)
 		n.SetHealGracePeriod(c.grace)
 	}
+}
+
+// SetQuorum sets the write quorum W and read quorum R_read for every live node, and for nodes
+// revived later. Validated: 1<=w<=rf and 1<=rRead<=rf (W>R is impossible). The PAIR decides
+// consistency: w+rRead>rf forces the write-set and read-set to overlap (no stale read) AND holds
+// the ring fixed, so a partitioned side that cannot reach a quorum refuses instead of re-owning
+// the keyspace among its survivors (which would satisfy W trivially — a rubber stamp). Otherwise
+// the ring keeps dropping silent peers and both sides serve on (eventual, AP). This is the only
+// cluster/ change Phase 7 asks for: rf and the ring behavior are fixed at New() otherwise.
+func (c *Cluster) SetQuorum(w, rRead int) error {
+	if w < 1 || w > c.rf {
+		return fmt.Errorf("write quorum %d out of range [1,%d]", w, c.rf)
+	}
+	if rRead < 1 || rRead > c.rf {
+		return fmt.Errorf("read quorum %d out of range [1,%d]", rRead, c.rf)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wq, c.rrq = w, rRead
+	hold := w+rRead > c.rf
+	for _, n := range c.nodes {
+		n.SetReplication(c.rf, w)
+		n.SetReadQuorum(rRead)
+		n.SetHoldRing(hold)
+	}
+	mode := "eventual — the ring drops silent peers, both sides of a cut serve on"
+	if hold {
+		mode = "no stale reads — the ring is held, so a partitioned side without a quorum refuses"
+	}
+	c.logf("info", "quorum set: W=%d, R_read=%d (W+R_read=%d vs R=%d → %s)", w, rRead, w+rRead, c.rf, mode)
+	return nil
 }
 
 // Kill closes a node. Its peers keep it in their known-peer map and must discover
@@ -209,6 +254,8 @@ func (c *Cluster) Revive(id string) error {
 	n.SetRingReplicas(c.ringReplicas)
 	n.SetMembership(peers)
 	n.SetReplication(c.rf, c.wq)
+	n.SetReadQuorum(c.rrq)
+	n.SetHoldRing(c.wq+c.rrq > c.rf) // a revived node inherits the current dial, not the AP default
 	n.SetHealGracePeriod(c.grace)
 	for pid, peer := range c.nodes {
 		if pid != id {
@@ -245,16 +292,111 @@ func (c *Cluster) Pause(id string, paused bool) error {
 	return nil
 }
 
-// Set writes a key through a live node; any node can coordinate. A ttl of 0 means
-// the key never expires. Errors if no node is up.
+// Cut installs a network partition: no node on sideA can reach any node on sideB, for data
+// and health alike, and the reverse. Neither side crashes — each keeps running, stops hearing
+// the other's heartbeats, convicts it, shrinks its ring to its own members, and serves
+// independently. That divergence is the whole CAP demo (CAP.md §2–3): the same key can then be
+// written on both sides, and because neither coordinator could see the other's write, the two
+// come out vector-clock CONCURRENT and are both kept on the heal.
+//
+// Every named id must be a live node (a killed or unknown id is a *NoSuchNodeError, mapped to a
+// 400 by the control API) and the two sides must be disjoint; a node named in neither side is
+// simply left reachable by both. Addresses are resolved up front so a bad id fails the whole
+// cut rather than half-applying it. Log an activity event like Kill/Pause do. Mend clears it.
+//
+// The cut is symmetric even though each node blocks only its OWN outgoing traffic: A refuses to
+// dial B and B refuses to dial A, so every A<->B pair is dead both ways (see node.SetBlockedPeers).
+func (c *Cluster) Cut(sideA, sideB []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	seen := make(map[string]bool, len(sideA)+len(sideB))
+	for _, id := range append(append([]string{}, sideA...), sideB...) {
+		if seen[id] {
+			return fmt.Errorf("node %s named on both sides of the cut", id)
+		}
+		seen[id] = true
+	}
+
+	addrsA, err := c.addrsForLocked(sideA)
+	if err != nil {
+		return err
+	}
+	addrsB, err := c.addrsForLocked(sideB)
+	if err != nil {
+		return err
+	}
+
+	// Each side's nodes block the opposite side's addresses.
+	for _, id := range sideA {
+		c.nodes[id].SetBlockedPeers(addrsB)
+	}
+	for _, id := range sideB {
+		c.nodes[id].SetBlockedPeers(addrsA)
+	}
+
+	// Remember the sides so State can report the partition (the banner survives a reload,
+	// and each side's ring can be drawn as it actually is). Copy the slices — the caller
+	// still owns theirs. A cut on top of a cut just replaces the record, which matches the
+	// nodes: SetBlockedPeers overwrote, it did not union.
+	c.cutA = append([]string{}, sideA...)
+	c.cutB = append([]string{}, sideB...)
+
+	c.logf("cut", "cut the network: {%s} | {%s} — neither side can hear the other, so each convicts the far side and serves alone",
+		strings.Join(sideA, ","), strings.Join(sideB, ","))
+	c.logger().Warn("network partitioned (fault injected)",
+		"side_a", strings.Join(sideA, ","),
+		"side_b", strings.Join(sideB, ","),
+	)
+	return nil
+}
+
+// Mend heals a cut: every live node's block set is cleared, so all peers can reach each other
+// again. Within a failure timeout the heartbeat re-admits the far side, the ring grows back,
+// and the heal reconciles what diverged — keeping any concurrent siblings written on both
+// sides (CAP.md §9). Idempotent: mending an uncut cluster clears nothing.
+func (c *Cluster) Mend() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, n := range c.nodes {
+		n.SetBlockedPeers(nil)
+	}
+	c.cutA, c.cutB = nil, nil
+	c.logf("mend", "mended the network — both sides can talk again; the heal will reconcile what diverged")
+	c.logger().Info("network partition healed", "nodes", len(c.nodes))
+}
+
+// addrsForLocked resolves each id to its live node's address, refusing with *NoSuchNodeError
+// the moment one is not currently a live node — the same rule as coordAddrLocked, since a cut
+// against a dead node is as meaningless as coordinating through one. Caller holds c.mu.
+func (c *Cluster) addrsForLocked(ids []string) ([]string, error) {
+	addrs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, live := c.nodes[id]; !live {
+			return nil, &NoSuchNodeError{ID: id}
+		}
+		addrs = append(addrs, c.addrs[id])
+	}
+	return addrs, nil
+}
+
+// Set writes a key through a live node. via names which node coordinates: "" keeps the
+// old behavior (any live node), a node id routes the write through exactly that node — the
+// partition demo drives one write through n0 and another through n3, and needs to choose.
+// A via that is not a live node is an error (see coordAddrLocked). A ttl of 0 means the key
+// never expires. Errors if no node is up.
 //
 // The ttl travels as a duration only on this first hop: the coordinator turns it into
 // an absolute deadline, and every replica and heal copy gets that same instant.
-func (c *Cluster) Set(key, value string, ttl time.Duration) error {
+func (c *Cluster) Set(key, value string, ttl time.Duration, via string) error {
 	start := time.Now()
 	c.mu.Lock()
-	coord := c.anyLiveAddrLocked()
+	coord, err := c.coordAddrLocked(via)
 	c.mu.Unlock()
+	if err != nil {
+		c.logger().Warn("write dropped: named coordinator is not live", "key", key, "via", via, "err", err)
+		return err
+	}
 	if coord == "" {
 		c.logger().Error("write dropped: no live node to coordinate it", "key", key)
 		return fmt.Errorf("no live node to coordinate the write")
@@ -275,9 +417,18 @@ func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		c.logger().Error("write rejected by coordinator", "key", key, "coordinator", coord, "status", resp.StatusCode)
+		reason := strings.TrimSpace(string(body))
+		c.logger().Error("write rejected by coordinator", "key", key, "coordinator", coord, "status", resp.StatusCode, "reason", reason)
+		// A 503 is the dial's CP refusal (fewer than W owners reachable): narrate it, so the log
+		// shows availability being spent for consistency. Other statuses (a bad via → 400) are the
+		// caller's error, not a cluster-behaviour event.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			c.mu.Lock()
+			c.logf("refuse", "write to %q via %s refused — %s (it won't accept a write it can't make durable on a quorum)", key, coordName(via), reason)
+			c.mu.Unlock()
+		}
 		return fmt.Errorf("set %s: status %d", key, resp.StatusCode)
 	}
 
@@ -290,9 +441,9 @@ func (c *Cluster) Set(key, value string, ttl time.Duration) error {
 		// with the coordinator's authoritative instant; in-process, they differ by the
 		// length of one HTTP hop.
 		c.deadlines[key] = time.Now().Add(ttl)
-		c.logf("set", "wrote %q via a coordinator, expiring in %s", key, ttl)
+		c.logf("set", "wrote %q via %s, expiring in %s", key, coordName(via), ttl)
 	} else {
-		c.logf("set", "wrote %q via a coordinator", key)
+		c.logf("set", "wrote %q via %s", key, coordName(via))
 	}
 	c.mu.Unlock()
 	c.logger().Debug("write ok", "key", key, "coordinator", coord, "ttl", ttl, "took", time.Since(start).Round(time.Millisecond))
@@ -320,6 +471,11 @@ type ReadResult struct {
 	Coordinator string    `json:"coordinator,omitempty"`
 	ServedBy    string    `json:"servedBy,omitempty"`
 	Path        []ReadHop `json:"path,omitempty"`
+	// Conflict is set when the owners hold concurrent siblings the read could not collapse to
+	// one: two writes that never saw each other, both kept. Siblings then carries every value
+	// and Value is empty — there is no single answer to put there.
+	Conflict bool     `json:"conflict,omitempty"`
+	Siblings []string `json:"siblings,omitempty"`
 }
 
 // Primary is the node the ring says should hold this key: the first owner clockwise.
@@ -362,13 +518,20 @@ func parseReadPath(s string) []ReadHop {
 	return hops
 }
 
-// Get reads a key through a live node. Found is false on a clean miss; err is set
-// only when no node could serve it.
-func (c *Cluster) Get(key string) (ReadResult, error) {
+// Get reads a key through a live node. via names which node coordinates: "" picks any live
+// node (the old behavior), a node id routes the read through exactly that node, so the
+// reported Coordinator is deterministic — reading one side of a partition means naming the
+// node on that side. A via that is not a live node is an error (see coordAddrLocked). Found
+// is false on a clean miss; err is set only when no node could serve it.
+func (c *Cluster) Get(key, via string) (ReadResult, error) {
 	start := time.Now()
 	c.mu.Lock()
-	coord := c.anyLiveAddrLocked()
+	coord, err := c.coordAddrLocked(via)
 	c.mu.Unlock()
+	if err != nil {
+		c.logger().Warn("read dropped: named coordinator is not live", "key", key, "via", via, "err", err)
+		return ReadResult{}, err
+	}
 	if coord == "" {
 		c.logger().Error("read dropped: no live node to coordinate it", "key", key)
 		return ReadResult{}, fmt.Errorf("no live node to coordinate the read")
@@ -391,6 +554,22 @@ func (c *Cluster) Get(key string) (ReadResult, error) {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		// A conflict comes back as a JSON array of siblings under X-Conflict, not a plain
+		// value: the coordinator found concurrent versions and refused to pick one.
+		if resp.Header.Get(node.ConflictHeader) != "" {
+			if err := json.Unmarshal(body, &res.Siblings); err != nil {
+				c.logger().Error("read: malformed conflict body", "key", key, "err", err)
+				return ReadResult{}, fmt.Errorf("get %s: bad conflict body: %w", key, err)
+			}
+			res.Conflict, res.Found = true, true
+			c.mu.Lock()
+			c.logf("conflict", "read of %q surfaced %d concurrent siblings (%s) — writes that never saw each other, both kept",
+				key, len(res.Siblings), strings.Join(res.Siblings, " | "))
+			c.mu.Unlock()
+			c.logger().Debug("read hit conflict", "key", key, "coordinator", res.Coordinator,
+				"siblings", len(res.Siblings), "took", took)
+			return res, nil
+		}
 		res.Value, res.Found = string(body), true
 		if res.Fallback() {
 			c.mu.Lock()
@@ -405,8 +584,15 @@ func (c *Cluster) Get(key string) (ReadResult, error) {
 		c.logger().Debug("read miss", "key", key, "took", took)
 		return res, nil
 	default:
-		c.logger().Error("read failed: all owners unreachable",
-			"key", key, "coordinator", coord, "status", resp.StatusCode, "took", took)
+		reason := strings.TrimSpace(string(body))
+		c.logger().Error("read failed", "key", key, "coordinator", coord, "status", resp.StatusCode, "reason", reason, "took", took)
+		// 503 is the dial's CP refusal (fewer than R_read owners answered); 502 is every owner
+		// unreachable — a different fact, not a consistency choice, so only the 503 narrates.
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			c.mu.Lock()
+			c.logf("refuse", "read of %q via %s refused — %s (it won't answer without a quorum that guarantees the latest write)", key, coordName(via), reason)
+			c.mu.Unlock()
+		}
 		return ReadResult{}, fmt.Errorf("get %s: status %d", key, resp.StatusCode)
 	}
 }
@@ -428,8 +614,9 @@ func (c *Cluster) Seed(n int) error {
 
 	start := time.Now()
 	for i := first; i < first+n; i++ {
-		// ttl 0: seeded keys are permanent, so the ring never empties itself mid-demo.
-		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i), 0); err != nil {
+		// ttl 0: seeded keys are permanent, so the ring never empties itself mid-demo. via ""
+		// lets any live node coordinate — seeding is not a per-node demo, it just fills the ring.
+		if err := c.Set(fmt.Sprintf("key:%d", i), fmt.Sprintf("v%d", i), 0, ""); err != nil {
 			c.logger().Error("seed stopped early: a write failed",
 				"key", fmt.Sprintf("key:%d", i), "seeded_so_far", i-first, "err", err)
 			return err
@@ -576,6 +763,34 @@ func (c *Cluster) Close() {
 	c.logger().Info("cluster stopped", "nodes_stopped", stopped)
 }
 
+// NoSuchNodeError is returned when a caller names a coordinator (via) that is not a
+// currently live node — either killed or never part of this cluster. It is a distinct type,
+// not a bare fmt.Errorf, so a handler can tell "you asked for a node that isn't there" (a
+// 400: the request named something bad) apart from "the cluster is down" (a 502: the request
+// was fine). The whole point of via is determinism, so a dead name must fail loudly rather
+// than fall back to another node.
+type NoSuchNodeError struct{ ID string }
+
+func (e *NoSuchNodeError) Error() string { return "no such live node: " + e.ID }
+
+// coordAddrLocked resolves which live node's address should coordinate a request. Empty via
+// keeps the old behavior: anyLiveAddrLocked picks the first live node, and its address — or
+// "" when the whole cluster is down — comes straight back with a nil error. A non-empty via
+// names a specific coordinator and must resolve to a node that is live RIGHT NOW: c.nodes
+// holds only live nodes (a kill deletes the id, a revive re-adds it), so a via absent from it
+// is killed or unknown, and we refuse with *NoSuchNodeError rather than silently pick someone
+// else. c.addrs is keyed by every known id, live or not, so it is safe to read once liveness
+// is confirmed. Caller holds c.mu.
+func (c *Cluster) coordAddrLocked(via string) (string, error) {
+	if via == "" {
+		return c.anyLiveAddrLocked(), nil
+	}
+	if _, alive := c.nodes[via]; !alive {
+		return "", &NoSuchNodeError{ID: via}
+	}
+	return c.addrs[via], nil
+}
+
 // anyLiveAddrLocked returns some live node's address, deterministically. Caller
 // holds c.mu.
 func (c *Cluster) anyLiveAddrLocked() string {
@@ -588,6 +803,15 @@ func (c *Cluster) anyLiveAddrLocked() string {
 	}
 	sort.Strings(live)
 	return c.addrs[live[0]]
+}
+
+// coordName is the coordinator label for an event: the named via, or "a coordinator" when the
+// caller let any live node take it (via=="").
+func coordName(via string) string {
+	if via == "" {
+		return "a coordinator"
+	}
+	return via
 }
 
 // logf appends an event to the dashboard's activity strip, and mirrors it into the

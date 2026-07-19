@@ -9,6 +9,7 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cache"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
+	"github.com/AayushAlokGit/self-healing-distributed-cache/vclock"
 )
 
 // forwardTimeout bounds a node-to-node call, so a dead owner fails fast instead of
@@ -37,6 +39,11 @@ const (
 	// Acks required before a write returns to the client. W=1 favors availability;
 	// larger W trades latency for durability. W>R is impossible.
 	defaultWriteQuorum = 1
+
+	// Owners that must answer a read before it returns. R_read=1 is 7A's behavior (gather
+	// every reachable owner, reconcile, return if anyone answered). R_read+W>R is what forces
+	// the read-set and write-set to overlap, so a read cannot miss a completed write.
+	defaultReadQuorum = 1
 
 	// How often a node pings every peer's /health.
 	defaultHeartbeatInterval = 100 * time.Millisecond
@@ -67,13 +74,27 @@ type Node struct {
 	client    *http.Client
 	closeOnce sync.Once
 
+	// gate sits under both HTTP clients: a partition fault (Cluster.Cut) fills it with the
+	// addresses on the far side of a cut, and every request to them fails fast. It lives
+	// under the clients, not in the alive/ring view, because a partition is a property of
+	// the network, not a node (CAP.md §1). See partition.go.
+	gate *gate
+
 	// log is installed by whoever runs the node and discards until then. Atomic
 	// because the heartbeat and heal goroutines read it while SetLogger may write it.
 	log atomic.Pointer[slog.Logger]
 
 	replicationFactor int
 	writeQuorum       int
-	ringReplicas      int // virtual points per node; 0 uses the ring's default (150)
+	readQuorum        int // owners that must answer a read; with W, the no-stale-read dial
+
+	// holdRing freezes the ring against heartbeat convictions. false (AP, the default): a
+	// silent peer is dropped and the keyspace re-owned among survivors — so under a cut a
+	// quorum shrinks with the ring and W is satisfied trivially. true (the strong dial): the
+	// far owners stay in the ring, so a coordinator that can't reach W of them honestly
+	// refuses instead of rubber-stamping a shrunken owner set. Guarded by mu.
+	holdRing     bool
+	ringReplicas int // virtual points per node; 0 uses the ring's default (150)
 
 	heartbeatInterval time.Duration
 	failureTimeout    time.Duration
@@ -100,8 +121,11 @@ type Node struct {
 	// written only by the heal goroutine and drained only by the manager.
 	healLogMu  sync.Mutex
 	healLog    []HealCopy
-	cleanupLog [][]string // one entry per pass: the keys it dropped
-	healCauses []string   // membership changes seen since the last heal pass
+	cleanupLog [][]string   // one entry per pass: the keys it dropped
+	repairLog  []RepairCopy // read-repair convergences; written by the READ path, so several
+	//                          request goroutines may append at once — the lock matters more here
+	//                          than for the single-threaded heal.
+	healCauses []string // membership changes seen since the last heal pass
 
 	// healthPaused stalls this node's /health responses without stopping the rest of
 	// it: a live node that looks dead to peers, for the false-positive demo.
@@ -120,20 +144,25 @@ type Node struct {
 // New creates a node with the given id and capacity. addr may end in ":0" to let
 // the OS pick a free port, which Addr reports back after Start. Call Close.
 func New(id, addr string, capacity int) *Node {
+	// One gate shared by both clients: cut the network and data AND heartbeats stop
+	// together, which is what makes each side of a partition convict the other (CAP.md §2).
+	g := &gate{base: http.DefaultTransport}
 	n := &Node{
 		id:                id,
 		cache:             cache.New(capacity),
 		addr:              addr,
-		client:            &http.Client{Timeout: forwardTimeout},
+		gate:              g,
+		client:            &http.Client{Timeout: forwardTimeout, Transport: g},
 		peers:             map[string]string{},
 		lastSeen:          map[string]time.Time{},
 		alive:             map[string]bool{},
 		replicationFactor: defaultReplicationFactor,
 		writeQuorum:       defaultWriteQuorum,
+		readQuorum:        defaultReadQuorum, // holdRing defaults false: AP until the dial says otherwise
 		heartbeatInterval: defaultHeartbeatInterval,
 		failureTimeout:    defaultFailureTimeout,
 		healGracePeriod:   defaultHealGracePeriod,
-		healthClient:      &http.Client{Timeout: defaultFailureTimeout},
+		healthClient:      &http.Client{Timeout: defaultFailureTimeout, Transport: g},
 		done:              make(chan struct{}),
 		healTrigger:       make(chan struct{}, 1),
 	}
@@ -234,6 +263,23 @@ func (n *Node) SetReplication(replicationFactor, writeQuorum int) {
 	defer n.mu.Unlock()
 	n.replicationFactor = replicationFactor
 	n.writeQuorum = writeQuorum
+}
+
+// SetReadQuorum overrides how many owners must answer a read (R_read). Paired with the write
+// quorum, R_read+W>R is the no-stale-read guarantee; R_read=1 is the gather-all default.
+func (n *Node) SetReadQuorum(readQuorum int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.readQuorum = readQuorum
+}
+
+// SetHoldRing freezes (true) or unfreezes (false) the ring against heartbeat convictions. Hold
+// it at the strong dial setting: a quorum is a fraction and needs a fixed denominator, or a
+// partitioned side re-owns the keyspace among its survivors and any W is met trivially.
+func (n *Node) SetHoldRing(hold bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.holdRing = hold
 }
 
 // SetHealGracePeriod overrides how long a detected death waits before the node
@@ -361,7 +407,14 @@ func (n *Node) heartbeatRound() {
 		switch {
 		case n.alive[id] && !isAlive:
 			n.alive[id] = false
-			n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
+			// Hold the ring at the strong dial setting: the far owner STAYS in the ring even
+			// though we now believe it dead, so a quorum write/read still targets it, fails to
+			// reach it, and honestly refuses — instead of the ring shrinking to survivors and
+			// the quorum passing over a re-owned keyspace (a rubber stamp). The belief (alive)
+			// updates either way; only the routing consequence is gated.
+			if !n.holdRing {
+				n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
+			}
 			membershipChanged = true
 			n.noteHealCause(id + " went silent")
 			n.logger().Warn("peer suspected dead, removed from ring",
@@ -371,7 +424,11 @@ func (n *Node) heartbeatRound() {
 			)
 		case !n.alive[id] && isAlive:
 			n.alive[id] = true
-			n.ring.Add(id) // back in the ring; the heal repopulates it
+			// Symmetric: under holdRing the node was never removed, so there is nothing to add
+			// back; the membership change still fires the heal, which reconciles what diverged.
+			if !n.holdRing {
+				n.ring.Add(id) // back in the ring; the heal repopulates it
+			}
 			membershipChanged = true
 			n.noteHealCause(id + " came back")
 			n.logger().Info("peer recovered, re-added to ring", "peer", id)
@@ -425,27 +482,52 @@ func (n *Node) healLoop() {
 	}
 }
 
-// heal re-asserts the replication invariant: every current owner of every key this
-// node holds must have a copy. Check-first — ask before copying — so a flapped node
-// costs zero copies and a revived empty node is repopulated.
+// covered reports whether entries already hold v or a version that dominates it, so pushing
+// v would add nothing. Concurrent siblings are NOT covered — preserving them is the point.
+func covered(entries []cache.Entry, v cache.Entry) bool {
+	for _, e := range entries {
+		switch vclock.Compare(v.Version, e.Version) {
+		case vclock.Before, vclock.Equal:
+			return true
+		}
+	}
+	return false
+}
+
+// coveredAhead reports whether some owner ranked ahead of rank demonstrably holds v or a
+// dominator of it — making that owner v's healer (or marking v stale), so this node stands
+// down for v. An unreachable owner ahead does not count: unconfirmed is not deferred-to.
+func coveredAhead(ownerEntries [][]cache.Entry, reachable []bool, rank int, v cache.Entry) bool {
+	for i := 0; i < rank && i < len(ownerEntries); i++ {
+		if reachable[i] && covered(ownerEntries[i], v) {
+			return true
+		}
+	}
+	return false
+}
+
+// heal re-asserts the replication invariant: every current owner must hold every version
+// this node holds. Check-first — ask before copying — so a flapped node costs zero copies
+// and a revived empty node is repopulated.
 //
-// The healer for a key is the first owner, in ring order, that actually holds it:
-// permission to push follows the data, not the ring position. Otherwise a revived node
-// promoted back to primary has nothing to send while the holders behind it stand down,
-// and the key is stranded below R forever.
+// The healer for a VERSION is the first owner, in ring order, that holds it (or a dominator):
+// permission to push follows the data, not the ring position, and it is decided per-version,
+// not per-key. Two concurrent siblings on different owners each get their own healer, so a
+// stranded carol propagates instead of living forever on one node. A version an owner ahead
+// already covers is stood down; so is a stale local version a dominator elsewhere will replace.
 func (n *Node) heal() {
 	// Batched by target: one pass pushing 8 keys to n4 is one record, not eight.
 	moved := map[string][]string{}
 
 	start := time.Now()
-	snapshot := n.cache.Snapshot()
-	causes := n.drainHealCauses() // what my heartbeat saw that made this pass happen
+	snapshot := n.cache.SnapshotAll() // every version of every key I hold, not just one
+	causes := n.drainHealCauses()     // what my heartbeat saw that made this pass happen
 	var healerFor, deferred, alreadyPresent, unreachable, failed int
 
 	log := n.logger()
 	log.Debug("heal started", "keys_held", len(snapshot), "cause", strings.Join(causes, "; "))
 
-	for key, entry := range snapshot {
+	for key, versions := range snapshot {
 		select {
 		case <-n.done:
 			log.Debug("heal aborted: node closing", "copies", len(moved))
@@ -458,9 +540,9 @@ func (n *Node) heal() {
 			continue // no live owner at all: nowhere to send it
 		}
 
-		// My rank among this key's owners, or last if I am not one: a holder left over
-		// from an older ring must still be able to heal, or a key whose owners all lack
-		// it would have no sender at all.
+		// My rank among this key's owners, or last if I am a leftover holder from an older
+		// ring — such a holder must still be able to heal, or a version no owner has yet
+		// would have no sender at all.
 		rank := len(owners)
 		for i, o := range owners {
 			if o.id == n.id {
@@ -469,47 +551,61 @@ func (n *Node) heal() {
 			}
 		}
 
-		// Stand down if an owner ahead of me holds the key: that node is the healer, and
-		// two senders would duplicate every copy.
-		standDown := false
-		for _, o := range owners[:min(rank, len(owners))] {
-			if _, has, err := n.fetchFrom(o.addr, key); err == nil && has {
-				standDown = true
-				break
+		// Fetch every owner's version set once and reuse it across my local versions. An
+		// owner I cannot reach stays unreachable and is retried on a later pass.
+		ownerEntries := make([][]cache.Entry, len(owners))
+		reachable := make([]bool, len(owners))
+		for i, o := range owners {
+			if o.id == n.id {
+				ownerEntries[i], reachable[i] = versions, true
+				continue
 			}
-		}
-		if standDown {
-			deferred++
-			log.Debug("heal: stood down, an owner ahead of me holds this key", "key", key)
-			continue
+			es, _, err := n.fetchFrom(o.addr, key)
+			if err != nil {
+				continue // reachable[i] stays false: a later pass retries
+			}
+			ownerEntries[i], reachable[i] = es, true
 		}
 
-		healerFor++
-		for _, o := range owners {
-			if o.id == n.id {
-				continue // I have it; that's why I'm the healer
-			}
-			_, has, err := n.fetchFrom(o.addr, key)
-			switch {
-			case err != nil:
-				unreachable++ // can't copy to a node we can't reach; a later pass retries
-				log.Debug("heal: owner unreachable, key stays under-replicated", "key", key, "owner", o.id, "err", err)
-				continue
-			case has:
-				alreadyPresent++ // no copy needed
-				log.Debug("heal: owner already has key, no copy", "key", key, "owner", o.id)
+		// Heal each version independently: presence != version reaches the heal's own
+		// sender-selection. I heal v only if no owner ahead of me already covers it; else
+		// that owner is v's healer, or v is a stale local copy a dominator will replace.
+		healed := false
+		for _, v := range versions {
+			if coveredAhead(ownerEntries, reachable, rank, v) {
 				continue
 			}
-			// entry.Expires, not a fresh TTL: the copy inherits the deadline the key
-			// already had, or its own rescue would hand it a new lease on life.
-			if err := n.storeOn(o.addr, key, entry.Value, entry.Expires); err != nil {
-				failed++
-				log.Warn("heal: copy failed, key still under-replicated", "key", key, "owner", o.id, "err", err)
-				continue // record only copies that actually landed
+			healed = true
+			for i, o := range owners {
+				if o.id == n.id {
+					continue // I have it; that's why I'm the healer
+				}
+				switch {
+				case !reachable[i]:
+					unreachable++ // can't copy to a node we can't reach; a later pass retries
+				case covered(ownerEntries[i], v):
+					alreadyPresent++ // owner already holds v or a dominator
+				default:
+					// v.Expires, not a fresh TTL: the copy inherits the deadline the key
+					// already had, or its rescue would hand it a new lease on life.
+					if err := n.storeOn(o.addr, key, v.Value, v.Version, v.Expires); err != nil {
+						failed++
+						log.Warn("heal: copy failed, version still under-replicated", "key", key, "owner", o.id, "err", err)
+						continue // record only copies that actually landed
+					}
+					n.healCopies.Add(1)
+					moved[o.id] = append(moved[o.id], key)
+					// Keep the owner's view current so a later local version's covered-check
+					// sees what we just pushed and does not re-send it.
+					ownerEntries[i] = cache.MergeVersions(ownerEntries[i], []cache.Entry{v})
+					log.Debug("heal: copied version", "key", key, "to", o.id)
+				}
 			}
-			n.healCopies.Add(1)
-			moved[o.id] = append(moved[o.id], key)
-			log.Debug("heal: copied key", "key", key, "to", o.id)
+		}
+		if healed {
+			healerFor++
+		} else {
+			deferred++
 		}
 	}
 
@@ -560,10 +656,11 @@ func (n *Node) heal() {
 // drops only after all R owners confirm, so the count cannot fall below R however they
 // interleave. An owner never reaches the drop, so the owners cannot clean each other up.
 //
-// ⚠️ It assumes the dropped copy is no fresher than the owners'. Writes go to owners, so that
-// holds — except for a write a *down* owner missed, which heal's presence check will not
-// repair. Cleanup can therefore discard a fresher copy and keep a staler one. No client can
-// observe it (reads only ask owners), but it is presence≠version, and only versions close it.
+// Version-aware: a copy is dropped only if every owner covers each version it carries — holds
+// that version, or a dominator of it. A version no owner covers is a stranded sibling (a write
+// a down owner missed, or one side of a cut): kept, not dropped, and the heal re-armed to
+// propagate it. So cleanup can never discard an acked write the owners have not yet seen — the
+// presence≠version hole the old has-the-key check left open. See TestCleanupKeepsAStrandedSibling.
 func (n *Node) cleanup() {
 	start := time.Now()
 	log := n.logger()
@@ -571,7 +668,7 @@ func (n *Node) cleanup() {
 	dropped := make([]string, 0, 8)
 	var kept int
 
-	for key := range n.cache.Snapshot() {
+	for key, versions := range n.cache.SnapshotAll() {
 		select {
 		case <-n.done:
 			return
@@ -586,14 +683,27 @@ func (n *Node) cleanup() {
 			continue // I own this key. Holding it is the point.
 		}
 
-		// I am not an owner. Every owner must confirm it holds the key before I let go.
+		// I am not an owner. I let go only once every owner covers every version I hold. An
+		// owner that cannot be reached, or one missing a version I have (a stranded sibling),
+		// ends the matter: dropping then would lose a write the owners do not have.
 		confirmed := true
 		for _, o := range owners {
-			_, has, err := n.fetchFrom(o.addr, key)
-			if err != nil || !has {
+			ownerEntries, _, err := n.fetchFrom(o.addr, key)
+			if err != nil {
 				confirmed = false
-				log.Debug("cleanup: keeping a key I do not own — an owner cannot confirm it",
-					"key", key, "owner", o.id, "reachable", err == nil, "has", has)
+				log.Debug("cleanup: keeping a key I do not own — an owner is unreachable",
+					"key", key, "owner", o.id)
+				break
+			}
+			for _, v := range versions {
+				if !covered(ownerEntries, v) {
+					confirmed = false
+					log.Debug("cleanup: keeping a version no owner holds — a stranded sibling",
+						"key", key, "owner", o.id)
+					break
+				}
+			}
+			if !confirmed {
 				break
 			}
 		}
@@ -811,15 +921,45 @@ func (n *Node) Close() error {
 	return err
 }
 
-// handleGet returns the value for {key}, or 404 if absent or expired. An expiry and a
-// missing key are the same 404: the caller cannot tell them apart.
+// wireEntry is one version of a key as it crosses the network: value, vector clock, and
+// deadline as Unix milliseconds (0 = never). The internal /kv endpoints speak a JSON array
+// of these, so a node can hand a peer every concurrent version it holds, not just one.
+type wireEntry struct {
+	Value     string       `json:"v"`
+	Version   vclock.Clock `json:"vc,omitempty"`
+	ExpiresMS int64        `json:"e,omitempty"`
+}
+
+func toWire(e cache.Entry) wireEntry {
+	w := wireEntry{Value: e.Value, Version: e.Version}
+	if !e.Expires.IsZero() {
+		w.ExpiresMS = e.Expires.UnixMilli()
+	}
+	return w
+}
+
+func (w wireEntry) toEntry() cache.Entry {
+	var expires time.Time
+	if w.ExpiresMS > 0 {
+		expires = time.UnixMilli(w.ExpiresMS)
+	}
+	return cache.Entry{Value: w.Value, Version: w.Version, Expires: expires}
+}
+
+// handleGet returns every live version of {key} as a JSON array, or 404 if absent or
+// expired. An expiry and a missing key are the same 404: the caller cannot tell them apart.
 func (n *Node) handleGet(w http.ResponseWriter, r *http.Request) {
-	value, ok := n.cache.Get(r.PathValue("key"))
+	entries, ok := n.cache.GetEntries(r.PathValue("key"))
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	io.WriteString(w, value)
+	wires := make([]wireEntry, len(entries))
+	for i, e := range entries {
+		wires[i] = toWire(e)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(wires)
 }
 
 // expiresHeader carries a key's deadline between nodes as an absolute instant: Unix
@@ -835,6 +975,10 @@ const (
 	ServedByHeader    = "X-Served-By"
 	CoordinatorHeader = "X-Coordinator"
 	ReadPathHeader    = "X-Read-Path"
+	// ConflictHeader is the number of concurrent siblings a read reconciled to, set only
+	// when that number is >1. Its presence tells a client the body is a JSON array of the
+	// sibling values rather than a single plain value.
+	ConflictHeader = "X-Conflict"
 )
 
 // DroppedHeader carries what a delete actually removed: from /del/{key}, the comma-
@@ -879,15 +1023,47 @@ func readExpires(h http.Header) time.Time {
 	return time.UnixMilli(ms)
 }
 
-// handlePut stores the request body as the value for {key}, honouring the deadline the
-// sender stamped on it (see expiresHeader). The internal replica write.
+// versionHeader carries a value's vector clock between nodes, JSON-encoded. Absent means an
+// unversioned write (the legacy path); the receiver reconciles by dominance either way.
+const versionHeader = "X-Version"
+
+func putVersion(h http.Header, v vclock.Clock) {
+	if len(v) == 0 {
+		return
+	}
+	if b, err := json.Marshal(v); err == nil {
+		h.Set(versionHeader, string(b))
+	}
+}
+
+func readVersion(h http.Header) (vclock.Clock, error) {
+	s := h.Get(versionHeader)
+	if s == "" {
+		return nil, nil
+	}
+	var v vclock.Clock
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// handlePut reconciles the request body into {key}, honouring the deadline and vector clock
+// the sender stamped on it. The internal replica write: SetVersioned keeps a concurrent
+// value rather than clobbering it, so a replica that already holds a conflicting version
+// ends up with both.
 func (n *Node) handlePut(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	n.cache.SetAt(r.PathValue("key"), string(body), readExpires(r.Header))
+	version, err := readVersion(r.Header)
+	if err != nil {
+		http.Error(w, "bad version: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	n.cache.SetVersioned(r.PathValue("key"), string(body), version, readExpires(r.Header))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -908,9 +1084,17 @@ func (n *Node) handleClear(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleClientGet coordinates a read: try the key's owners in ring order and return
-// the first reachable hit, falling past unreachable owners. Only when every owner is
-// unreachable is it a 502; a reachable miss is an honest 404.
+// handleClientGet coordinates a read: gather every version the key's reachable owners
+// hold and reconcile them into one maximal set under vector-clock dominance. One survivor
+// is a plain value; two or more are concurrent siblings — a detected conflict — returned
+// as a JSON array with the X-Conflict header. Every owner unreachable is a 502; fewer than
+// R_read reachable is a 503 refusal; a reachable miss (enough answered, none had it) is a 404.
+//
+// The R_read dial (7B) does NOT early-stop the gather — a concurrent sibling on a later owner
+// would go unseen, and an unseen conflict is a silently-picked winner. It is a reachable-count
+// threshold instead: gather all reachable owners as before, then refuse if fewer than R_read
+// answered. With R_read+W>R the R_read owners that DID answer must include a W-writer, so the
+// reconciled result cannot miss the latest write — no stale read, conflict detection intact.
 func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	owners := n.ownersFor(key)
@@ -919,73 +1103,196 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// One outcome per owner, in ring order. Owners never asked stay "skipped" rather
-	// than being left out.
+	n.mu.RLock()
+	rq := n.readQuorum
+	n.mu.RUnlock()
+
+	// One outcome per owner, in ring order, plus what each one held so provenance can be
+	// recovered after reconciliation. Owners never reached stay "skipped".
 	ids := make([]string, len(owners))
 	outcomes := make([]string, len(owners))
+	held := make([][]cache.Entry, len(owners))
 	for i, o := range owners {
 		ids[i] = o.id
 		outcomes[i] = OutcomeSkipped
 	}
 
 	log := n.logger()
-	var (
-		value       string
-		servedBy    string
-		reachedNone = true
-	)
+	reachedNone := true
+	answered := 0 // owners that were reachable (hit or miss); the R_read threshold counts these
 	for i, o := range owners {
 		var (
-			v   string
-			ok  bool
-			err error
+			entries []cache.Entry
+			ok      bool
+			err     error
 		)
 		if o.id == n.id {
-			v, ok = n.cache.Get(key) // local read never "fails to reach"
+			entries, ok = n.cache.GetEntries(key) // local read never "fails to reach"
 		} else {
-			v, ok, err = n.fetchFrom(o.addr, key)
+			entries, ok, err = n.fetchFrom(o.addr, key)
 		}
 		switch {
 		case err != nil:
 			outcomes[i] = OutcomeUnreachable
-			log.Warn("read: owner unreachable, falling back to next owner",
+			log.Warn("read: owner unreachable",
 				"key", key, "owner", o.id, "rank", i, "of", len(owners), "err", err)
 			continue
 		case !ok:
 			outcomes[i] = OutcomeMiss
 			reachedNone = false // it answered, it just has no copy
+			answered++
 			continue
 		}
-
 		outcomes[i] = OutcomeHit
 		reachedNone = false
-		value, servedBy = v, o.id
-		if i > 0 {
-			log.Info("read served by fallback replica", "key", key, "served_by", o.id, "rank", i)
-		} else {
-			log.Debug("read hit", "key", key, "served_by", o.id)
-		}
-		break // first hit wins; the owners behind it stay skipped
+		answered++
+		held[i] = entries
 	}
 
-	// Headers before the body, always: the first Write (and http.Error, which writes
-	// one itself) flushes the header block, so anything set after it goes nowhere. The
-	// trace is set on every exit — a 404 (all owners answered, none had it) and a 502
-	// (nobody answered) are different facts the empty value cannot distinguish.
+	merged := cache.MergeVersions(held...)
+
+	// servedBy is the first owner, in ring order, that actually holds a surviving version —
+	// not merely the first that answered. A node returning only a stale, dominated copy did
+	// not serve the value the client gets back (presence != version, at the header level).
+	var servedBy string
+	for i, o := range owners {
+		if outcomes[i] == OutcomeHit && holdsAny(held[i], merged) {
+			servedBy = o.id
+			break
+		}
+	}
+
+	// Headers before the body, always: the first Write (and http.Error, which writes one
+	// itself) flushes the header block, so anything set after it goes nowhere. The trace is
+	// set on every exit — a 404 (all owners answered, none had it) and a 502 (nobody
+	// answered) are different facts the empty value cannot distinguish.
 	w.Header().Set(CoordinatorHeader, n.id)
 	w.Header().Set(ReadPathHeader, FormatReadPath(ids, outcomes))
 
 	switch {
-	case servedBy != "":
-		w.Header().Set(ServedByHeader, servedBy)
-		io.WriteString(w, value)
 	case reachedNone:
 		log.Error("read failed: all owners unreachable", "key", key, "owners", len(owners))
 		http.Error(w, "all owners unreachable", http.StatusBadGateway)
+	case answered < rq:
+		// Reachable, but fewer owners answered than R_read: the answered set is not guaranteed
+		// to overlap the write set, so returning a value could be stale. Refuse — the CP end of
+		// the dial. At R_read=1 this never fires (reachedNone already caught answered==0), so
+		// the default read is byte-for-byte 7A. Even an owner that holds a copy refuses here:
+		// holding data is not knowing it is current.
+		log.Info("read refused: read quorum not met", "key", key, "answered", answered, "read_quorum", rq)
+		http.Error(w, "read quorum not met", http.StatusServiceUnavailable)
+	case len(merged) == 1:
+		w.Header().Set(ServedByHeader, servedBy)
+		log.Debug("read hit", "key", key, "served_by", servedBy)
+		io.WriteString(w, merged[0].Value)
+	case len(merged) > 1:
+		// Concurrent siblings: none dominates, so we cannot pick one without destroying an
+		// acked write. Hand the client all of them and let it (or a human) resolve.
+		vals := make([]string, len(merged))
+		for i, e := range merged {
+			vals[i] = e.Value
+		}
+		w.Header().Set(ServedByHeader, servedBy)
+		w.Header().Set(ConflictHeader, strconv.Itoa(len(merged)))
+		w.Header().Set("Content-Type", "application/json")
+		log.Info("read returned conflicting siblings", "key", key, "versions", len(merged))
+		json.NewEncoder(w).Encode(vals)
 	default:
 		log.Debug("read miss", "key", key)
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+
+	// Read-repair: now that the reachable owners are reconciled, push each surviving version back
+	// to any reachable owner that lacks it, so a replica that missed a write converges on READ
+	// instead of waiting for a membership change to fire the heal — which is event-driven, so it
+	// never sees a lagging-but-alive replica. Guarded to the cases that RETURNED a value (a refusal
+	// or a 404 repairs nothing), and best-effort. See readRepair for the invariants.
+	if !reachedNone && answered >= rq && len(merged) > 0 {
+		n.readRepair(key, owners, outcomes, held, merged)
+	}
+}
+
+// readRepair stores every surviving version onto each reachable owner that does not already cover
+// it. Called only after a read returned a value. The invariants, each a trap avoided:
+//   - only reachable owners (hit or miss): we cannot repair what we did not reach; the next read
+//     or a membership-change heal gets the rest.
+//   - propagate ALL siblings: on a conflict this makes the sibling set consistent on every owner,
+//     it does NOT pick a winner — picking one would destroy an acked write (the 7A invariant).
+//   - carry each version's own deadline (e.Expires), never a fresh one: else a frequently-read
+//     expiring key would be perpetually resurrected (the heal-resurrected-expiring-key bug's twin).
+//   - presence != version: repair an owner holding a stale/dominated copy or missing a sibling,
+//     via covered() — not merely one that "has the key".
+//
+// Synchronous and self-limiting: once every owner covers the surviving set it stores nothing, so a
+// converged read pays only the checks. A production store would run this off the read path.
+func (n *Node) readRepair(key string, owners []owner, outcomes []string, held [][]cache.Entry, merged []cache.Entry) {
+	repaired := map[string]bool{} // owners caught up, deduped (an owner missing two siblings is one convergence)
+	for i, o := range owners {
+		if outcomes[i] != OutcomeHit && outcomes[i] != OutcomeMiss {
+			continue // unreachable: out of read-repair's reach
+		}
+		for _, e := range merged {
+			if covered(held[i], e) {
+				continue // already holds this surviving version (or a dominator of it)
+			}
+			if o.id == n.id {
+				n.cache.SetVersioned(key, e.Value, e.Version, e.Expires)
+			} else if err := n.storeOn(o.addr, key, e.Value, e.Version, e.Expires); err != nil {
+				n.logger().Warn("read-repair: store failed", "key", key, "owner", o.id, "err", err)
+				continue
+			}
+			repaired[o.id] = true
+		}
+	}
+	if len(repaired) > 0 {
+		ids := slices.Sorted(maps.Keys(repaired))
+		n.recordRepair(key, ids)
+		n.logger().Info("read-repair converged a lagging replica", "key", key, "owners", strings.Join(ids, ","))
+	}
+}
+
+// RepairCopy is one read-repair convergence: an owner (To) that a read caught up on a key.
+type RepairCopy struct {
+	To  string
+	Key string
+}
+
+// recordRepair files the owners a read caught up on key. Bounded like the heal/cleanup logs.
+func (n *Node) recordRepair(key string, owners []string) {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	for _, to := range owners {
+		n.repairLog = append(n.repairLog, RepairCopy{To: to, Key: key})
+	}
+	if over := len(n.repairLog) - maxHealLog; over > 0 {
+		n.repairLog = slices.Delete(n.repairLog, 0, over)
+	}
+}
+
+// DrainRepairLog returns the read-repair convergences since the last drain, and clears it.
+func (n *Node) DrainRepairLog() []RepairCopy {
+	n.healLogMu.Lock()
+	defer n.healLogMu.Unlock()
+	if len(n.repairLog) == 0 {
+		return nil
+	}
+	out := n.repairLog
+	n.repairLog = nil
+	return out
+}
+
+// holdsAny reports whether have contains a version whose clock equals one in want. Used to
+// find which owner supplied a surviving version, so servedBy names a node that holds the
+// value actually returned, not one whose copy was dropped as stale.
+func holdsAny(have, want []cache.Entry) bool {
+	for _, h := range have {
+		for _, w := range want {
+			if vclock.Compare(h.Version, w.Version) == vclock.Equal {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // handleClientSet writes to all R owners and acks once writeQuorum of them succeed.
@@ -1016,15 +1323,24 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log := n.logger()
+
+	// Read-before-write: merge every version currently on the reachable owners, then bump
+	// this coordinator's slot. The new value therefore dominates everything it could see —
+	// but two coordinators that cannot see each other (a cut) each bump a different slot, so
+	// their writes come out concurrent and are both kept. Best-effort: an unreachable owner
+	// is skipped, not waited on.
+	base := n.currentVersion(key, owners)
+	version := base.Bump(n.id)
+
 	acks, ownerIDs := 0, make([]string, 0, len(owners))
 	for _, o := range owners {
 		ownerIDs = append(ownerIDs, o.id)
 		if o.id == n.id {
-			n.cache.SetAt(key, value, expires)
+			n.cache.SetVersioned(key, value, version, expires)
 			acks++
 			continue
 		}
-		if err := n.storeOn(o.addr, key, value, expires); err != nil {
+		if err := n.storeOn(o.addr, key, value, version, expires); err != nil {
 			// Not fatal: the write still succeeds if enough others ack, and a later heal
 			// repairs this replica.
 			log.Warn("write: owner did not ack", "key", key, "owner", o.id, "err", err)
@@ -1033,11 +1349,16 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 		acks++
 	}
 
+	n.mu.RLock()
 	quorum := n.writeQuorum
+	n.mu.RUnlock()
 	if acks < quorum {
+		// Refuse: fewer owners acked than W, so the write is not durable on a quorum. 503, not
+		// 502 — the request was well-formed and the cluster is up; it just cannot satisfy the
+		// quorum right now (e.g. a cut with the ring held, so the far owners are unreachable).
 		log.Error("write rejected: quorum not met",
 			"key", key, "acks", acks, "quorum", quorum, "owners", strings.Join(ownerIDs, ","))
-		http.Error(w, "write quorum not met", http.StatusBadGateway)
+		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
 		return
 	}
 	log.Debug("write ok", "key", key, "acks", acks, "quorum", quorum)
@@ -1118,39 +1439,65 @@ func (n *Node) handleClientClear(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// fetchFrom GETs key from another node's internal /kv endpoint. ok is false on a
-// clean 404 (miss); err is non-nil only when the node could not be reached.
-func (n *Node) fetchFrom(addr, key string) (value string, ok bool, err error) {
+// fetchFrom GETs every version of key from another node's internal /kv endpoint. ok is
+// false on a clean 404 (the node answered, holds nothing); err is non-nil only when the
+// node could not be reached. Normally one entry; several when the node holds a conflict.
+func (n *Node) fetchFrom(addr, key string) (entries []cache.Entry, ok bool, err error) {
 	resp, err := n.client.Get("http://" + addr + "/kv/" + key)
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", false, nil
+		return nil, false, nil
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", false, err
+	var wires []wireEntry
+	if err := json.NewDecoder(resp.Body).Decode(&wires); err != nil {
+		return nil, false, err
 	}
-	return string(body), true, nil
+	entries = make([]cache.Entry, len(wires))
+	for i, wv := range wires {
+		entries[i] = wv.toEntry()
+	}
+	return entries, len(entries) > 0, nil
 }
 
-// storeOn PUTs key=value to another node's internal /kv endpoint, stamped with the
-// deadline the key already has. A zero expires means it never expires.
-func (n *Node) storeOn(addr, key, value string, expires time.Time) error {
+// storeOn PUTs one versioned value to another node's internal /kv endpoint, stamped with the
+// deadline and vector clock the value already carries. A zero expires means it never expires;
+// a nil version is an unversioned write.
+func (n *Node) storeOn(addr, key, value string, version vclock.Clock, expires time.Time) error {
 	req, err := http.NewRequest(http.MethodPut, "http://"+addr+"/kv/"+key, strings.NewReader(value))
 	if err != nil {
 		return err
 	}
 	putExpires(req.Header, expires)
+	putVersion(req.Header, version)
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// currentVersion merges the vector clocks of every version the key's reachable owners hold
+// — the base a new write bumps from. Unreachable owners are skipped: the write proceeds
+// against what it can see, which is exactly how a cut produces concurrent writes.
+func (n *Node) currentVersion(key string, owners []owner) vclock.Clock {
+	var base vclock.Clock
+	for _, o := range owners {
+		var entries []cache.Entry
+		if o.id == n.id {
+			entries, _ = n.cache.GetEntries(key)
+		} else {
+			entries, _, _ = n.fetchFrom(o.addr, key)
+		}
+		for _, e := range entries {
+			base = vclock.Merge(base, e.Version)
+		}
+	}
+	return base
 }
 
 // deleteOn DELETEs key on another node's internal /kv endpoint. had reports whether that

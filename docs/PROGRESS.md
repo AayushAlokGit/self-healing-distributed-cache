@@ -18,7 +18,7 @@ Where we are, what's been taught, and what each thing earned. Update at the end 
 
 **Phases 0–6 COMPLETE, and SHIPPED.**
 [Dashboard](https://self-healing-distributed-cache.vercel.app/) (Vercel) ·
-[API](https://self-healing-cache-api.onrender.com/api/state) (Render). Kill→heal→revive verified
+[API](https://self-healing-cache-api.onrender.com/) (Render — the root lists the clusters). Kill→heal→revive verified
 against the live deployment, not just locally: killing `n2` cost **0 keys**, the survivors pushed the
 copies back to R=3, and the revived node came back empty and was repopulated by the heal alone.
 
@@ -32,9 +32,20 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
   the *topology* is collapsed — the protocol is real) and S9 Q5's **no god's-eye view exists** (the
   dashboard's omniscient state is impossible in a real deployment, because *dead* is a **belief**, not a
   property; an honest dashboard would show N disagreeing views).
-- **(b) Versioned values + read-repair** — the highest-value *code* change. S9 Q4 named why: **presence ≠
-  version.** The heal asks *"do you have key k?"* and a `200` means "somebody has **a** value," not "**the**
-  value" — so a divergent key is **skipped and the conflict preserved forever.**
+- ✅ **(b) Read-repair-on-read — DONE S21.** The read (`handleClientGet`) already gathered every owner and
+  reconciled; now `readRepair` `storeOn`s each surviving version back to any reachable owner that doesn't
+  `covered()` it, so a **lagging-but-alive** replica (one that missed a write while never declared dead — a blip
+  under the 500ms timeout, or a failed best-effort write) converges **on the read** instead of waiting for an
+  overwrite or a membership-change heal (the heal is event-driven, so it never sees this replica). Traps avoided,
+  each a comment: propagate **all** siblings (make a conflict consistent, don't resolve it); carry **each
+  version's own deadline** (else a frequently-read expiring key resurrects — the heal-resurrect bug's twin); only
+  **reachable** owners and only on a **returned value** (a refusal/404 repairs nothing); presence≠version via
+  `covered`. Synchronous + self-limiting (a converged read stores nothing); a production store would run it off
+  the read path. Test `TestReadRepairsAStaleReplica` (repairs a blocked-out replica on read, idempotent second
+  read). *Optional follow-up: surface it in the activity log (needs a drain like `DrainHealLog`).* The two
+  heavier cousins stay unbuilt on purpose, named not hidden (`HLD §9`, `CAP §13`): **hinted handoff** (queue a
+  write for a down owner) and **Merkle-tree anti-entropy** (continuous background sync; our heal is its
+  event-driven cousin).
 - **(c) `HEAD /kv/{key}`** — a cheap, real win. `fetchFrom` is a `GET`, so every *"do you have this key?"*
   probe **downloads the whole value**. A `HEAD` makes the check free and roughly halves heal traffic.
 - **(d) NOT the arc-diff heal** (touch only the ring arcs that changed owner). S9 Q7 sketched it and argued
@@ -46,25 +57,88 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
 - **(f) Phase 7 — the partition / consistency-dial demo** ← *designed S16, reworked S17.* `docs/CAP.md` owns
   the reasoning, `docs/CAP_DEMO.md` the demo spec + the scorecard. Highest-value *new capability*, and it's
   where **presence ≠ version** finally gets fixed in code. Build arc, now **three steps**:
-  - **7.0 — a second cluster on a second tab.** The CAP demo leaves the network cut for minutes at a time;
-    it cannot share a ring with the replication demo. Verified S17 with a throwaway `-race` probe: **two
-    `cluster.Cluster` values in one process are already fully independent** — nodes bind `127.0.0.1:0` so the
-    OS assigns ports (no collision), and there is **no package-level mutable state** in `cluster/`, `node/`,
-    or `cache/`. Killing a node in A left B at 5 alive; a key written to A was invisible in B. So `cluster/`
-    needs **zero changes**; the work is `cmd/server` (~40 lines: a cluster map + an `/api/{cluster}/…` path
-    prefix) and the frontend (an api factory + tabs). Ships as an empty second tab.
+  - ~~**7.0 — a second cluster on a second tab.**~~ **DONE S17** (`48307dd` Go, `d39a305` frontend,
+    `f02805e`, `7b86654`). `cluster/` needed **zero changes**, as predicted: nodes bind `127.0.0.1:0` so the
+    OS assigns ports, and there is **no package-level mutable state** in `cluster/`, `node/` or `cache/` —
+    isolation is structural, not disciplined. Browser-verified: killed `n1` on Replication (4/5, healed onto
+    survivors), CAP stayed 5/5 with 0 pushed. ⚠️ **It broke the live demo** (see the S17 log) — **fixed
+    2026-07-17: Vercel↔GitHub reconnected, verified live.**
   - **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Demo:
     both sides accept a write, the heal proves the two writes never saw each other, and **keeps both**.
-  - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
-    `Cluster.SetQuorum(w, rRead)` — `rf`/`wq` are fixed at `New()` today. **The only `cluster/` change Phase 7
-    asks for.**
+    **COMPLETE on branch `cap-demo` (S18–S19), verified end-to-end in the browser** — built there, merge to
+    main by hand so a breaking API change never auto-deploys onto the live frontend again (the S17 failure).
+    The steps:
+    - ✅ **`vclock/`** (`129ab1f`) — `Clock` = one counter per node; `Merge`/`Bump`/`Compare`
+      (Before/After/Equal/**Concurrent**). Merge-then-bump; the resolution-must-merge trap is a test.
+    - ✅ **Versioned cache** (`3cf80dc`) — a key holds `[]Entry`, each with a `vclock.Clock` and its own
+      deadline. Additive: `Set`/`Get`/`Snapshot` keep single-value behaviour (Phase-1 suite untouched),
+      new `SetVersioned`/`GetEntries`/`SnapshotAll` + `reconcile` (drop dominated, keep concurrent) ride
+      alongside. **Nothing produced versions yet at this commit.**
+    - ✅ **Write path flows versions** (`3d5251f`) — `/kv` carries versions (JSON array on GET, `X-Version`
+      header on PUT → `SetVersioned`); `handleClientSet` does read-before-write (`currentVersion` merges the
+      owners' clocks, `Bump(coordinator)` stamps). Two coordinators that can't see each other bump different
+      slots ⇒ concurrent ⇒ both kept — the seam the cut exploits. Heal's `storeOn` carries the version too.
+    - ✅ **Read + heal version-awareness** — **DONE S19** (`42d1335` read, `814df5d` heal + cleanup).
+      **Read:** `handleClientGet` gathers every reachable owner's versions and folds them with `cache.MergeVersions`
+      — one survivor ⇒ a plain value, two+ ⇒ concurrent siblings under `X-Conflict: n` + a JSON array (conflict
+      *detection*); `servedBy` now names the first owner holding a *surviving* version. **Heal:** `SnapshotAll` +
+      a **per-version** healer (I heal `v` only if no owner ahead of me *covers* it), so a stranded `carol` and a
+      concurrent `bob` both propagate; a dominated local version stands down. **Cleanup:** drops a non-owned copy
+      only once every owner *covers* every version it carries, so a sibling no owner holds is kept and the heal
+      re-armed. Unifying: **presence≠version applied to each mechanism's own decision** (read's who-answers, heal's
+      who-heals, cleanup's is-this-surplus).
+    - ✅ **Coordinator picker · the cut · the conflict card** — **DONE S19, 7A COMPLETE.**
+      - **Coordinator picker** (`6f088fb`): `Set`/`Get` take a `via` naming the coordinating node ("" = any
+        live, unchanged); a dead/unknown `via` is refused with `*NoSuchNodeError` (400), never rerouted —
+        determinism is the point. Frontend: a `CoordinatorSelect` on the Write and Read cards.
+      - **The cut** (`4ca295c`, simplified to one `gate` in `90126eb`): a partition lives **under** the HTTP
+        clients — each node's `gate` (a mutex-guarded blocked-address set shared by the data *and* health
+        clients) refuses blocked peers in `RoundTrip`, so a cut drops data **and** heartbeats together and each
+        side convicts the other and shrinks its ring. `Cluster.Cut(sideA, sideB)`/`Mend`; symmetric though each
+        node blocks only its own outgoing dials. Gated at RoundTrip (not DialContext) so a keep-alive connection
+        pooled before the cut is refused too.
+      - **The conflict card + cut UI** (FE `1f10793`): the card renders siblings off `X-Conflict` + the array;
+        a `PartitionPanel` (per-node A|B toggles), a "NETWORK PARTITIONED" banner, and ring A/B tags. ~~⚠️ The
+        cut is tracked **client-side** — `/state` reports no partition, so a page reload loses the banner.~~
+        **CLOSED S20 (below): `/state` reports the partition; a cut renders as two independent per-side rings.**
+      - ✅ **`/state` reports the partition — two independent rings (S20).** `Cluster` now records the active cut
+        (`cutA/cutB`, set in `Cut`, cleared in `Mend`); `State()` returns a `Partition{sideA,sideB,vnodesA,vnodesB}`
+        and per key `OwnersA`/`OwnersB` from **two per-side rings** (side A = alive − B, side B = alive − A; a
+        bridge node lands in both). Under-replication is judged **per side**. Frontend: banner + panel + ring driven
+        by `state.partition` (client-only `cut` deleted, so a reload is faithful). A cut renders as **two separate
+        `RingViz`, side by side** — App slices the snapshot into a per-side `State` (`sideState`) and draws each as
+        the independent cluster it is (from A's view, the far side is simply dead). The key table shows both sides'
+        owners. Browser-verified: cut → two rings + banner, **reload → all reconstructed from `/state`**, mend →
+        single ring; `NODES ALIVE` stayed 5/5 (no god's-eye view). Test `TestStateReportsPartitionWithPerSideOwnership`.
+    - ✅ **Verified end-to-end in the browser (S19).** Cut `{n0,n2,n4} | {n1,n3}` → wrote `cart=milk,eggs` via
+      **n0** and `cart=milk,bread` via **n3** (both accepted, each side serving alone) → mend → the version-aware
+      heal reconciled (activity log: `HEAL n0→n1`, `n1→n0`, `n1→n2`; cleanup dropped surplus, **not** the
+      siblings) → a gather-all read returned the **conflict card with both real values**. **NODES ALIVE stayed
+      5/5 the whole time** — the manager cannot see a partition (S9's "no god's-eye view", live). ⚠️ First take
+      used a 2-min TTL and `cart` expired mid-demo; redone with `never`.
+  - ✅ **7B — the dial. DONE S21, browser-verified.** `W` and `R_read` as a cluster-wide consistency dial. The
+    non-obvious core wasn't `SetQuorum` — it was that **the ring must stop shrinking**, or a quorum is a rubber
+    stamp: `node.holdRing` gates `ring.Remove`/`Add` in `heartbeatRound`, so at the strong setting the far owners
+    stay in the ring and a partitioned side that can't reach W refuses instead of re-owning the keyspace among its
+    survivors. Reads refuse **503** below `R_read` (a reachable-count threshold on the 7A gather-all, so conflict
+    detection is intact; `R_read=1` is byte-for-byte the old read); writes refuse **503** below `W` (was 502).
+    `cluster.SetQuorum(w, rRead)` validates `1≤w,rRead≤rf`, sets `holdRing = w+rRead>rf`, inherited by `wireAll`/
+    `Revive`; `State` reports `W`/`RRead`; `POST /quorum`. **Frontend:** a `DialPanel` (ONE/QUORUM presets + W and
+    R_read selectors + a live `W+R_read vs R` readout), a Stats dial tile, and a **Scorecard** — one probe row per
+    dial, so flipping and re-probing stacks the controlled experiment. **Browser-verified live: QUORUM → 5
+    accepted / 5 refused / 0 conflicts (the checkerboard); ONE → 10 / 0 / 5 (divergence). The refused writes and
+    the conflicts are the same writes.** Tests: node read/write refusal below quorum; `TestSetQuorumValidation`;
+    and the money pair — a held ring refuses the losing side of a cut, an unheld ring (W=2,R_read=1) rubber-stamps
+    it after the ring shrinks.
   - ⚠️ **Vector clocks, not Lamport (decided S17).** The two writes either side of a cut are *genuinely
     concurrent* (`CAP.md` §4: no "later" one exists), so Lamport would **invent** an order and silently
     destroy an acked write. Vector clocks detect the clash and surface it. **`CAP.md` §9 still decides
     Lamport and needs a rewrite** — along with §10–§14; `CAP_DEMO.md` §7 lists every stale line.
 
 ### Carried forward — re-ask cold (full text in `QUIZZES.md`)
-1. **Presence ≠ version** (S9) — the only genuine knowledge gap on the board.
+1. ~~**Presence ≠ version** (S9)~~ — **CLOSED S18.** Re-asked the read half cold before any 7A code: he got
+   ring geometry decides (not the coordinator), it's stable across nodes *because membership views agree*, and
+   named the precondition unprompted — which is exactly the seam 7A opens. Both halves now solid.
 2. **Reversibility, not just cost** (S9) — the rule splitting the instant reaction from the delayed one. He
    reliably produces "cheap/expensive" and drops "reversible/irreversible."
 3. **The stranded-key case** (S9) — *"a revived node is promoted back to primary of an arc while holding
@@ -322,8 +396,15 @@ The canonical record. ☑ = taught **and** the quick-check passed · ◐ = parti
 **Phase 3 core COMPLETE (naive on purpose).** Still synchronous (writes hit all owners in-band — no async, no
 hinted handoff), and membership is **static**, so a dead node stays in every ring: the ring still *routes to
 corpses* and every read pays a failed hop before falling back. That earns Phase 4.
-- ☐ Consistency vs availability trade-off — the *code* consequence (versioned values, read-repair) is still open.
-  See Next action (b).
+- ☑ Consistency vs availability trade-off — built and **demonstrated E2E** on `cap-demo` (S18–S21):
+  **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads** (`X-Conflict` + the sibling set),
+  a **version-aware heal + cleanup** (a stranded concurrent sibling survives), the **coordinator picker** (`via`),
+  **the cut** — a partition under the HTTP clients that lets both sides accept a write, the heal keep both, and a
+  read surface the conflict — (S20) **`/state` reports the partition so the ring splits into two** (per-side rings,
+  reload-faithful), and (S21) **the dial** (`W`/`R_read` with a held ring — refusals, checkerboard, live
+  scorecard), and (S21) **read-repair-on-read** — a read now writes each surviving version back to any reachable
+  owner that lacked it (`readRepair`), so a lagging-but-alive replica converges on the read. Browser-verified end
+  to end. The heavier convergence cousins (hinted handoff, Merkle anti-entropy) stay unbuilt on purpose — see (b).
 
 ### Phase 4 — Failure detection
 - ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each `heartbeatInterval`
@@ -500,6 +581,279 @@ re-replicate.
 
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
+
+### Session 21 — 2026-07-19 · 7B — the consistency dial (W / R_read), with a held ring
+**Teach → quiz (3/3) → build, then browser-verified.** A background Plan agent produced the full 7B spec; the
+build followed its commit order. Taught the quorum from first principles (stale-read problem → `R_read+W>R`
+overlap → the *pair* not either number), quick-check **3/3** — he nailed Q3 cold (overlap ≠ ordering: quorums
+make a reader *see* a recent write, they do not serialize concurrent writes, so two concurrent writes still
+become siblings). Then part 2 (refusal = the CP end; the checkerboard; and the trap) before building.
+
+- **The non-obvious core: the ring must stop shrinking, or a quorum is a rubber stamp.** A quorum is a fraction
+  and needs a fixed denominator. Under a cut, each side normally convicts the far side and `ring.Remove`s it
+  (Phase 4) — re-owning the keyspace among its survivors, so `W=2` is met by an *invented* owner set. `node`
+  gained **`holdRing`**, which gates `ring.Remove`/`Add` in `heartbeatRound`: at the strong setting the far owners
+  stay in the ring, so a coordinator that can't reach `W` of them **refuses** instead of rubber-stamping. Same
+  `ring.Remove` line, *correct for AP, fatal for CP*. This is the connection to S20: the two-ring split we drew is
+  exactly the shrinking the CP dial must prevent.
+- **Enforcement.** `handleClientGet` refuses **503** when fewer than `R_read` owners answer — a reachable-count
+  threshold on the existing gather-all (NOT early-stop, which would break 7A conflict detection); `R_read=1` is
+  byte-for-byte the old read. `handleClientSet`'s quorum miss is now **503** (was 502). `writeQuorum` read moved
+  under the lock, since the dial mutates it at runtime.
+- **Wiring.** `cluster.SetQuorum(w, rRead)` validates `1≤w,rRead≤rf`, sets W/R_read on every node and
+  `holdRing = w+rRead>rf`, inherited by `wireAll`/`Revive`. `State` reports `W`/`RRead`. `POST /quorum`.
+- **Frontend.** `DialPanel` (ONE/QUORUM presets + W and R_read segmented selectors + a live `W+R_read {>,≤} R`
+  readout that flips to a held/cyan state), a **Stats dial tile**, and a **Scorecard** — one probe row per dial, so
+  flipping and re-probing stacks the controlled experiment (a conflict counted as *both sides accepted*, no mend
+  needed). **Verified live: QUORUM → 5 accepted / 5 refused / 0 conflicts (checkerboard); ONE → 10 / 0 / 5
+  (divergence).** The refused writes and the conflicts are the same writes — the CAP dial, measured.
+- **Tests** (all `-race`): node `TestReadRefusedBelowReadQuorum`, `TestWriteRefusedBelowWriteQuorum`; cluster
+  `TestSetQuorumValidation`, `TestHeldRingRefusesLosingSideOfCut`, and the money contrast
+  `TestUnheldRingLetsLosingSideServeAfterShrink` (proves holdRing is load-bearing: unheld, the losing side
+  re-owns and serves the very write the held ring refused). Full tree green under `-race`. Still on `cap-demo`.
+- **Layout, this session too** (his asks): key table shows per-side owners under a cut (roomier two-row cards);
+  Write/Read moved to a side-by-side row in the left column; the partition renders as two independent rings.
+- **Split the dial onto its own tab** (his ask — the dial was cluttering the partition demo). Three tabs now,
+  each its **own cluster** (`demoClusters = replication, cap, consistency`): **Replication & Self-Heal** (death →
+  heal), **Partitions & Conflicts** (the cut → concurrent writes → siblings, at the eventual dial), and
+  **Consistency Dial** (the same cut, but tune `W`/`R_read` → refusals / checkerboard / scorecard). The dial
+  demo needs its own cluster for the same reason inverted from S17's: it sets `W+R_read>R` so the cut *refuses*
+  rather than diverges — the opposite of the partitions tab's siblings story — so the two can't share a dial.
+  Both cut-capable tabs get `PartitionPanel`; only the dial tab gets `DialPanel`/`Scorecard`/the dial Stats tile.
+- **Activity-log narration for the new system** (his ask — the ordered event log was a standout deliverable, so
+  the CAP mechanisms deserved it too). New manager-appended events: **`refuse`** (a `503` — the dial's CP "no",
+  on a write or read; only the 503, not a 502-all-unreachable) and **`conflict`** (a read surfaced concurrent
+  siblings, values inline). New node-drained event: **`repair`** (a read-repair convergence — `node.repairLog` →
+  `DrainRepairLog` → `State` appends, grouped by the caught-up owner, mirroring the heal/cleanup drain). Enhanced
+  **`set`** to name the coordinator (`via`). Frontend: tag colours for `cut`/`mend`/`refuse`/`conflict`/`repair`
+  (refuse=red, conflict=amber, repair/mend=green). Browser-verified end to end: the log narrated the checkerboard
+  (writes via n3 accepted, via n0 refused), the dial changes, the divergence, four conflict reads, and the
+  read-repair catch-up — all in causal order in the one shared list.
+
+### Session 20 — 2026-07-19 · `/state` reports the partition — the ring genuinely splits
+**Build + browser verification, on `cap-demo`.** Closed the S19 follow-up: the cut was tracked client-side, so a
+reload lost the banner while the backend cut stayed live. Now the manager reports it and the ring splits.
+
+- **The concept, first (the honesty question).** *Who is allowed to know there's a partition?* No **node** can —
+  each only knows "I can't reach peer X," and can't tell a cut from a crash (Phase-4's silence). But the
+  **manager** injected the cut, so it may report the sides the same way it reports a Kill: out-of-band control-
+  plane knowledge, honest as a readout, dishonest only if we pretended a node computed it. Aayush's own framing
+  sharpened it: consistent hashing's **minimal-movement** survives a partition (each side only re-owns the far
+  side's arcs), but **global agreement on ownership** was never a ring property — it held only *because
+  membership views agreed* (his S18 answer). A cut breaks that precondition by construction, so **there is no
+  longer one ring — there are two, and they disagree.** The current single god's-eye ring is the *fiction*; the
+  split render is the honest one. And the shrink is **mandatory**, not cosmetic: a side that kept the far nodes
+  in its ring would route to unreachable owners and *refuse* — that's CP; AP requires each side to shrink,
+  re-own, and keep serving.
+- **Backend (`cluster/`).** `Cluster` records the active cut (`cutA/cutB`); `State()` returns
+  `Partition{sideA,sideB,vnodesA,vnodesB}` + per-key `OwnersA`/`OwnersB` from two per-side rings (side A =
+  alive − B, side B = alive − A; a bridge node lands in both). **Under-replication judged per side** — a key
+  complete for its side no longer paints under-replicated for the whole cut. Helpers `ringOver`/`vnodesOf`/
+  `setOf`. New test `TestStateReportsPartitionWithPerSideOwnership` (no polling: per-side owners come from the
+  manager's ring math over the stored sides, correct the instant `Cut` returns).
+- **Frontend.** Deleted the client-only `cut` state; banner + panel + rings now read `state.partition`, so a
+  reload is faithful. **A cut renders as two independent `RingViz` side by side** — this replaced a first pass
+  that overlaid the two per-side rings as concentric bands in ONE ring (built, then dropped same session on
+  Aayush's call: *a partition splits an AP system into two clusters, so draw two clusters* — the overlap read as
+  confusing, the split reads as the reality). `App.sideState` slices the god's-eye snapshot into a self-contained
+  per-side `State` (that side's nodes, its ring points, `ownersA`/`ownersB`, holders filtered to the side, and
+  `aliveCount` = the side's own count — from A's view the far side is simply dead), and a now partition-agnostic
+  `RingViz` draws each with a `sideLabel`. The **Key-ownership table** was the same fiction one layer down — it
+  rendered the single-ring `owners`; now under a cut it shows both sides (`A …owners  B …owners`) so the tables
+  and rings can't drift. (Layout: Write/Read moved to a side-by-side row in the left column under the ring; the
+  right column is Failure Injection · Partition · Activity Log.)
+- **Browser-verified.** Cut `{n0,n2,n4}|{n1,n3}` → banner + split ring (gold/purple outer = B, cyan/pink/green
+  inner = A) + two-tone keys (key:2 half-purple/half-pink = n1 on B, n2 on A). **Full reload → CAP tab → all
+  reconstructed from `/state`** (the bug, fixed). Mend → single ring back. `NODES ALIVE` stayed 5/5 throughout.
+  Honest artifact under a live cut: **COPIES 60/36** (gold) — each side re-replicates among itself, so total
+  copies exceed the single-ring's intended 36; converges after mend+heal+cleanup.
+- **Process.** `gofmt`/`vet`/`tsc`/`vite build` clean; all Go packages green under `-race` **except** the known
+  pre-existing `TestDeleteFindsCopiesTheRingNoLongerNames` load-flake (item e; 5/5 in isolation, untouched).
+  Separately, a background **Plan agent** produced the full **7B "dial"** implementation spec (teach-then-build,
+  not code) — held for the next session; key call: the strong dial setting must **hold the ring fixed**
+  (`node/`, gate `ring.Remove`/`Add`), and read enforcement is gather-all + a reachable-count threshold (not
+  early-stop, which would break 7A conflict detection). Still on `cap-demo`, merged to main by hand.
+
+### Session 19 — 2026-07-18 · 7A COMPLETE — conflict-aware reads, version-aware heal/cleanup, the coordinator picker, the cut; verified E2E
+**Build + browser verification, seven commits on `cap-demo`** (no quiz — he asked to skip). This closes the
+**entire 7A build arc**, verified end-to-end in the browser. Heavy use of parallel background agents (FE conflict
+card, coordinator-picker BE+FE, the cut BE, cut UI, the docs) while the core algorithm work happened in the
+main thread. The first three increments share one through-line: **presence≠version, applied to each mechanism's
+own decision** — the read's which-owner-answered, the heal's who-is-the-healer, the cleanup's is-this-surplus.
+All three carried the same blindness; all three are closed here.
+
+- **Reads detect conflicts** (`42d1335`). `handleClientGet` no longer stops at the first hit — it **gathers every
+  reachable owner's versions** and folds them with a new exported `cache.MergeVersions` (wrapping the internal
+  `reconcile`, so the invariant has one home). One survivor ⇒ a plain value (the unchanged client contract);
+  two+ ⇒ concurrent siblings, returned as a JSON array under a new `X-Conflict: n` header — **none dominates, so
+  picking one would destroy an acked write.** `servedBy` now names the first owner holding a **surviving**
+  version, not merely the first that answered — presence≠version, at the header level. Wired end to end:
+  `cluster.ReadResult` gained `Conflict`/`Siblings`, `cluster.Get` parses `X-Conflict`, `/get` emits both, and
+  the frontend conflict card renders off the same two fields.
+  - ⚠️ **Behaviour change, not a regression:** a conflict-aware read *cannot stop early*, so a healthy read now
+    hits **every** owner instead of hitting the primary and marking replicas "skipped." `TestReadPathNamesEvery`
+    `OwnerAndWhatItSaid` was updated to gather-all semantics. "skipped" returns in **7B**, when `R_read < R` asks
+    only the first `R_read` owners. New test `TestReadDetectsConcurrentSiblings`.
+- **Heal + cleanup go version-aware** (`814df5d`). Same presence≠version blindness, closed in both:
+  - **Heal:** was `Snapshot()` (one version per key) + a has-the-key probe, so a `bob` on one owner and a
+    concurrent `carol` on another each looked "already present" to the other's healer — **neither sibling ever
+    replicated.** Now `SnapshotAll()` sees every local version and the healer is chosen **per version**: I heal
+    `v` only if no owner ranked ahead of me *covers* it (holds `v` or a dominator). `bob`'s healer and `carol`'s
+    are different owners ⇒ both propagate; a stale local version a dominator covers is stood down and replaced.
+  - **Cleanup:** dropped a non-owned copy once every owner answered "has the key" (presence) — which would
+    **discard a sibling no owner holds** (a write a down owner missed, or one side of a cut), losing an acked
+    write. Now it drops only once every owner **covers every version** the copy carries; an uncovered version is
+    a stranded sibling — kept, with the heal re-armed to propagate it.
+  - New shared helpers `covered` (holds-it-or-a-dominator) and `coveredAhead` (an owner ranked ahead covers it).
+    New tests `TestHealPropagatesStrandedSiblings`, `TestHealReplacesDominatedVersion`, and cleanup's "keeps a
+    concurrent sibling no owner holds."
+- **The coordinator picker** (`6f088fb`). `Set`/`Get` gained a `via` naming the coordinating node — `""` is the
+  old any-live behaviour byte-for-byte; a dead/unknown `via` is refused with a new exported `*NoSuchNodeError`
+  (→ 400), **never rerouted**, because determinism is the whole point of the partition demo (drive a write
+  through one side and another through the other). Frontend: a shared `CoordinatorSelect` on both cards, fed by
+  the existing state poll, that collapses a stale pick back to auto if the chosen node dies before submit.
+- **The cut** (`4ca295c`), then **simplified to one `gate`** (`90126eb`, 116 → 45 lines). A partition is a fact
+  about a **pair**, not a node, so it lives **under** the HTTP clients: each node's `gate` is a mutex-guarded set
+  of blocked peer addresses that *is* the `RoundTripper`, shared by the data **and** health clients, so one cut
+  drops both — which is what makes each side convict the other and shrink its ring. Gated at `RoundTrip`, not
+  `DialContext`, so a keep-alive connection pooled before the cut is refused too. `Cluster.Cut(sideA, sideB)`
+  validates disjoint, all-live sides up front (all-or-nothing) and `Mend` clears every block set. The
+  simplification restored the pre-cut behaviour: both clients originally shared `http.DefaultTransport`, so
+  "one shared gate" *removed* a per-client-pool layer the first draft had added for no reason. `covered`/
+  `coveredAhead` from the heal are the exact primitives the mend's reconciliation leans on.
+  - ⚠️ **A partition is invisible to the manager.** It kills no one, so `State().AliveCount` stays 5/5 under a
+    cut — only a per-node read trace sees a side's ring shrink. The demo test polls that trace instead of
+    sleeping. This is S9's "no god's-eye view" landing as a *code* constraint, not just a slogan.
+- **The cut UI + conflict card wiring** (FE, `1f10793` and earlier). A `PartitionPanel` (per-node A|B toggles,
+  "split evenly"), a pulsing "NETWORK PARTITIONED" banner, and ring A/B tags; the conflict card renders the
+  sibling set off `X-Conflict` + the array. ⚠️ `/state` reports no partition, so the active cut is tracked
+  **client-side** and a reload loses the banner (the backend cut stays live). Flagged as the next follow-up —
+  partition state in `/state`, which also unlocks per-key two-colour conflict markers.
+- **Verified the whole money moment E2E in a real browser.** On the CAP tab: cut `{n0,n2,n4} | {n1,n3}` (all
+  nodes jumped to 12 keys as each side re-replicated alone), wrote `cart=milk,eggs` via **n0** and
+  `cart=milk,bread` via **n3** — **both accepted** — then mended. The activity log narrated the reconcile
+  (`MEND` → `HEAL n0→n1`, `n1→n0`, `n1→n2` → `CLEANUP` dropping surplus, not the siblings), and a gather-all
+  read returned the **conflict card with both real values**. Every layer this session built fired in sequence.
+  - ⚠️ **First take failed on a self-inflicted TTL:** the writes used a 2-min TTL and `cart` **expired** while I
+    fumbled the native `<select>`; the sweeper reclaimed it before the read. The heal logs proved it had
+    reconciled correctly regardless. Redone with `never` — clean. Lesson banked: a demo key gets `never`.
+- **Process:** all seven commits on `cap-demo`, still merged to main by hand (the S17 auto-deploy lesson).
+  `partition.go` was reviewed line-by-line and then simplified at his request — the first-draft `blocker` +
+  `blockingTransport` + `partitionedError` + constructor + assert collapsed to one `gate` with no behaviour
+  change (full tree green under `-race`, cut test 3× clean).
+- **Reframed the whole system (his framing, sharpened together).** It is a **Dynamo-style leaderless AP cache**,
+  and the two tabs are **two failure modes**: node death → *staleness* (heal fixes it, one truth to copy) vs
+  partition → *divergence* (two truths, vector clocks detect + siblings surfaced à la Dynamo). Two points he
+  drove and we specified: **divergence's sole cause is concurrent writes** (a partition *forces* concurrency but
+  a healthy-network race can too), and **linearizability would delete conflict resolution** — not by forbidding
+  concurrent *issue* but by *serializing* at write time, so the conflict reappears as a *refused write* under
+  partition. Hence **AP detects and defers; CP serializes and prevents**, and the `W`/`R_read` dial is *tunable
+  consistency spending availability*, never linearizable. Written into **HLD §0 "The system, in one frame"**
+  (the canonical statement), the two dashboard tab blurbs (failure-mode framing) + a top-line identity, and two
+  now-stale HLD table rows corrected to **⇒ AS BUILT (7A)** (vector clocks, and the cut). ⚠️ `CAP.md`'s deeper
+  S17-flagged rewrite (§9 Lamport → vclocks, §10–14) is still open — the framing lives in HLD §0 meanwhile.
+- **Framing, sharpened further, then `CAP.md` brought to AS-BUILT.** Two forks specified in HLD §0: (a)
+  **siblings vs LWW** — we are the **Dynamo/Riak** branch (never silently lose an acked write), not Cassandra's
+  LWW; this axis is *independent* of the dial (we borrow the dial from Cassandra, the resolution from Dynamo).
+  (b) **The dial is delegation, not "more consistency"** — it hands the *"how fresh must this read be?"* choice
+  to the caller; **vector clocks are architecturally forced, the dial is optional.** ⚠️ His catch: **a request
+  carries W *or* R_read, never both** (read XOR write), and no-stale-reads is the *pair* `R_read+W>R` (a strong
+  writer AND reader) — a `R_read=2` read over `W=1` writes is 3, not >3, still stale. And **our dial is
+  cluster-wide, not per-request** (Dynamo's ideal); noted as the demo's simplification. `CAP.md` marked
+  AS-BUILT throughout (§1 gate, §9 presence≠version closed, §11 gather-all + dial-is-7B, §12 7A done). The CAP
+  tab blurb went through several passes and finally **dropped the dial entirely** — it belongs in a dedicated
+  **scorecard section** (a "same requests, two dial settings" controlled experiment), built with 7B.
+- **Two partition-fidelity UI fixes** (`RingViz.tsx`). (1) **No heal packet crosses an active cut** (`ee389a2`)
+  — the packet animation picked its sender from the manager's *partition-blind* owner list, so a within-side
+  copy (n4→n3) was drawn from an owner on the far side; now the sender must be on the holder's side of the cut
+  (`canReach`), else nothing is drawn. Browser-verified across 3 cut shapes incl. an **unassigned bridge node**.
+  A clean instance of "no god's-eye view": the animation faithfully rendered a view that cannot see the
+  partition. (2) **Packets sequence by side** (`f1465a2`) — one side's whole burst plays before the other's,
+  since two at once read as chaos. ⚠️ **Open for tomorrow:** the sequenced pacing is ~8s for a big two-sided
+  heal (PACKET_MS 1900 × two sides) — decide whether to keep or snappier-tune (overlap tails / faster packets
+  under a cut). Also open: whether to suppress cross-partition **ownership links** in the frontend now vs the
+  proper fix — **`/state` reports the partition** so the ring can genuinely split (the flagged backend follow-up,
+  which also unlocks two-colour conflict keys).
+- Full tree green under `-race` (bar the known intermittent `cluster` delete flake, item (e)). Still on
+  `cap-demo`, merged to main by hand. **Remaining in the 7A arc:** *the cut* (fault injector, next headline) and
+  the *coordinator picker* (`via=n0`, now in progress via background agents); the conflict card is done + wired.
+
+### Session 18 — 2026-07-17 · 7A begins — versions built and flowing, on a branch
+**Cold quiz + teach + build, three commits on `cap-demo`.** Opened by confirming the live demo was fixed
+(Vercel↔GitHub reconnected — verified `/api/replication/state` serves 200 live, not on faith). Then 7A.
+
+- **Carried #1 CLOSED.** Re-asked the presence≠version **read half** cold, before writing any 7A code (the
+  point: that code closes the gap, so answering after proves nothing). He nailed it — **ring geometry decides,
+  not the coordinator**, stable across nodes *because membership views agree*. He volunteered the precondition
+  unprompted, which is the exact seam 7A pries open. The S17 gap is gone.
+- **Taught vector clocks from scratch** (shape · merge-then-bump · dominance · concurrency). Quick-check landed
+  3/3 with one real correction: on a resolution he reached for "just bump my own slot" — the trap. Shown that
+  bump-only leaves the loser **concurrent forever** (it doesn't dominate the sibling it didn't merge). He then
+  derived the storage consequence himself: for an owner to hold both `bob` and `carol`, a key must become a
+  **set**, not one value. Arrived at `CAP.md` §11's "read is now `[]Entry`" from the data side.
+- **Built, in three tested + committed increments** (full tree green under `-race` at each):
+  - `vclock/` — the primitive. `Bump` (renamed from `Next` at his request — "merge, then bump").
+  - versioned `cache` — `[]Entry` per key, `reconcile` by dominance, additive so Phase-1 stayed untouched.
+    ⚠️ `reconcile`'s **Equal** case must take the *incoming* value (LWW for an identical clock) — `TestOverwrite`
+    caught the first version dropping a nil-version overwrite.
+  - `node` write path — `/kv` speaks versions (JSON + `X-Version`), `handleClientSet` does read-before-write
+    (`currentVersion` merge → `Bump(self)`). Read/heal still presence-based; that's next.
+- **Process decisions (his calls):** build 7A on a **branch** and merge to main by hand — the direct lesson
+  from S17's auto-deploy break; **reuse `Entry`/`[]Entry`**, no new "sibling" vocabulary; and **leaner comments**
+  than the old docs pushed (recorded as a preference). Scope kept to `cache`+`node`+`vclock` — no `cluster`,
+  `cmd`, or frontend touched yet.
+
+### Session 17 — 2026-07-16 · Phase 7 reversed twice, 7.0 shipped, and the demo it took down
+**Design + build + cold quiz.** Two reversals, both driven by Aayush pushing back on my recommendation, and
+both of which the docs already half-argued for against themselves:
+
+- **Vector clocks, not Lamport** (`CAP.md` §9 rewritten). His argument: the two writes either side of a cut
+  *are* concurrent (§4 says so — no "later" exists), so Lamport doesn't resolve the clash, it **invents a
+  fact** and destroys an acked write on the strength of it. I argued against it — the ghost was the demo's
+  best beat — and I was wrong: I claimed siblings leave eventual with no real cost, when siblings **are** the
+  cost, and a heavy one. The lesson that survived: **detection is the ceiling of any clock; only
+  serialization is above it. Raft doesn't resolve collisions better, it prevents them.**
+- **Fold the naive-AP demo away; the dial is two numbers, not five** (§11). One rule settles both: *a dial
+  should only offer settings a real operator would pick.* "No versions at all" and "quorum on a shrinking
+  ring" are bugs, not consistency levels. Cassandra's real dial is `ONE` vs `QUORUM` — exactly what's left.
+- **"CP" retired as a label.** §13 always said the strong end is Cassandra's `QUORUM`, not CP; six other
+  sections ignored it. The caveat was quarantined while the rest of the doc overstated — same pattern as S16.
+
+**Built 7.0** — two demo clusters in one process behind `/api/{cluster}/`, one tab each. `cluster/` needed
+**zero changes**, and the reason is the interesting part: nodes already bind `127.0.0.1:0` (the OS assigns
+ports, so two clusters cannot collide) and there is **no package-level mutable state** in `cluster/`, `node/`
+or `cache/`. **Isolation was structural before we asked for it.** Proven with a throwaway `-race` probe
+before writing a line, then browser-verified.
+
+**Two silent regressions caught by reaching for a literal path.** `noisyPaths` and the visit notifier both
+compared `r.URL.Path == "/api/state"`. Adding a segment made both match **nothing**: every poll would have
+logged at Info (burying each kill under thousands) and visit notifications would have **stopped firing
+outright**. Nothing errors, no test fails. Then my *first* fix (`HasPrefix`+`HasSuffix`) also matched the
+now-dead `/api/state`, so a curl to a 404 would push a visit — caught by the test I wrote for it. **Match the
+shape, never a literal.**
+
+**⚠️ The one that matters: 7.0 took the live demo down, and the docs predicted it wrongly.** I removed
+`/api/state` reasoning *"the dashboard is the only client and they ship together."* **They don't.** Render
+auto-deployed the new backend; **Vercel has not built since 2026-07-11** (7 commits back — and the giveaway is
+that its last build was a *docs-only* commit, so it wasn't path-filtering, it just stopped). So: live frontend
+calls `/api/state`, live backend 404s it, dashboard shows *"waking the cluster…"* forever. **Both deploys
+green, feature dead** — HLD §8.5's own lesson, collected. A manual redeploy from the Vercel UI produced **zero
+new deployments**, consistent with the Git link being broken (`live: false`, no `link` field on the project).
+**RESOLVED 2026-07-17: Vercel↔GitHub reconnected, live demo works again** — verified against
+`/api/replication/state` (HTTP 200, 5 alive nodes, keys with owners/holders). The design question it raised
+still stands: two independently-deployed halves mean a breaking API change needs either lockstep or a
+compatibility window, and we have neither.
+
+**Cold quiz before 7A** (4 Q + 2 follow-ups; **0 ✅ · 3 ⚠️ · 1 ⊘**, follow-ups **1 ✅ · 1 ⚠️** — full text in
+`QUIZZES.md`). The S9 pattern has *shifted*: he now reaches for the principle unprompted, but **answers the
+sub-question he finds most interesting and drops the rest** — Q2 and Q3 each asked three things and got one.
+A completeness habit, not a knowledge gap.
+- **Presence ≠ version narrowed, not closed.** Heal half ✅. Read half ❌ — he thinks the value depends on the
+  **coordinator**; it depends on the **ring**, which is worse, because ring geometry makes it **stable**.
+- **He beat a model answer.** On the cost of `W`, §14 said "write fault-tolerance", which makes `W=1` sound
+  free. He spotted that the surviving `W=1` write lives on **one node**: *"high chance that the write can be
+  lost since other 2 are down."* → **`W` is how much a `204` is worth** — availability vs **durability**, paid
+  on the healthy path. Folded into §14, credited.
 
 ### Session 16 — 2026-07-14 · CAP made teachable, and the doc that overstated itself
 **Teach + doc, no build, no formal quiz.** A deep pass on the Phase 7 material — partition, concurrent writes,

@@ -4,6 +4,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/AayushAlokGit/self-healing-distributed-cache/vclock"
 )
 
 // strayHolder finds a node holding a key it does NOT own, which is the only situation
@@ -116,6 +118,34 @@ func TestCleanupDropsOnlyWhatEveryOwnerConfirms(t *testing.T) {
 		// It must be reported, or the dashboard cannot show where the copies went.
 		if log := stray.DrainCleanupLog(); len(log) != 1 || !slices.Contains(log[0], key) {
 			t.Errorf("cleanup must record the keys it dropped, got %v", log)
+		}
+	})
+
+	t.Run("keeps a concurrent sibling no owner holds", func(t *testing.T) {
+		// The presence≠version hole, closed. Every owner holds bob; the stray holds carol, a
+		// concurrent sibling NONE of them has. A has-the-key check would drop carol — every
+		// owner "has the key" — losing an acked write. Version-awareness keeps it: no owner
+		// covers carol, so the copy stays and the heal is re-armed to propagate it.
+		nodes := startCluster(t, ids...)
+		setReplication(nodes, rf, 1)
+		stray, owners := strayHolder(t, nodes, ids, key, rf)
+
+		var empty vclock.Clock
+		bob := empty.Bump("n0")   // {n0:1}
+		carol := empty.Bump("n1") // {n1:1} — concurrent with bob
+
+		for _, id := range owners {
+			nodes[id].cache.SetVersioned(key, "bob", bob, time.Time{})
+		}
+		stray.cache.SetVersioned(key, "carol", carol, time.Time{})
+
+		stray.cleanup()
+
+		if !holds(stray, key) {
+			t.Fatalf("%s dropped carol, a sibling NO owner holds — a lost acked write, not a surplus copy", stray.ID())
+		}
+		if got := stray.CleanupDropped(); got != 0 {
+			t.Errorf("no owner holds carol, so nothing may be dropped; dropped %d", got)
 		}
 	})
 

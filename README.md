@@ -1,6 +1,6 @@
 # Self-Healing Distributed Cache
 
-### ▶ **[Live demo](https://self-healing-distributed-cache.vercel.app/)** · [API](https://self-healing-cache-api.onrender.com/api/state)
+### ▶ **[Live demo](https://self-healing-distributed-cache.vercel.app/)** · [API](https://self-healing-cache-api.onrender.com/)
 
 > ⏳ The backend sleeps when idle on its free tier, so **the first load can take ~30–60 s** while the
 > cluster wakes. The dashboard says so instead of looking broken. Everything after that is instant.

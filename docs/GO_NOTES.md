@@ -286,6 +286,14 @@ nodes lived in map buckets, growing the map would invalidate every one. So nodes
 independently heap-allocated: `map[string]*node`, not `map[string]node`. **Values that other values
 point at need stable identity, and map values have none.**
 
+⚠️ **A map field survives a struct copy as a shared reference.** Copying a struct copies the map
+*header*, not the entries — `b := a` gives two structs pointing at **one** table, so a write through
+either is seen by both. Bit us when `cache.Entry` gained a `vclock.Clock` (`map[string]uint64`): an
+`Entry` handed out of the cache aliases the version *still stored inside*. The fix is a discipline, not
+a type — `vclock` treats a `Clock` as **immutable**: `Bump`/`Merge` `Clone` first and return a new map,
+so the stored version is never mutated in passing. Same family as the S17 `peers`-map aliasing race
+(`maps.Clone` per node). → `vclock`, `cache.Entry`
+
 **And the pointer was free.** `BenchmarkGet`: 66.99 → 61.31 → **52.52 ns** across the two rewrites.
 The expected cost was a pointer chase; instead it *paid* for one, because a `*node` is addressable
 and `Get` stopped hashing the key a second time to store the entry back.
@@ -541,6 +549,30 @@ not at the call site. Free at runtime.
 
 **Accept interfaces, return structs.** `newVisits` takes a `Notifier` (any transport); `NewNtfy` returns a
 `*Ntfy` (everything it has). The caller can always narrow; it can never widen.
+
+### Method *values* vs method *expressions* — the receiver as an argument
+
+`c.Kill` is a **method value**: the receiver `c` is captured *now*, and you get a `func(string) error`.
+`(*Cluster).Kill` is a **method expression**: nothing is captured, and you get a plain
+`func(*Cluster, string) error` — **the receiver becomes the first parameter.**
+
+That distinction did real work in `cmd/server`. `nodeAction` used to take `c.Kill`, which only worked while
+there was exactly one cluster to bind at wiring time. With several, the cluster arrives *per request*:
+
+```go
+// before — the receiver is baked in at startup
+mux.HandleFunc("POST /api/kill", nodeAction(c.Kill))          // func(string) error
+
+// after — no receiver yet; handle() supplies it per request
+handle("POST /api/{cluster}/kill", nodeAction((*cluster.Cluster).Kill))  // func(*Cluster, string) error
+```
+
+**Python parallel, and it's exact.** `instance.method` is a bound method; `Class.method` is a plain function
+whose first parameter is `self`, so `Class.method(instance, arg)` works. Go's two forms are the same idea
+with static types. **C++ has no equivalent** — `&Class::method` is a pointer-to-member, which needs an
+object *and* `.*`/`->*` to invoke; it is not a plain callable.
+
+Reach for the expression when the receiver is **data**, chosen later — not when it's fixed at wiring time.
 
 ---
 

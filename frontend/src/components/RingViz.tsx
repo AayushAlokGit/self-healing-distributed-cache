@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
-import type { State } from '../api'
-import { COLORS, colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, ownershipArcs } from '../geometry'
+import type { KeyState, State } from '../api'
+import { colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, ownershipArcs } from '../geometry'
 
 // Slow enough that a key is visibly seen travelling between nodes; the stagger is capped
 // so a large heal still finishes promptly.
@@ -9,7 +9,11 @@ const PACKET_STAGGER_MS = 140
 const MAX_STAGGER_MS = 2200
 const SHOCK_MS = 1100
 
-export function RingViz({ state, prev }: { state: State; prev: State | null }) {
+// RingViz draws ONE ring. A partition is two independent clusters, so the dashboard renders two
+// RingViz side by side (App builds a per-side State each) — the honest picture, since a cut really
+// does split an AP system into two clusters that each own their whole keyspace. sideLabel titles
+// one when it is a side of a cut; absent for the whole-network ring.
+export function RingViz({ state, prev, sideLabel }: { state: State; prev: State | null; sideLabel?: string }) {
   const layerRef = useRef<SVGGElement>(null)
   // Must stay memoised: `angles` is an effect dependency, so a fresh object each render
   // would re-run the diff below and fire the same packets twice.
@@ -58,16 +62,20 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
     }
 
     const heldBefore = new Map(prev.keys.map((k) => [k.key, new Set(k.holders)]))
-    let launched = 0
+    // Fly a packet from a sender to each newly-gained holder. The sender must have a marker on
+    // THIS ring (angles[o] defined) — in a per-side ring the owners the sender comes from are
+    // this side's owners, so this never draws across a cut (that boundary is now two components).
+    let i = 0
     for (const k of state.keys) {
       const had = heldBefore.get(k.key) ?? new Set<string>()
       for (const holder of k.holders) {
         if (had.has(holder)) continue
-        // Prefer a live owner as the sender; fall back to any other holder.
-        const src = k.owners.find((o) => o !== holder && angles[o] !== undefined) ?? k.holders.find((o) => o !== holder)
+        const src =
+          k.owners.find((o) => o !== holder && angles[o] !== undefined) ??
+          k.holders.find((o) => o !== holder && angles[o] !== undefined)
         if (src === undefined) continue
-        flyPacket(angles[src], angles[holder], colorFor(holder), Math.min(launched * PACKET_STAGGER_MS, MAX_STAGGER_MS))
-        launched++
+        flyPacket(angles[src], angles[holder], colorFor(holder), Math.min(i * PACKET_STAGGER_MS, MAX_STAGGER_MS))
+        i++
       }
     }
 
@@ -79,9 +87,36 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
     }
   }, [state, prev, angles])
 
+  const keyDot = (k: KeyState) => {
+    const [cx, cy] = xy(k.angle, KEY_R)
+    const under = k.underReplicated
+    return (
+      <circle
+        key={k.key}
+        cx={cx}
+        cy={cy}
+        r={5}
+        className={'keydot' + (under ? ' under' : '')}
+        fill={colorFor(k.owners[0] ?? 'n0')}
+      >
+        <title>
+          {k.key}
+          {'\n'}owners: {k.owners.join(', ')}
+          {'\n'}holders: {k.holders.join(', ')}
+          {under ? '\n⚠ under-replicated' : ''}
+        </title>
+      </circle>
+    )
+  }
+
   return (
-    <div className="stage">
-      <svg viewBox="0 0 720 720" aria-label="hash ring">
+    <div className={'stage' + (sideLabel ? ' stage-side' : '')}>
+      {sideLabel && (
+        <div className="ring-title">
+          {sideLabel} · {state.aliveCount} node{state.aliveCount === 1 ? '' : 's'}
+        </div>
+      )}
+      <svg viewBox="0 0 720 720" aria-label={sideLabel ? `${sideLabel} hash ring` : 'hash ring'}>
         <defs>
           <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
             <feGaussianBlur stdDeviation="4" result="b" />
@@ -99,31 +134,10 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
         ))}
 
         {/* Leaders first: SVG paints in document order, so dots and names sit on top. */}
-        {labels.map(
-          (l) => l.leader && <line key={l.key} className="keyleader" {...l.leader} />,
-        )}
+        {labels.map((l) => l.leader && <line key={l.key} className="keyleader" {...l.leader} />)}
 
         {/* Key dots sit at their true hash angle, unlike the node markers. */}
-        {state.keys.map((k) => {
-          const [cx, cy] = xy(k.angle, KEY_R)
-          return (
-            <circle
-              key={k.key}
-              cx={cx}
-              cy={cy}
-              r={5}
-              className={'keydot' + (k.underReplicated ? ' under' : '')}
-              fill={colorFor(k.owners[0] ?? 'n0')}
-            >
-              <title>
-                {k.key}
-                {'\n'}owners: {k.owners.join(', ')}
-                {'\n'}holders: {k.holders.join(', ')}
-                {k.underReplicated ? '  ⚠ under-replicated' : ''}
-              </title>
-            </circle>
-          )
-        })}
+        {state.keys.map((k) => keyDot(k))}
 
         {labels.map((l) => (
           <text
@@ -140,11 +154,7 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
           const [x, y] = xy(angles[n.id], NODE_R)
           const color = colorFor(n.id)
           return (
-            <g
-              key={n.id}
-              className={'nodeg ' + (n.alive ? 'alive' : 'dead')}
-              transform={`translate(${x},${y})`}
-            >
+            <g key={n.id} className={'nodeg ' + (n.alive ? 'alive' : 'dead')} transform={`translate(${x},${y})`}>
               <circle className="halo" r={26} fill={n.alive ? color : 'none'} stroke={color} />
               <circle className="core" r={20} fill={n.alive ? '#0b1220' : '#171c26'} stroke={color} filter="url(#glow)" />
               <text className="label">{n.id}</text>
@@ -173,18 +183,20 @@ export function RingViz({ state, prev }: { state: State; prev: State | null }) {
       )}
 
       <div className="legend">
-        {Object.keys(COLORS).map((id) => (
-          <div className="row" key={id}>
-            <span className="dot" style={{ color: COLORS[id] }} />
-            {id}
+        {state.nodes.map((n) => (
+          <div className="row" key={n.id}>
+            <span className="dot" style={{ color: colorFor(n.id) }} />
+            {n.id}
           </div>
         ))}
       </div>
 
-      <div className="caption">
-        The ring is split into arcs, each coloured by the node that owns that slice. A key (dot) is
-        owned by the first node clockwise. Kill a node and watch its keys jump to new owners.
-      </div>
+      {!sideLabel && (
+        <div className="caption">
+          The ring is split into arcs, each coloured by the node that owns that slice. A key (dot) is
+          owned by the first node clockwise. Kill a node and watch its keys jump to new owners.
+        </div>
+      )}
     </div>
   )
 }
