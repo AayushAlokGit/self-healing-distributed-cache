@@ -54,8 +54,9 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
     2026-07-17: Vercel↔GitHub reconnected, verified live.**
   - **7A — the cut, the coordinator picker, vector clocks, sibling-aware heal, the conflict card.** Demo:
     both sides accept a write, the heal proves the two writes never saw each other, and **keeps both**.
-    **In progress on branch `cap-demo` (S18)** — build it there, verify locally, merge to main by hand so
-    a breaking API change never auto-deploys onto the live frontend again (the S17 failure). Done so far:
+    **COMPLETE on branch `cap-demo` (S18–S19), verified end-to-end in the browser** — built there, merge to
+    main by hand so a breaking API change never auto-deploys onto the live frontend again (the S17 failure).
+    The steps:
     - ✅ **`vclock/`** (`129ab1f`) — `Clock` = one counter per node; `Merge`/`Bump`/`Compare`
       (Before/After/Equal/**Concurrent**). Merge-then-bump; the resolution-must-merge trap is a test.
     - ✅ **Versioned cache** (`3cf80dc`) — a key holds `[]Entry`, each with a `vclock.Clock` and its own
@@ -75,9 +76,27 @@ dashboard polish is a priority · R=3 configurable). Run it locally: `go run ./c
       only once every owner *covers* every version it carries, so a sibling no owner holds is kept and the heal
       re-armed. Unifying: **presence≠version applied to each mechanism's own decision** (read's who-answers, heal's
       who-heals, cleanup's is-this-surplus).
-    - ⬜ **The cut** ← *next headline* (fault injector under the two `http.Client`s) · **coordinator picker**
-      (`via=n0`) — **IN PROGRESS** (background agents) · ~~**the conflict card** (UI)~~ **DONE** — built and wired
-      to `X-Conflict` + the siblings array.
+    - ✅ **Coordinator picker · the cut · the conflict card** — **DONE S19, 7A COMPLETE.**
+      - **Coordinator picker** (`6f088fb`): `Set`/`Get` take a `via` naming the coordinating node ("" = any
+        live, unchanged); a dead/unknown `via` is refused with `*NoSuchNodeError` (400), never rerouted —
+        determinism is the point. Frontend: a `CoordinatorSelect` on the Write and Read cards.
+      - **The cut** (`4ca295c`, simplified to one `gate` in `90126eb`): a partition lives **under** the HTTP
+        clients — each node's `gate` (a mutex-guarded blocked-address set shared by the data *and* health
+        clients) refuses blocked peers in `RoundTrip`, so a cut drops data **and** heartbeats together and each
+        side convicts the other and shrinks its ring. `Cluster.Cut(sideA, sideB)`/`Mend`; symmetric though each
+        node blocks only its own outgoing dials. Gated at RoundTrip (not DialContext) so a keep-alive connection
+        pooled before the cut is refused too.
+      - **The conflict card + cut UI** (FE `1f10793`): the card renders siblings off `X-Conflict` + the array;
+        a `PartitionPanel` (per-node A|B toggles), a "NETWORK PARTITIONED" banner, and ring A/B tags. ⚠️ The cut
+        is tracked **client-side** — `/state` reports no partition, so a page reload loses the banner (the
+        backend cut stays live). **Next follow-up:** report partition state in `/state`, which also unlocks
+        per-key two-colour conflict markers on the ring.
+    - ✅ **Verified end-to-end in the browser (S19).** Cut `{n0,n2,n4} | {n1,n3}` → wrote `cart=milk,eggs` via
+      **n0** and `cart=milk,bread` via **n3** (both accepted, each side serving alone) → mend → the version-aware
+      heal reconciled (activity log: `HEAL n0→n1`, `n1→n0`, `n1→n2`; cleanup dropped surplus, **not** the
+      siblings) → a gather-all read returned the **conflict card with both real values**. **NODES ALIVE stayed
+      5/5 the whole time** — the manager cannot see a partition (S9's "no god's-eye view", live). ⚠️ First take
+      used a 2-min TTL and `cart` expired mid-demo; redone with `never`.
   - **7B — the dial** (`W` 1→2, `R_read` 1→2): refusals, checkerboard, live scorecard. Needs a new
     `Cluster.SetQuorum(w, rRead)` — `rf`/`wq` are fixed at `New()` today. **The only `cluster/` change Phase 7
     asks for.**
@@ -347,10 +366,13 @@ The canonical record. ☑ = taught **and** the quick-check passed · ◐ = parti
 **Phase 3 core COMPLETE (naive on purpose).** Still synchronous (writes hit all owners in-band — no async, no
 hinted handoff), and membership is **static**, so a dead node stays in every ring: the ring still *routes to
 corpses* and every read pays a failed hop before falling back. That earns Phase 4.
-- ◐ Consistency vs availability trade-off — the *code* consequence is now largely built on `cap-demo` (S18–S19):
-  **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads** (`X-Conflict` + the sibling set),
-  and a **version-aware heal + cleanup** (a stranded concurrent sibling survives). Open: the cut, the dial (`W`/
-  `R_read`), and the coordinator picker. See the 7A build arc under Next action (f).
+- ◐ Consistency vs availability trade-off — the *code* consequence is built and **demonstrated E2E** on
+  `cap-demo` (S18–S19): **versioned values** (`[]Entry` + vector clocks), **conflict-detecting reads**
+  (`X-Conflict` + the sibling set), a **version-aware heal + cleanup** (a stranded concurrent sibling survives),
+  the **coordinator picker** (`via`), and **the cut** — a partition under the HTTP clients that lets both sides
+  accept a write, the heal keep both, and a read surface the conflict. Browser-verified end to end.
+  Open: **7B, the dial** (`W`/`R_read` — refusals, checkerboard, scorecard) and read-repair-on-read (a read
+  currently *detects* a conflict; it doesn't write the merge back). See the 7A build arc under Next action (f).
 
 ### Phase 4 — Failure detection
 - ☑ **Heartbeats & timeouts** — a `/health` endpoint; every node pings every peer each `heartbeatInterval`
@@ -528,11 +550,13 @@ re-replicate.
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
 
-### Session 19 — 2026-07-18 · reads detect conflicts; heal + cleanup go version-aware
-**Build only, two committed increments on `cap-demo`** (no quiz — he asked to skip). This closes the build-arc
-item `⬜ Read + heal version-awareness`, and the through-line is one sentence: **presence≠version, applied to
-each mechanism's own decision** — the read's which-owner-answered, the heal's who-is-the-healer, the cleanup's
-is-this-surplus. All three carried the same blindness; all three are closed here.
+### Session 19 — 2026-07-18 · 7A COMPLETE — conflict-aware reads, version-aware heal/cleanup, the coordinator picker, the cut; verified E2E
+**Build + browser verification, seven commits on `cap-demo`** (no quiz — he asked to skip). This closes the
+**entire 7A build arc**, verified end-to-end in the browser. Heavy use of parallel background agents (FE conflict
+card, coordinator-picker BE+FE, the cut BE, cut UI, the docs) while the core algorithm work happened in the
+main thread. The first three increments share one through-line: **presence≠version, applied to each mechanism's
+own decision** — the read's which-owner-answered, the heal's who-is-the-healer, the cleanup's is-this-surplus.
+All three carried the same blindness; all three are closed here.
 
 - **Reads detect conflicts** (`42d1335`). `handleClientGet` no longer stops at the first hit — it **gathers every
   reachable owner's versions** and folds them with a new exported `cache.MergeVersions` (wrapping the internal
@@ -559,6 +583,40 @@ is-this-surplus. All three carried the same blindness; all three are closed here
   - New shared helpers `covered` (holds-it-or-a-dominator) and `coveredAhead` (an owner ranked ahead covers it).
     New tests `TestHealPropagatesStrandedSiblings`, `TestHealReplacesDominatedVersion`, and cleanup's "keeps a
     concurrent sibling no owner holds."
+- **The coordinator picker** (`6f088fb`). `Set`/`Get` gained a `via` naming the coordinating node — `""` is the
+  old any-live behaviour byte-for-byte; a dead/unknown `via` is refused with a new exported `*NoSuchNodeError`
+  (→ 400), **never rerouted**, because determinism is the whole point of the partition demo (drive a write
+  through one side and another through the other). Frontend: a shared `CoordinatorSelect` on both cards, fed by
+  the existing state poll, that collapses a stale pick back to auto if the chosen node dies before submit.
+- **The cut** (`4ca295c`), then **simplified to one `gate`** (`90126eb`, 116 → 45 lines). A partition is a fact
+  about a **pair**, not a node, so it lives **under** the HTTP clients: each node's `gate` is a mutex-guarded set
+  of blocked peer addresses that *is* the `RoundTripper`, shared by the data **and** health clients, so one cut
+  drops both — which is what makes each side convict the other and shrink its ring. Gated at `RoundTrip`, not
+  `DialContext`, so a keep-alive connection pooled before the cut is refused too. `Cluster.Cut(sideA, sideB)`
+  validates disjoint, all-live sides up front (all-or-nothing) and `Mend` clears every block set. The
+  simplification restored the pre-cut behaviour: both clients originally shared `http.DefaultTransport`, so
+  "one shared gate" *removed* a per-client-pool layer the first draft had added for no reason. `covered`/
+  `coveredAhead` from the heal are the exact primitives the mend's reconciliation leans on.
+  - ⚠️ **A partition is invisible to the manager.** It kills no one, so `State().AliveCount` stays 5/5 under a
+    cut — only a per-node read trace sees a side's ring shrink. The demo test polls that trace instead of
+    sleeping. This is S9's "no god's-eye view" landing as a *code* constraint, not just a slogan.
+- **The cut UI + conflict card wiring** (FE, `1f10793` and earlier). A `PartitionPanel` (per-node A|B toggles,
+  "split evenly"), a pulsing "NETWORK PARTITIONED" banner, and ring A/B tags; the conflict card renders the
+  sibling set off `X-Conflict` + the array. ⚠️ `/state` reports no partition, so the active cut is tracked
+  **client-side** and a reload loses the banner (the backend cut stays live). Flagged as the next follow-up —
+  partition state in `/state`, which also unlocks per-key two-colour conflict markers.
+- **Verified the whole money moment E2E in a real browser.** On the CAP tab: cut `{n0,n2,n4} | {n1,n3}` (all
+  nodes jumped to 12 keys as each side re-replicated alone), wrote `cart=milk,eggs` via **n0** and
+  `cart=milk,bread` via **n3** — **both accepted** — then mended. The activity log narrated the reconcile
+  (`MEND` → `HEAL n0→n1`, `n1→n0`, `n1→n2` → `CLEANUP` dropping surplus, not the siblings), and a gather-all
+  read returned the **conflict card with both real values**. Every layer this session built fired in sequence.
+  - ⚠️ **First take failed on a self-inflicted TTL:** the writes used a 2-min TTL and `cart` **expired** while I
+    fumbled the native `<select>`; the sweeper reclaimed it before the read. The heal logs proved it had
+    reconciled correctly regardless. Redone with `never` — clean. Lesson banked: a demo key gets `never`.
+- **Process:** all seven commits on `cap-demo`, still merged to main by hand (the S17 auto-deploy lesson).
+  `partition.go` was reviewed line-by-line and then simplified at his request — the first-draft `blocker` +
+  `blockingTransport` + `partitionedError` + constructor + assert collapsed to one `gate` with no behaviour
+  change (full tree green under `-race`, cut test 3× clean).
 - Full tree green under `-race` (bar the known intermittent `cluster` delete flake, item (e)). Still on
   `cap-demo`, merged to main by hand. **Remaining in the 7A arc:** *the cut* (fault injector, next headline) and
   the *coordinator picker* (`via=n0`, now in progress via background agents); the conflict card is done + wired.
