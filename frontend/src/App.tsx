@@ -33,13 +33,13 @@ const TABS: readonly Tab[] = [
     id: 'replication',
     label: 'Replication & Self-Heal',
     blurb: (s) =>
-      `Consistent-hash ring · R=${s.rf} replication · heartbeat failure detection · automatic re-replication`,
+      `Failure mode: nodes die. Heartbeats give each node its own view of who is alive; a heal loop restores R=${s.rf} copies. A death costs only staleness — there is one truth to copy.`,
   },
   {
     id: 'cap',
     label: 'CAP & Partitions',
     blurb: () =>
-      'The same ring, on its own cluster. Cut the network in two and each side keeps serving — a write to the same key on both sides becomes a conflict the cache keeps both of.',
+      'Failure mode: the network splits. Both sides keep serving, so one key can take two concurrent writes — divergence, not staleness. Vector clocks detect the clash and keep both as siblings for the client to resolve; the W / R_read dial trades availability for consistency.',
   },
 ]
 
@@ -92,6 +92,10 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           <h1>
             Self-Healing <span className="accent">Distributed Cache</span>
           </h1>
+          <p className="identity">
+            A leaderless, <strong>Dynamo-style AP cache</strong>. Each tab is a distributed-systems failure
+            mode — and how the cluster survives it.
+          </p>
           <nav className="tabs" role="tablist">
             {TABS.map((t) => (
               <button

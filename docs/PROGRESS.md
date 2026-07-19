@@ -617,6 +617,17 @@ All three carried the same blindness; all three are closed here.
   `partition.go` was reviewed line-by-line and then simplified at his request — the first-draft `blocker` +
   `blockingTransport` + `partitionedError` + constructor + assert collapsed to one `gate` with no behaviour
   change (full tree green under `-race`, cut test 3× clean).
+- **Reframed the whole system (his framing, sharpened together).** It is a **Dynamo-style leaderless AP cache**,
+  and the two tabs are **two failure modes**: node death → *staleness* (heal fixes it, one truth to copy) vs
+  partition → *divergence* (two truths, vector clocks detect + siblings surfaced à la Dynamo). Two points he
+  drove and we specified: **divergence's sole cause is concurrent writes** (a partition *forces* concurrency but
+  a healthy-network race can too), and **linearizability would delete conflict resolution** — not by forbidding
+  concurrent *issue* but by *serializing* at write time, so the conflict reappears as a *refused write* under
+  partition. Hence **AP detects and defers; CP serializes and prevents**, and the `W`/`R_read` dial is *tunable
+  consistency spending availability*, never linearizable. Written into **HLD §0 "The system, in one frame"**
+  (the canonical statement), the two dashboard tab blurbs (failure-mode framing) + a top-line identity, and two
+  now-stale HLD table rows corrected to **⇒ AS BUILT (7A)** (vector clocks, and the cut). ⚠️ `CAP.md`'s deeper
+  S17-flagged rewrite (§9 Lamport → vclocks, §10–14) is still open — the framing lives in HLD §0 meanwhile.
 - Full tree green under `-race` (bar the known intermittent `cluster` delete flake, item (e)). Still on
   `cap-demo`, merged to main by hand. **Remaining in the 7A arc:** *the cut* (fault injector, next headline) and
   the *coordinator picker* (`via=n0`, now in progress via background agents); the conflict card is done + wired.

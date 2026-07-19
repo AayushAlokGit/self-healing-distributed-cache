@@ -10,10 +10,54 @@
 | Designed | Reality |
 |---|---|
 | `SET` / `GET` / `DELETE` | `DELETE` **broadcasts to every peer**, not to the R owners the ring names (§7). |
-| Entry carries a `version` for LWW | **Not built.** The heal checks *presence*, not version — so a divergent key is skipped and the conflict is preserved forever. The known top gap; see PROGRESS "Next action (b)". |
+| Entry carries a `version` for LWW | **⇒ AS BUILT (7A, on `cap-demo`).** Not LWW — **vector clocks.** A key holds `[]Entry`; the heal reconciles by dominance and *keeps* concurrent siblings instead of dropping them; a read surfaces them as a conflict. The "presence ≠ version" gap is closed in the read, the heal, and cleanup. See PROGRESS S18–S19. |
 | Async replication, primary acks first | **Synchronous fan-out** to all R owners, acking after **W** (default W=1). The lost-write window in §6.1 is real all the same — W=1 *is* primary-only ack. |
 | Heal coordinated by the range's **primary** | **Corrected — see §6.** The primary rule stranded keys forever. The healer is the first owner, in ring order, that **actually holds** the key. |
-| `/admin/partition` (network split injection) | **Not built.** Failure injection is kill / revive / pause-health (a GC-pause stand-in). |
+| `/admin/partition` (network split injection) | **⇒ AS BUILT (7A, on `cap-demo`).** The cut — a partition injected **under the HTTP clients** (`node.gate` refuses blocked peers in `RoundTrip`, for data *and* health), driven from the dashboard via `Cluster.Cut`/`Mend`. Kill / revive / pause-health remain. |
+
+---
+
+## 0. The system, in one frame
+
+**This is a Dynamo-style, leaderless AP key-value cache.** Consistent-hash ring, R replicas per key,
+any node coordinates any key, **no consensus**. Nearly every choice below is downstream of that one
+identity. The two dashboard tabs are the *same* system under **two distributed-systems failure modes**,
+and the difference between them is the whole point:
+
+| | **Node failure** (Tab 1) | **Network partition** (Tab 2) |
+|---|---|---|
+| What breaks | a node **dies** | the network **splits** — nodes alive, mutually unreachable |
+| What it costs | **staleness / under-replication** — a *missing* copy | **divergence** — two writes that both happened |
+| Why | one truth exists; it just is not everywhere yet | two truths exist; neither is "later" than the other |
+| Coping mechanism | heartbeats · **independent per-node membership views** (no consensus on who is alive) · a heal loop that restores R copies | **vector clocks** detect the concurrency · **siblings surfaced to the client** to resolve (à la Dynamo's cart merge) |
+
+**Divergence has exactly one cause: concurrent writes** — two writes with no happens-before relation
+(neither saw the other). Causally-ordered writes never diverge (the later dominates; the heal just
+copies it over). A partition *forces* concurrency — both sides write blind to each other — but
+concurrency, and so divergence, can also arise from a plain write race on a healthy network; the
+partition demo is simply the most reliable way to *manufacture* it. "Concurrent" is the **happens-before**
+sense (no information flowed), not "same wall-clock instant."
+
+**Why vector clocks exist at all: because we chose AP.** They are the machinery for *detecting*
+concurrency we chose to allow. The strong-consistency end does not remove them by resolving conflicts
+better — it removes the *need* for them by **preventing** the conflict:
+
+- **AP (this system) — detect and defer.** Accept every write, record the lack of order (concurrent
+  clocks), surface siblings, let the client reconcile. Always available; may hand back a conflict.
+- **CP (linearizable) — serialize and prevent.** Force every write through a single total order
+  (consensus / a leader) *at write time*, so no two writes are ever left unordered: no siblings, no
+  resolution needed. The conflict does not vanish — it becomes a **refused write** on the minority side
+  of a partition. Consistent always; unavailable to the minority.
+
+So the `W` / `R_read` dial (Tab 2) is **Cassandra-style tunable consistency, not a CP switch.** Turning
+it toward `QUORUM` (`R_read + W > RF`) buys read-recency — but the currency is **availability** (the
+minority partition must refuse), and even maxed it is *not* linearizable: a quorum makes the latest
+write *reachable*, it does not *serialize* concurrent ones, so siblings still appear and the vector
+clocks are still needed at every setting. **Full/linearizable consistency is a different architecture** —
+consensus and a serialization point, i.e. a CP rebuild, not a dial position.
+
+*One honest artifact of being AP:* the manager's god's-eye dashboard **cannot see a partition** — it
+kills no one, so it still counts every node alive. *Dead* is a per-node **belief**, not a global fact.
 
 ---
 

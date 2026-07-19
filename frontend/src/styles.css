@@ -35,6 +35,10 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .title h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; font-weight: 700; }
 .title h1 .accent { background: linear-gradient(90deg, #22d3ee, #a78bfa); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .title p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+/* The system identity sits between the h1 and the tabs: what this whole thing IS, above the
+   per-tab blurb that says what one tab shows. A touch of bottom margin sets it off from the nav. */
+.title .identity { margin-bottom: 8px; max-width: 70ch; }
+.title .identity strong { color: var(--ink); font-weight: 600; }
 
 /* One tab per demo cluster — which demo you are looking at, so it sits second only to the
    h1: above the 12.5px blurb, well above the 11.5px action buttons. Sized between the
