@@ -7,6 +7,9 @@ import { COLORS, colorFor, KEY_R, NODE_R, RING, xy, keyLabels, markerAngles, own
 const PACKET_MS = 1900
 const PACKET_STAGGER_MS = 140
 const MAX_STAGGER_MS = 2200
+// Under a cut, one side's whole burst plays before the other's — two at once read as chaos.
+// This is the breath between them, after the first side's last packet has landed.
+const SIDE_GAP_MS = 300
 const SHOCK_MS = 1100
 
 export function RingViz({ state, prev, cut }: { state: State; prev: State | null; cut?: Cut | null }) {
@@ -76,7 +79,11 @@ export function RingViz({ state, prev, cut }: { state: State; prev: State | null
       const fs = sideOf[from], ts = sideOf[to]
       return !(fs && ts && fs !== ts)
     }
-    let launched = 0
+    // Collect the packets first, tagged with the side they belong to — the holder's side, or the
+    // sender's if the holder is an unassigned bridge. We then play one side's whole burst before
+    // the other's, since two simultaneous bursts under a cut read as chaos. With no cut every
+    // packet is the same neutral group, so the order and timing are exactly as before.
+    const packets: { src: string; holder: string; side: 'a' | 'b' | '_' }[] = []
     for (const k of state.keys) {
       const had = heldBefore.get(k.key) ?? new Set<string>()
       for (const holder of k.holders) {
@@ -87,9 +94,25 @@ export function RingViz({ state, prev, cut }: { state: State; prev: State | null
           k.owners.find((o) => o !== holder && angles[o] !== undefined && canReach(o, holder)) ??
           k.holders.find((o) => o !== holder && canReach(o, holder))
         if (src === undefined) continue
-        flyPacket(angles[src], angles[holder], colorFor(holder), Math.min(launched * PACKET_STAGGER_MS, MAX_STAGGER_MS))
-        launched++
+        packets.push({ src, holder, side: sideOf[holder] ?? sideOf[src] ?? '_' })
       }
+    }
+    // Side A first, then B, then bridge / no-cut. Stable, so within a side the iteration order holds.
+    const rank = { a: 0, b: 1, _: 2 }
+    packets.sort((p, q) => rank[p.side] - rank[q.side])
+    // Stagger within a side; a new side does not begin until the previous side's last packet has
+    // landed (plus a breath), so the bursts are seen one-then-the-other rather than at once.
+    let base = 0
+    let inSide = 0
+    let side: 'a' | 'b' | '_' | null = null
+    for (const p of packets) {
+      if (side !== null && p.side !== side) {
+        base += Math.min((inSide - 1) * PACKET_STAGGER_MS, MAX_STAGGER_MS) + PACKET_MS + SIDE_GAP_MS
+        inSide = 0
+      }
+      side = p.side
+      flyPacket(angles[p.src], angles[p.holder], colorFor(p.holder), base + Math.min(inSide * PACKET_STAGGER_MS, MAX_STAGGER_MS))
+      inSide++
     }
 
     const aliveBefore = new Map(prev.nodes.map((n) => [n.id, n.alive]))
