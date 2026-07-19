@@ -43,6 +43,7 @@ type Cluster struct {
 	mu           sync.Mutex
 	ids          []string
 	rf, wq       int
+	rrq          int // read quorum (R_read); with wq, the no-stale-read dial. 1 = gather-all default
 	grace        time.Duration
 	ringReplicas int
 	nodes        map[string]*node.Node // live nodes only; a killed id is absent
@@ -92,6 +93,7 @@ func New(rf, wq int, grace time.Duration, ids ...string) *Cluster {
 		ids:          ids,
 		rf:           rf,
 		wq:           wq,
+		rrq:          1, // R_read=1 until SetQuorum; ring stays AP (holdRing false) by default
 		grace:        grace,
 		ringReplicas: demoRingReplicas,
 		nodes:        make(map[string]*node.Node, len(ids)),
@@ -144,6 +146,7 @@ func (c *Cluster) Start() error {
 		"nodes", len(c.ids),
 		"replication_factor", c.rf,
 		"write_quorum", c.wq,
+		"read_quorum", c.rrq,
 		"grace", c.grace,
 	)
 	return nil
@@ -158,8 +161,41 @@ func (c *Cluster) wireAll() {
 		n.SetRingReplicas(c.ringReplicas) // before SetMembership, which builds the ring
 		n.SetMembership(peers)
 		n.SetReplication(c.rf, c.wq)
+		n.SetReadQuorum(c.rrq)
+		n.SetHoldRing(c.wq+c.rrq > c.rf)
 		n.SetHealGracePeriod(c.grace)
 	}
+}
+
+// SetQuorum sets the write quorum W and read quorum R_read for every live node, and for nodes
+// revived later. Validated: 1<=w<=rf and 1<=rRead<=rf (W>R is impossible). The PAIR decides
+// consistency: w+rRead>rf forces the write-set and read-set to overlap (no stale read) AND holds
+// the ring fixed, so a partitioned side that cannot reach a quorum refuses instead of re-owning
+// the keyspace among its survivors (which would satisfy W trivially — a rubber stamp). Otherwise
+// the ring keeps dropping silent peers and both sides serve on (eventual, AP). This is the only
+// cluster/ change Phase 7 asks for: rf and the ring behavior are fixed at New() otherwise.
+func (c *Cluster) SetQuorum(w, rRead int) error {
+	if w < 1 || w > c.rf {
+		return fmt.Errorf("write quorum %d out of range [1,%d]", w, c.rf)
+	}
+	if rRead < 1 || rRead > c.rf {
+		return fmt.Errorf("read quorum %d out of range [1,%d]", rRead, c.rf)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.wq, c.rrq = w, rRead
+	hold := w+rRead > c.rf
+	for _, n := range c.nodes {
+		n.SetReplication(c.rf, w)
+		n.SetReadQuorum(rRead)
+		n.SetHoldRing(hold)
+	}
+	mode := "eventual — the ring drops silent peers, both sides of a cut serve on"
+	if hold {
+		mode = "no stale reads — the ring is held, so a partitioned side without a quorum refuses"
+	}
+	c.logf("info", "quorum set: W=%d, R_read=%d (W+R_read=%d vs R=%d → %s)", w, rRead, w+rRead, c.rf, mode)
+	return nil
 }
 
 // Kill closes a node. Its peers keep it in their known-peer map and must discover
@@ -218,6 +254,8 @@ func (c *Cluster) Revive(id string) error {
 	n.SetRingReplicas(c.ringReplicas)
 	n.SetMembership(peers)
 	n.SetReplication(c.rf, c.wq)
+	n.SetReadQuorum(c.rrq)
+	n.SetHoldRing(c.wq+c.rrq > c.rf) // a revived node inherits the current dial, not the AP default
 	n.SetHealGracePeriod(c.grace)
 	for pid, peer := range c.nodes {
 		if pid != id {

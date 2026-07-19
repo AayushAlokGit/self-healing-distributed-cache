@@ -16,6 +16,8 @@ type State struct {
 	Keys            []KeyState  `json:"keys"`
 	VNodes          []VNode     `json:"vnodes"` // virtual points of the alive ring, for the tick layer
 	RF              int         `json:"rf"`
+	W               int         `json:"w"`     // write quorum; with RRead, the consistency dial
+	RRead           int         `json:"rRead"` // read quorum. W+RRead>RF ⇒ no stale reads
 	AliveCount      int         `json:"aliveCount"`
 	TotalHealCopies int64       `json:"totalHealCopies"`
 	Events          []Event     `json:"events"` // kills, writes AND heals, in order
@@ -177,6 +179,8 @@ func (c *Cluster) State() State {
 	// keys.filter(...) / vnodes.map(...) crash on null (i.e. when everything is dead).
 	st := State{
 		RF:              c.rf,
+		W:               c.wq,
+		RRead:           c.rrq,
 		AliveCount:      len(aliveIDs),
 		TotalHealCopies: totalHeal,
 		Nodes:           []NodeState{},

@@ -40,6 +40,11 @@ const (
 	// larger W trades latency for durability. W>R is impossible.
 	defaultWriteQuorum = 1
 
+	// Owners that must answer a read before it returns. R_read=1 is 7A's behavior (gather
+	// every reachable owner, reconcile, return if anyone answered). R_read+W>R is what forces
+	// the read-set and write-set to overlap, so a read cannot miss a completed write.
+	defaultReadQuorum = 1
+
 	// How often a node pings every peer's /health.
 	defaultHeartbeatInterval = 100 * time.Millisecond
 
@@ -81,7 +86,15 @@ type Node struct {
 
 	replicationFactor int
 	writeQuorum       int
-	ringReplicas      int // virtual points per node; 0 uses the ring's default (150)
+	readQuorum        int // owners that must answer a read; with W, the no-stale-read dial
+
+	// holdRing freezes the ring against heartbeat convictions. false (AP, the default): a
+	// silent peer is dropped and the keyspace re-owned among survivors — so under a cut a
+	// quorum shrinks with the ring and W is satisfied trivially. true (the strong dial): the
+	// far owners stay in the ring, so a coordinator that can't reach W of them honestly
+	// refuses instead of rubber-stamping a shrunken owner set. Guarded by mu.
+	holdRing     bool
+	ringReplicas int // virtual points per node; 0 uses the ring's default (150)
 
 	heartbeatInterval time.Duration
 	failureTimeout    time.Duration
@@ -142,6 +155,7 @@ func New(id, addr string, capacity int) *Node {
 		alive:             map[string]bool{},
 		replicationFactor: defaultReplicationFactor,
 		writeQuorum:       defaultWriteQuorum,
+		readQuorum:        defaultReadQuorum, // holdRing defaults false: AP until the dial says otherwise
 		heartbeatInterval: defaultHeartbeatInterval,
 		failureTimeout:    defaultFailureTimeout,
 		healGracePeriod:   defaultHealGracePeriod,
@@ -246,6 +260,23 @@ func (n *Node) SetReplication(replicationFactor, writeQuorum int) {
 	defer n.mu.Unlock()
 	n.replicationFactor = replicationFactor
 	n.writeQuorum = writeQuorum
+}
+
+// SetReadQuorum overrides how many owners must answer a read (R_read). Paired with the write
+// quorum, R_read+W>R is the no-stale-read guarantee; R_read=1 is the gather-all default.
+func (n *Node) SetReadQuorum(readQuorum int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.readQuorum = readQuorum
+}
+
+// SetHoldRing freezes (true) or unfreezes (false) the ring against heartbeat convictions. Hold
+// it at the strong dial setting: a quorum is a fraction and needs a fixed denominator, or a
+// partitioned side re-owns the keyspace among its survivors and any W is met trivially.
+func (n *Node) SetHoldRing(hold bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.holdRing = hold
 }
 
 // SetHealGracePeriod overrides how long a detected death waits before the node
@@ -373,7 +404,14 @@ func (n *Node) heartbeatRound() {
 		switch {
 		case n.alive[id] && !isAlive:
 			n.alive[id] = false
-			n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
+			// Hold the ring at the strong dial setting: the far owner STAYS in the ring even
+			// though we now believe it dead, so a quorum write/read still targets it, fails to
+			// reach it, and honestly refuses — instead of the ring shrinking to survivors and
+			// the quorum passing over a re-owned keyspace (a rubber stamp). The belief (alive)
+			// updates either way; only the routing consequence is gated.
+			if !n.holdRing {
+				n.ring.Remove(id) // stop routing to the corpse — cheap, reversible
+			}
 			membershipChanged = true
 			n.noteHealCause(id + " went silent")
 			n.logger().Warn("peer suspected dead, removed from ring",
@@ -383,7 +421,11 @@ func (n *Node) heartbeatRound() {
 			)
 		case !n.alive[id] && isAlive:
 			n.alive[id] = true
-			n.ring.Add(id) // back in the ring; the heal repopulates it
+			// Symmetric: under holdRing the node was never removed, so there is nothing to add
+			// back; the membership change still fires the heal, which reconciles what diverged.
+			if !n.holdRing {
+				n.ring.Add(id) // back in the ring; the heal repopulates it
+			}
 			membershipChanged = true
 			n.noteHealCause(id + " came back")
 			n.logger().Info("peer recovered, re-added to ring", "peer", id)
@@ -1042,13 +1084,14 @@ func (n *Node) handleClear(w http.ResponseWriter, _ *http.Request) {
 // handleClientGet coordinates a read: gather every version the key's reachable owners
 // hold and reconcile them into one maximal set under vector-clock dominance. One survivor
 // is a plain value; two or more are concurrent siblings — a detected conflict — returned
-// as a JSON array with the X-Conflict header. Only when every owner is unreachable is it a
-// 502; a reachable miss is an honest 404.
+// as a JSON array with the X-Conflict header. Every owner unreachable is a 502; fewer than
+// R_read reachable is a 503 refusal; a reachable miss (enough answered, none had it) is a 404.
 //
-// Unlike the pre-versioning read, it cannot stop at the first hit: a concurrent sibling on
-// a later owner would go unseen, and an unseen conflict is a silently-picked winner. When
-// the R_read dial lands (Phase 7B) it asks the first R_read owners instead of all; the
-// gather-and-reconcile below is unchanged.
+// The R_read dial (7B) does NOT early-stop the gather — a concurrent sibling on a later owner
+// would go unseen, and an unseen conflict is a silently-picked winner. It is a reachable-count
+// threshold instead: gather all reachable owners as before, then refuse if fewer than R_read
+// answered. With R_read+W>R the R_read owners that DID answer must include a W-writer, so the
+// reconciled result cannot miss the latest write — no stale read, conflict detection intact.
 func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	owners := n.ownersFor(key)
@@ -1056,6 +1099,10 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no owner for key", http.StatusServiceUnavailable)
 		return
 	}
+
+	n.mu.RLock()
+	rq := n.readQuorum
+	n.mu.RUnlock()
 
 	// One outcome per owner, in ring order, plus what each one held so provenance can be
 	// recovered after reconciliation. Owners never reached stay "skipped".
@@ -1069,6 +1116,7 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 
 	log := n.logger()
 	reachedNone := true
+	answered := 0 // owners that were reachable (hit or miss); the R_read threshold counts these
 	for i, o := range owners {
 		var (
 			entries []cache.Entry
@@ -1089,10 +1137,12 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		case !ok:
 			outcomes[i] = OutcomeMiss
 			reachedNone = false // it answered, it just has no copy
+			answered++
 			continue
 		}
 		outcomes[i] = OutcomeHit
 		reachedNone = false
+		answered++
 		held[i] = entries
 	}
 
@@ -1117,6 +1167,17 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(ReadPathHeader, FormatReadPath(ids, outcomes))
 
 	switch {
+	case reachedNone:
+		log.Error("read failed: all owners unreachable", "key", key, "owners", len(owners))
+		http.Error(w, "all owners unreachable", http.StatusBadGateway)
+	case answered < rq:
+		// Reachable, but fewer owners answered than R_read: the answered set is not guaranteed
+		// to overlap the write set, so returning a value could be stale. Refuse — the CP end of
+		// the dial. At R_read=1 this never fires (reachedNone already caught answered==0), so
+		// the default read is byte-for-byte 7A. Even an owner that holds a copy refuses here:
+		// holding data is not knowing it is current.
+		log.Info("read refused: read quorum not met", "key", key, "answered", answered, "read_quorum", rq)
+		http.Error(w, "read quorum not met", http.StatusServiceUnavailable)
 	case len(merged) == 1:
 		w.Header().Set(ServedByHeader, servedBy)
 		log.Debug("read hit", "key", key, "served_by", servedBy)
@@ -1133,9 +1194,6 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		log.Info("read returned conflicting siblings", "key", key, "versions", len(merged))
 		json.NewEncoder(w).Encode(vals)
-	case reachedNone:
-		log.Error("read failed: all owners unreachable", "key", key, "owners", len(owners))
-		http.Error(w, "all owners unreachable", http.StatusBadGateway)
 	default:
 		log.Debug("read miss", "key", key)
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1210,11 +1268,16 @@ func (n *Node) handleClientSet(w http.ResponseWriter, r *http.Request) {
 		acks++
 	}
 
+	n.mu.RLock()
 	quorum := n.writeQuorum
+	n.mu.RUnlock()
 	if acks < quorum {
+		// Refuse: fewer owners acked than W, so the write is not durable on a quorum. 503, not
+		// 502 — the request was well-formed and the cluster is up; it just cannot satisfy the
+		// quorum right now (e.g. a cut with the ring held, so the far owners are unreachable).
 		log.Error("write rejected: quorum not met",
 			"key", key, "acks", acks, "quorum", quorum, "owners", strings.Join(ownerIDs, ","))
-		http.Error(w, "write quorum not met", http.StatusBadGateway)
+		http.Error(w, "write quorum not met", http.StatusServiceUnavailable)
 		return
 	}
 	log.Debug("write ok", "key", key, "acks", acks, "quorum", quorum)

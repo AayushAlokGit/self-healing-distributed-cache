@@ -205,6 +205,24 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// Quorum sets the consistency dial: W (write quorum) and R_read (read quorum). An out-of-range
+	// pair is the caller's mistake, so SetQuorum's error maps to a 400. W+R_read>R holds the ring
+	// and forbids stale reads (a partitioned side without a quorum refuses); otherwise it's eventual.
+	handle("POST /api/{cluster}/quorum", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			W     int `json:"w"`
+			RRead int `json:"rRead"`
+		}
+		if !readJSON(w, r, &body) {
+			return
+		}
+		if err := c.SetQuorum(body.W, body.RRead); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "w": body.W, "rRead": body.RRead})
+	})
+
 	// A hint at the root, since the UI lives elsewhere. It names the clusters, so anyone
 	// curling this can find the routes without reading the source.
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
