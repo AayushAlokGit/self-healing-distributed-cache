@@ -239,6 +239,14 @@ input:focus, .via-select:focus { outline: none; border-color: rgb(var(--cyan)); 
 }
 .sibling .sib-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgb(var(--sib)); font-variant-numeric: tabular-nums; }
 .sibling .sib-val { font-weight: 700; color: var(--ink); word-break: break-word; }
+/* One-click resolve: keep a sibling (writes it back, collapsing the conflict). Wears the row's
+   own accent so it reads as "pick THIS one". */
+.sibling .sib-keep { margin-left: auto; flex-shrink: 0; padding: 4px 9px; font-size: 10.5px; font-weight: 700; color: rgb(var(--sib)); background: rgb(var(--sib) / 0.16); }
+.sibling .sib-keep:hover { background: rgb(var(--sib) / 0.3); }
+/* Or write a merged value back. */
+.sib-merge { display: flex; gap: 8px; margin-top: 8px; }
+.sib-merge input { flex: 1; min-width: 0; }
+.sib-merge .primary { width: auto; flex: 0 0 auto; }
 
 /* A request that failed outright, as opposed to a cache miss. */
 .api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }

@@ -40,11 +40,12 @@ function ReadPath({ path }: { path: ReadHop[] }) {
   )
 }
 
-// The concurrent versions the cache kept because two writes never saw each other. Not a
-// winner-picking merge and not corruption: both writes were accepted, and the next write that
-// sees both is what reconciles them. Each value gets its own accent so "the cache kept BOTH"
-// reads without reading the words.
-function Siblings({ values }: { values: string[] }) {
+// The concurrent versions the cache kept because two writes never saw each other. Resolving is a
+// normal write-back: keep one (or type a merge) and write it. Because the write path merges every
+// owner's version clock and then bumps, the new version dominates BOTH siblings, so the conflict
+// collapses on the next read — Dynamo's read → merge → write-back loop, in one click.
+function Siblings({ values, onResolve, busy }: { values: string[]; onResolve: (v: string) => void; busy: boolean }) {
+  const [merged, setMerged] = useState('')
   return (
     <>
       <div className="headline">
@@ -53,8 +54,8 @@ function Siblings({ values }: { values: string[] }) {
       </div>
       <p className="conflict-note">
         Two writes landed on opposite sides of a network cut and never saw each other. Neither is
-        "wrong," so the cache kept both instead of silently dropping one. The next write that sees
-        both reconciles them.
+        "wrong," so the cache kept both. Resolve it below — keep one, or write a merged value; that
+        write sees both and collapses them into one.
       </p>
       <div className="siblings">
         {values.map((v, i) => (
@@ -63,19 +64,35 @@ function Siblings({ values }: { values: string[] }) {
           <div className="sibling" key={i} style={{ '--sib': SIBLING_ACCENTS[i % SIBLING_ACCENTS.length] } as CSSProperties}>
             <span className="sib-tag">v{i + 1}</span>
             <span className="sib-val">{v}</span>
+            <button className="sib-keep" disabled={busy} onClick={() => onResolve(v)} title={`resolve the conflict to "${v}"`}>
+              keep this
+            </button>
           </div>
         ))}
+      </div>
+      <div className="sib-merge">
+        <input
+          placeholder="or type a merged value"
+          value={merged}
+          onChange={(e) => setMerged(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && merged.trim() && onResolve(merged.trim())}
+        />
+        <button className="primary" disabled={busy || !merged.trim()} onClick={() => onResolve(merged.trim())}>
+          Resolve
+        </button>
       </div>
     </>
   )
 }
 
-// No onAction: a read changes nothing in the cluster, so there is no new state to fetch.
-export function ReadPanel({ nodes }: { nodes: NodeState[] }) {
+// A plain read changes nothing, but RESOLVING a conflict is a write — so this takes onAction to
+// refresh the rest of the dashboard (ring, key table, activity log) once a resolve lands.
+export function ReadPanel({ nodes, onAction }: { nodes: NodeState[]; onAction: () => void }) {
   const [readKey, setReadKey] = useState('')
   const [via, setVia] = useState('') // coordinator node id; '' = auto
   const [result, setResult] = useState<ReadResult | null>(null)
-  const { getKey } = useApi()
+  const [resolving, setResolving] = useState(false)
+  const { getKey, setKey } = useApi()
   const { err, run } = useApiError()
 
   // A failed request is not a miss: clear the old result so an error never renders as
@@ -84,6 +101,21 @@ export function ReadPanel({ nodes }: { nodes: NodeState[] }) {
     if (!readKey.trim()) return
     setResult(null)
     await run(async () => setResult(await getKey(readKey.trim(), liveVia(nodes, via))))
+  }
+
+  // Resolve = write the chosen value back, then re-read. The write path merges every reachable
+  // owner's version and bumps the coordinator's slot, so the new version dominates both siblings;
+  // the re-read then shows one value. ttl 0 = never, so the resolved value persists to be seen.
+  const resolve = async (value: string) => {
+    const key = readKey.trim()
+    if (!key) return
+    setResolving(true)
+    await run(async () => {
+      await setKey(key, value, 0, liveVia(nodes, via))
+      onAction()
+      setResult(await getKey(key, liveVia(nodes, via)))
+    })
+    setResolving(false)
   }
 
   // A conflict is still a hit — the key exists, it just carries more than one value — so the
@@ -107,7 +139,7 @@ export function ReadPanel({ nodes }: { nodes: NodeState[] }) {
       {result && (
         <div className={'result' + (result.found ? '' : ' miss') + (isConflict ? ' conflict' : '')}>
           {isConflict ? (
-            <Siblings values={result.siblings ?? []} />
+            <Siblings values={result.siblings ?? []} onResolve={resolve} busy={resolving} />
           ) : (
             <div className="headline">
               {result.found ? (
@@ -139,31 +171,6 @@ export function ReadPanel({ nodes }: { nodes: NodeState[] }) {
       )}
 
       <ErrorLine err={err} />
-
-      {/* DEV-ONLY conflict preview. import.meta.env.DEV is statically `false` in `npm run
-          build`, so Vite tree-shakes this whole block (and MOCK_CONFLICT) out of the bundle —
-          it cannot ship fake data to users. It exists only so the card can be eyeballed before
-          the backend sends real conflict reads; delete it once that lands. */}
-      {/* {import.meta.env.DEV && (
-        <button className="ttl-opt" style={{ marginTop: 8 }} onClick={() => setResult(MOCK_CONFLICT)} title="preview the conflict card with mock data">
-          preview conflict (dev)
-        </button>
-      )} */}
     </div>
   )
-}
-
-// DEV-ONLY mock — a real ReadResult of the exact shape the backend will send, so the card is
-// still driven by the contract and not by this literal. Referenced only inside the
-// import.meta.env.DEV guard above, so it never reaches a production bundle.
-const MOCK_CONFLICT: ReadResult = {
-  found: true,
-  value: '',
-  conflict: true,
-  siblings: ['cart=[milk, eggs]', 'cart=[milk, bread]'],
-  coordinator: 'n2',
-  path: [
-    { node: 'n0', rank: 0, role: 'primary', outcome: 'hit' },
-    { node: 'n1', rank: 1, role: 'replica', outcome: 'hit' },
-  ],
 }

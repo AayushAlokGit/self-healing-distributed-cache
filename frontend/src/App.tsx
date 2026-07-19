@@ -191,7 +191,7 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
             )}
             <div className="io-row">
               <WritePanel nodes={state.nodes} onAction={refresh} />
-              <ReadPanel nodes={state.nodes} />
+              <ReadPanel nodes={state.nodes} onAction={refresh} />
             </div>
             <KeyTable keys={state.keys} partition={partition} onAction={refresh} />
           </div>
