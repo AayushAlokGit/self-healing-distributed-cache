@@ -613,6 +613,13 @@ become siblings). Then part 2 (refusal = the CP end; the checkerboard; and the t
   re-owns and serves the very write the held ring refused). Full tree green under `-race`. Still on `cap-demo`.
 - **Layout, this session too** (his asks): key table shows per-side owners under a cut (roomier two-row cards);
   Write/Read moved to a side-by-side row in the left column; the partition renders as two independent rings.
+- **Split the dial onto its own tab** (his ask — the dial was cluttering the partition demo). Three tabs now,
+  each its **own cluster** (`demoClusters = replication, cap, consistency`): **Replication & Self-Heal** (death →
+  heal), **Partitions & Conflicts** (the cut → concurrent writes → siblings, at the eventual dial), and
+  **Consistency Dial** (the same cut, but tune `W`/`R_read` → refusals / checkerboard / scorecard). The dial
+  demo needs its own cluster for the same reason inverted from S17's: it sets `W+R_read>R` so the cut *refuses*
+  rather than diverges — the opposite of the partitions tab's siblings story — so the two can't share a dial.
+  Both cut-capable tabs get `PartitionPanel`; only the dial tab gets `DialPanel`/`Scorecard`/the dial Stats tile.
 - **Activity-log narration for the new system** (his ask — the ordered event log was a standout deliverable, so
   the CAP mechanisms deserved it too). New manager-appended events: **`refuse`** (a `503` — the dial's CP "no",
   on a write or read; only the 503, not a 502-all-unreachable) and **`conflict`** (a read surfaced concurrent

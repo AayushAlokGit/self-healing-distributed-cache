@@ -1,6 +1,6 @@
 import type { State } from '../api'
 
-export function Stats({ state }: { state: State; prev: State | null }) {
+export function Stats({ state, showDial }: { state: State; prev: State | null; showDial?: boolean }) {
   // Copies stored vs copies the ring asks for — equal in a healthy cluster, and the metric
   // cleanup exists to hold down. min(rf, alive): a key cannot have more copies than nodes.
   const stored = state.keys.reduce((n, k) => n + k.holders.length, 0)
@@ -16,14 +16,19 @@ export function Stats({ state }: { state: State; prev: State | null }) {
     { k: 'nodes alive', v: `${state.aliveCount}/${state.nodes.length}` },
     { k: 'keys', v: state.keys.length },
     { k: 'replication', v: `R=${state.rf}` },
-    {
-      k: 'dial',
-      v: `W - ${state.w} · R_Read - ${state.rRead}`,
-      held,
-      title: held
-        ? `W+R_read=${sum} > R=${state.rf}: no stale reads, and the ring is held — a partitioned side that can't reach a quorum refuses.`
-        : `W+R_read=${sum} ≤ R=${state.rf}: eventual — stale reads are possible and both sides of a cut serve on.`,
-    },
+    // The dial tile only on the consistency tab — elsewhere it is fixed at W1·R1 and would be noise.
+    ...(showDial
+      ? [
+          {
+            k: 'dial',
+            v: `W - ${state.w} · R_Read - ${state.rRead}`,
+            held,
+            title: held
+              ? `W+R_read=${sum} > R=${state.rf}: no stale reads, and the ring is held — a partitioned side that can't reach a quorum refuses.`
+              : `W+R_read=${sum} ≤ R=${state.rf}: eventual — stale reads are possible and both sides of a cut serve on.`,
+          },
+        ]
+      : []),
     {
       k: 'copies',
       v: surplus > 0 ? `${stored}/${wanted}` : stored,

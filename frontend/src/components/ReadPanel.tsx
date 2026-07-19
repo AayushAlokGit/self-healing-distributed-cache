@@ -144,11 +144,11 @@ export function ReadPanel({ nodes }: { nodes: NodeState[] }) {
           build`, so Vite tree-shakes this whole block (and MOCK_CONFLICT) out of the bundle —
           it cannot ship fake data to users. It exists only so the card can be eyeballed before
           the backend sends real conflict reads; delete it once that lands. */}
-      {import.meta.env.DEV && (
+      {/* {import.meta.env.DEV && (
         <button className="ttl-opt" style={{ marginTop: 8 }} onClick={() => setResult(MOCK_CONFLICT)} title="preview the conflict card with mock data">
           preview conflict (dev)
         </button>
-      )}
+      )} */}
     </div>
   )
 }

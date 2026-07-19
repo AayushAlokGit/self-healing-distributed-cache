@@ -39,9 +39,15 @@ const TABS: readonly Tab[] = [
   },
   {
     id: 'cap',
-    label: 'CAP & Partitions',
+    label: 'Partitions & Conflicts',
     blurb: () =>
       'Failure mode: the network splits — both sides keep serving, so one key can take two concurrent writes (divergence, not staleness). Vector clocks detect the clash and keep both as siblings for the client to resolve.',
+  },
+  {
+    id: 'consistency',
+    label: 'Consistency Dial',
+    blurb: (s) =>
+      `The same cut, tuned. Raise the dial so W + R_read > R (=${s.rf}) and the ring is held: the losing side of a cut REFUSES rather than diverging — availability spent for consistency. Cut the network, set a dial, and let the scorecard measure the trade.`,
   },
 ]
 
@@ -104,10 +110,12 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
 
   // The active cut now comes from /state: the server is the source of truth, so a reload
   // keeps the banner and the split ring. (It used to be client-only React state, which a
-  // refresh forgot while the backend cut stayed live.) Null on every non-CAP tab, since only
-  // the CAP demo issues cuts.
+  // refresh forgot while the backend cut stayed live.) Null on the replication tab, whose
+  // cluster is never cut.
   const partition = state?.partition ?? null
-  const isCap = tab.id === 'cap'
+  // Both the partition and the dial demos cut the network; only the dial demo tunes W/R_read.
+  const canCut = tab.id === 'cap' || tab.id === 'consistency'
+  const isDial = tab.id === 'consistency'
 
   return (
     <>
@@ -135,7 +143,7 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           </nav>
           {state && <p>{tab.blurb(state)}</p>}
         </div>
-        {state && <Stats state={state} prev={prev} />}
+        {state && <Stats state={state} prev={prev} showDial={isDial} />}
       </header>
 
       {/* Two different readers. Locally, "unreachable" means you forgot to start the backend.
@@ -189,9 +197,9 @@ function Dashboard({ tab, onSelect }: { tab: Tab; onSelect: (id: string) => void
           </div>
           <div className="side">
             <NodePanel nodes={state.nodes} onAction={refresh} />
-            {isCap && (
+            {canCut && <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />}
+            {isDial && (
               <>
-                <PartitionPanel nodes={state.nodes} partition={partition} onAction={refresh} />
                 <DialPanel state={state} onAction={refresh} />
                 <Scorecard state={state} onAction={refresh} />
               </>

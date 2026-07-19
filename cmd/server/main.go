@@ -46,16 +46,19 @@ func defaultAddr() string {
 // demoClusters are the dashboard's tabs — one wholly independent cluster each.
 //
 // They need separate clusters because they want the ring in states that cannot both be
-// true: the CAP demo leaves the network cut for minutes at a time while writing to both
-// sides, which reads as a broken cluster to anyone on the replication tab, and a node
-// killed over there would quietly corrupt a run over here.
+// true: the partition demo leaves the network cut for minutes at a time while writing to
+// both sides, which reads as a broken cluster to anyone on the replication tab, and a node
+// killed over there would quietly corrupt a run over here. The consistency-dial demo wants
+// its own for the same reason inverted: it sets W+R_read>R so the cut REFUSES rather than
+// diverges — the exact opposite of the partition tab's siblings story — so the two cannot
+// share a dial, hence a cluster.
 //
 // This costs nothing structural (docs/HLD.md §4). Nodes bind 127.0.0.1:0, so the OS hands
 // out every port and two clusters cannot collide — nobody picked a number to collide
 // over. And Cluster keeps all its state in its own fields; there is no package-level
 // mutable state in cluster/, node/ or cache/ for a second cluster to reach. Isolation
 // here is structural, not disciplined.
-var demoClusters = []string{"replication", "cap"}
+var demoClusters = []string{"replication", "cap", "consistency"}
 
 func run() error {
 	addr := flag.String("addr", defaultAddr(), "API listen address ($PORT wins by default)")
