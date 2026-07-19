@@ -421,6 +421,21 @@ func reconcile(existing []Entry, incoming Entry) []Entry {
 	return out
 }
 
+// MergeVersions folds several version sets into one maximal set under vector-clock
+// dominance: a dominated version is dropped, concurrent ones are all kept. A coordinator
+// uses it to combine the same key gathered from several owners — one owner may hold a
+// sibling another has never seen. Order-independent, and each input set is assumed already
+// maximal (the cache keeps every node's own entries that way).
+func MergeVersions(sets ...[]Entry) []Entry {
+	var out []Entry
+	for _, s := range sets {
+		for _, e := range s {
+			out = reconcile(out, e)
+		}
+	}
+	return out
+}
+
 // Delete removes key and reports whether a live entry was there to remove. An expired
 // corpse the sweeper has not reached counts as absent: no reader could still see it.
 //

@@ -8,6 +8,7 @@ package cluster
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -320,6 +321,11 @@ type ReadResult struct {
 	Coordinator string    `json:"coordinator,omitempty"`
 	ServedBy    string    `json:"servedBy,omitempty"`
 	Path        []ReadHop `json:"path,omitempty"`
+	// Conflict is set when the owners hold concurrent siblings the read could not collapse to
+	// one: two writes that never saw each other, both kept. Siblings then carries every value
+	// and Value is empty — there is no single answer to put there.
+	Conflict bool     `json:"conflict,omitempty"`
+	Siblings []string `json:"siblings,omitempty"`
 }
 
 // Primary is the node the ring says should hold this key: the first owner clockwise.
@@ -391,6 +397,18 @@ func (c *Cluster) Get(key string) (ReadResult, error) {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		// A conflict comes back as a JSON array of siblings under X-Conflict, not a plain
+		// value: the coordinator found concurrent versions and refused to pick one.
+		if resp.Header.Get(node.ConflictHeader) != "" {
+			if err := json.Unmarshal(body, &res.Siblings); err != nil {
+				c.logger().Error("read: malformed conflict body", "key", key, "err", err)
+				return ReadResult{}, fmt.Errorf("get %s: bad conflict body: %w", key, err)
+			}
+			res.Conflict, res.Found = true, true
+			c.logger().Debug("read hit conflict", "key", key, "coordinator", res.Coordinator,
+				"siblings", len(res.Siblings), "took", took)
+			return res, nil
+		}
 		res.Value, res.Found = string(body), true
 		if res.Fallback() {
 			c.mu.Lock()

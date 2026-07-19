@@ -198,6 +198,24 @@ input:focus { outline: none; border-color: rgb(var(--cyan)); }
 .read-path .hop.miss .outcome { color: rgb(var(--warn)); }
 /* Never asked, because an owner ahead of it answered first. */
 .read-path .hop.skipped { opacity: 0.42; }
+
+/* A conflict read: the key carries concurrent siblings the cache kept because two writes never
+   saw each other. Amber, not green (a plain hit) and not red (a miss/error) — nothing broke and
+   nothing was lost, both writes were accepted. */
+.result.conflict b.conflict-badge { color: rgb(var(--warn)); }
+.conflict-note { margin: 6px 0 2px; font-size: 11px; line-height: 1.55; color: var(--muted); }
+.siblings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+/* One row per concurrent value. --sib is the per-sibling accent (see SIBLING_ACCENTS in
+   ReadPanel), an RGB triple so the row mixes its own fill, border and left rule from one colour
+   — the same one-colour-drives-everything trick the buttons and event tags use. */
+.sibling {
+  display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 9px;
+  background: rgb(var(--sib) / 0.08); border: 1px solid rgb(var(--sib) / 0.35);
+  border-left: 3px solid rgb(var(--sib));
+}
+.sibling .sib-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgb(var(--sib)); font-variant-numeric: tabular-nums; }
+.sibling .sib-val { font-weight: 700; color: var(--ink); word-break: break-word; }
+
 /* A request that failed outright, as opposed to a cache miss. */
 .api-err { margin-top: 10px; padding: 7px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.45; color: var(--danger-ink); background: rgb(var(--danger) / 0.1); border: 1px solid rgb(var(--danger) / 0.35); word-break: break-word; }
 

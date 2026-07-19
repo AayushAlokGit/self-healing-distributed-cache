@@ -42,6 +42,15 @@ export interface ReadResult {
   primary?: string
   fallback?: boolean
   path?: ReadHop[]
+  // A conflict: two writes on opposite sides of a network cut never saw each other, so the
+  // cache kept BOTH as concurrent siblings (vector-clock concurrent versions) rather than
+  // picking a winner. On a conflict read, `value` is empty and `siblings` holds every value;
+  // absent/false means the ordinary single-value case, where `value` is authoritative.
+  conflict?: boolean
+  // The concurrent values, present only when conflict is true. Length is always >= 2: one
+  // value is not a conflict. `found` stays true — the key exists, it just has more than one
+  // value — so a conflict is a hit, not a miss.
+  siblings?: string[]
 }
 
 export interface VNode {

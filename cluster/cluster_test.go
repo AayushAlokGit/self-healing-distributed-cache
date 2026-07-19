@@ -43,7 +43,10 @@ func outcomes(res ReadResult) string {
 
 // The read trace must get three facts right:
 //
-//  1. A healthy read stops at the primary; the other owners are never asked.
+//  1. A conflict-aware read asks EVERY owner — it cannot stop at the first hit without
+//     risking an unseen concurrent sibling — so every owner that holds the key hits, and
+//     the primary (rank 0), holding the winning version, is the servedBy. (When the R_read
+//     dial lands in 7B, owners past R_read go back to "skipped".)
 //  2. A dead owner is "unreachable", never "miss" — a miss says the node answered.
 //  3. An unwritten key is a miss at every owner. Only the trace tells that apart from
 //     (2); the value is absent either way.
@@ -59,7 +62,8 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 
 	const key = "key:3"
 
-	// (1) Healthy: the primary hits, and the two replicas are never asked.
+	// (1) Healthy: every owner holds the key, so a gather-all read hits all R; the primary
+	// holds the winning version and is the servedBy.
 	res, err := c.Get(key)
 	if err != nil || !res.Found {
 		t.Fatalf("get %q on a healthy cluster: (%+v, %v)", key, res, err)
@@ -74,10 +78,10 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 		t.Fatalf("get %q on a healthy cluster should be served by its primary, got servedBy=%s path=%s",
 			key, res.ServedBy, outcomes(res))
 	}
-	for _, h := range res.Path[1:] {
-		if h.Role != "replica" || h.Outcome != "skipped" {
-			t.Fatalf("get %q: the primary answered, so replica %s should never have been asked; path=%s",
-				key, h.Node, outcomes(res))
+	for _, h := range res.Path {
+		if h.Outcome != "hit" {
+			t.Fatalf("get %q: every owner holds it, so a gather-all read hits them all; %s said %q; path=%s",
+				key, h.Node, h.Outcome, outcomes(res))
 		}
 	}
 
@@ -99,7 +103,9 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 		}
 	}
 
-	// (3) Kill the primary: the read must walk past it to a replica.
+	// (3) Kill the primary: it goes unreachable, but the surviving owners still hold the key,
+	// so a gather-all read hits them and is served by a live replica — a fallback, never the
+	// dead node.
 	primary := res.Path[0].Node
 	if err := c.Kill(primary); err != nil {
 		t.Fatalf("kill %s: %v", primary, err)
@@ -117,17 +123,22 @@ func TestReadPathNamesEveryOwnerAndWhatItSaid(t *testing.T) {
 				primary, h.Outcome, outcomes(res))
 		}
 	}
-	hit := 0
+	// A found read is served by an owner that hit, and after the primary died that owner is
+	// a live replica, not the corpse.
+	hits := map[string]bool{}
 	for _, h := range res.Path {
 		if h.Outcome == "hit" {
-			hit++
-			if h.Node != res.ServedBy {
-				t.Fatalf("path says %s hit but servedBy says %s; path=%s", h.Node, res.ServedBy, outcomes(res))
-			}
+			hits[h.Node] = true
 		}
 	}
-	if hit != 1 {
-		t.Fatalf("a found read must hit exactly one owner, got %d; path=%s", hit, outcomes(res))
+	if len(hits) == 0 {
+		t.Fatalf("a found read must hit at least one owner; path=%s", outcomes(res))
+	}
+	if !hits[res.ServedBy] {
+		t.Fatalf("servedBy %s is not among the owners that hit; path=%s", res.ServedBy, outcomes(res))
+	}
+	if res.ServedBy == primary {
+		t.Fatalf("primary %s is dead; it cannot be servedBy; path=%s", primary, outcomes(res))
 	}
 }
 

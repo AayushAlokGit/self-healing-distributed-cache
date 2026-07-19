@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -79,6 +80,66 @@ func TestConcurrentPutsOverHTTPKeepBothThenCollapse(t *testing.T) {
 	putVersioned(t, n, "k", "resolved", winner)
 	if got := kvEntries(t, n, "k"); len(got) != 1 || got[0].Value != "resolved" {
 		t.Fatalf("after dominating PUT = %+v, want single resolved", got)
+	}
+}
+
+// rawGet does a client read and hands back the status, headers and body — clientGet drops the
+// headers, but a conflict is signalled by X-Conflict and a JSON-array body.
+func rawGet(t *testing.T, n *Node, key string) (int, http.Header, string) {
+	t.Helper()
+	resp, err := http.Get("http://" + n.Addr() + "/get/" + key)
+	if err != nil {
+		t.Fatalf("client get %s via %s: %v", key, n.ID(), err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, string(body)
+}
+
+// A read that finds concurrent siblings on different owners must return BOTH, not silently
+// pick one — presence != version. bob lives on one owner, carol (concurrent) on another;
+// the coordinator gathers every owner, reconciles, and keeps both, flagging X-Conflict and a
+// JSON-array body. A dominating write then collapses the conflict back to a single plain value.
+func TestReadDetectsConcurrentSiblings(t *testing.T) {
+	ids := []string{"n0", "n1", "n2"}
+	nodes := startCluster(t, ids...)
+	setReplication(nodes, 3, 1)
+
+	owners := ownersOf(ids, "k", 3)
+	var empty vclock.Clock
+	bob := empty.Bump("n0")   // {n0:1}
+	carol := empty.Bump("n1") // {n1:1} — concurrent with bob: neither dominates
+
+	// Split the siblings across two different owners, PUT straight to /kv so the coordinator
+	// merge is bypassed and the conflict genuinely lives across the cluster, not on one node.
+	putVersioned(t, nodes[owners[0]], "k", "bob", bob)
+	putVersioned(t, nodes[owners[1]], "k", "carol", carol)
+
+	status, hdr, body := rawGet(t, nodes["n0"], "k")
+	if status != http.StatusOK {
+		t.Fatalf("conflict read status = %d, want 200", status)
+	}
+	if got := hdr.Get(ConflictHeader); got != "2" {
+		t.Fatalf("X-Conflict = %q, want 2", got)
+	}
+	var vals []string
+	if err := json.Unmarshal([]byte(body), &vals); err != nil {
+		t.Fatalf("conflict body %q is not a JSON array: %v", body, err)
+	}
+	slices.Sort(vals)
+	if want := []string{"bob", "carol"}; !slices.Equal(vals, want) {
+		t.Fatalf("conflict siblings = %v, want %v", vals, want)
+	}
+
+	// A write via any coordinator reads both siblings, bumps on top, and dominates them: the
+	// conflict collapses to one plain value on every owner, and X-Conflict is gone.
+	if code := clientSet(t, nodes["n0"], "k", "resolved"); code != http.StatusNoContent {
+		t.Fatalf("resolving write = %d", code)
+	}
+	status, hdr, body = rawGet(t, nodes["n0"], "k")
+	if status != http.StatusOK || hdr.Get(ConflictHeader) != "" || body != "resolved" {
+		t.Fatalf("after resolution: status=%d conflict=%q body=%q, want 200 \"\" \"resolved\"",
+			status, hdr.Get(ConflictHeader), body)
 	}
 }
 

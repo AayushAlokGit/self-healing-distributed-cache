@@ -97,6 +97,8 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 			"primary":     res.Primary(),
 			"fallback":    res.Fallback(),
 			"path":        res.Path,
+			"conflict":    res.Conflict,
+			"siblings":    res.Siblings,
 		})
 	})
 

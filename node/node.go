@@ -869,6 +869,10 @@ const (
 	ServedByHeader    = "X-Served-By"
 	CoordinatorHeader = "X-Coordinator"
 	ReadPathHeader    = "X-Read-Path"
+	// ConflictHeader is the number of concurrent siblings a read reconciled to, set only
+	// when that number is >1. Its presence tells a client the body is a JSON array of the
+	// sibling values rather than a single plain value.
+	ConflictHeader = "X-Conflict"
 )
 
 // DroppedHeader carries what a delete actually removed: from /del/{key}, the comma-
@@ -974,9 +978,16 @@ func (n *Node) handleClear(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleClientGet coordinates a read: try the key's owners in ring order and return
-// the first reachable hit, falling past unreachable owners. Only when every owner is
-// unreachable is it a 502; a reachable miss is an honest 404.
+// handleClientGet coordinates a read: gather every version the key's reachable owners
+// hold and reconcile them into one maximal set under vector-clock dominance. One survivor
+// is a plain value; two or more are concurrent siblings — a detected conflict — returned
+// as a JSON array with the X-Conflict header. Only when every owner is unreachable is it a
+// 502; a reachable miss is an honest 404.
+//
+// Unlike the pre-versioning read, it cannot stop at the first hit: a concurrent sibling on
+// a later owner would go unseen, and an unseen conflict is a silently-picked winner. When
+// the R_read dial lands (Phase 7B) it asks the first R_read owners instead of all; the
+// gather-and-reconcile below is unchanged.
 func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	owners := n.ownersFor(key)
@@ -985,40 +996,33 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// One outcome per owner, in ring order. Owners never asked stay "skipped" rather
-	// than being left out.
+	// One outcome per owner, in ring order, plus what each one held so provenance can be
+	// recovered after reconciliation. Owners never reached stay "skipped".
 	ids := make([]string, len(owners))
 	outcomes := make([]string, len(owners))
+	held := make([][]cache.Entry, len(owners))
 	for i, o := range owners {
 		ids[i] = o.id
 		outcomes[i] = OutcomeSkipped
 	}
 
 	log := n.logger()
-	var (
-		value       string
-		servedBy    string
-		reachedNone = true
-	)
+	reachedNone := true
 	for i, o := range owners {
 		var (
-			v   string
-			ok  bool
-			err error
+			entries []cache.Entry
+			ok      bool
+			err     error
 		)
 		if o.id == n.id {
-			v, ok = n.cache.Get(key) // local read never "fails to reach"
+			entries, ok = n.cache.GetEntries(key) // local read never "fails to reach"
 		} else {
-			var entries []cache.Entry
 			entries, ok, err = n.fetchFrom(o.addr, key)
-			if ok {
-				v = entries[0].Value // first live version; conflict-aware reads come next increment
-			}
 		}
 		switch {
 		case err != nil:
 			outcomes[i] = OutcomeUnreachable
-			log.Warn("read: owner unreachable, falling back to next owner",
+			log.Warn("read: owner unreachable",
 				"key", key, "owner", o.id, "rank", i, "of", len(owners), "err", err)
 			continue
 		case !ok:
@@ -1026,29 +1030,48 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 			reachedNone = false // it answered, it just has no copy
 			continue
 		}
-
 		outcomes[i] = OutcomeHit
 		reachedNone = false
-		value, servedBy = v, o.id
-		if i > 0 {
-			log.Info("read served by fallback replica", "key", key, "served_by", o.id, "rank", i)
-		} else {
-			log.Debug("read hit", "key", key, "served_by", o.id)
-		}
-		break // first hit wins; the owners behind it stay skipped
+		held[i] = entries
 	}
 
-	// Headers before the body, always: the first Write (and http.Error, which writes
-	// one itself) flushes the header block, so anything set after it goes nowhere. The
-	// trace is set on every exit — a 404 (all owners answered, none had it) and a 502
-	// (nobody answered) are different facts the empty value cannot distinguish.
+	merged := cache.MergeVersions(held...)
+
+	// servedBy is the first owner, in ring order, that actually holds a surviving version —
+	// not merely the first that answered. A node returning only a stale, dominated copy did
+	// not serve the value the client gets back (presence != version, at the header level).
+	var servedBy string
+	for i, o := range owners {
+		if outcomes[i] == OutcomeHit && holdsAny(held[i], merged) {
+			servedBy = o.id
+			break
+		}
+	}
+
+	// Headers before the body, always: the first Write (and http.Error, which writes one
+	// itself) flushes the header block, so anything set after it goes nowhere. The trace is
+	// set on every exit — a 404 (all owners answered, none had it) and a 502 (nobody
+	// answered) are different facts the empty value cannot distinguish.
 	w.Header().Set(CoordinatorHeader, n.id)
 	w.Header().Set(ReadPathHeader, FormatReadPath(ids, outcomes))
 
 	switch {
-	case servedBy != "":
+	case len(merged) == 1:
 		w.Header().Set(ServedByHeader, servedBy)
-		io.WriteString(w, value)
+		log.Debug("read hit", "key", key, "served_by", servedBy)
+		io.WriteString(w, merged[0].Value)
+	case len(merged) > 1:
+		// Concurrent siblings: none dominates, so we cannot pick one without destroying an
+		// acked write. Hand the client all of them and let it (or a human) resolve.
+		vals := make([]string, len(merged))
+		for i, e := range merged {
+			vals[i] = e.Value
+		}
+		w.Header().Set(ServedByHeader, servedBy)
+		w.Header().Set(ConflictHeader, strconv.Itoa(len(merged)))
+		w.Header().Set("Content-Type", "application/json")
+		log.Info("read returned conflicting siblings", "key", key, "versions", len(merged))
+		json.NewEncoder(w).Encode(vals)
 	case reachedNone:
 		log.Error("read failed: all owners unreachable", "key", key, "owners", len(owners))
 		http.Error(w, "all owners unreachable", http.StatusBadGateway)
@@ -1056,6 +1079,20 @@ func (n *Node) handleClientGet(w http.ResponseWriter, r *http.Request) {
 		log.Debug("read miss", "key", key)
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+// holdsAny reports whether have contains a version whose clock equals one in want. Used to
+// find which owner supplied a surviving version, so servedBy names a node that holds the
+// value actually returned, not one whose copy was dropped as stale.
+func holdsAny(have, want []cache.Entry) bool {
+	for _, h := range have {
+		for _, w := range want {
+			if vclock.Compare(h.Version, w.Version) == vclock.Equal {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // handleClientSet writes to all R owners and acks once writeQuorum of them succeed.
