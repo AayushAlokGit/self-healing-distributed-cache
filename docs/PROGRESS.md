@@ -582,6 +582,30 @@ re-replicate.
 ## Session log
 What happened, in order — the narrative and the surprises. The detail lives in the checklist above.
 
+### Session 22 — 2026-07-21 · Notifications moved from *visits* to *faults*
+**Build only, no quiz.** The ntfy push now fires on **kill a node** and **cut the network** only — the demo's
+money moments — and nothing else. `visits.go`/`visits_test.go` deleted; `faults.go`/`faults_test.go` replace them.
+
+**The design point, and it is the whole change: this stopped being a middleware.** A middleware sees the method
+and the path, which was *enough* for a visit (the visit **is** the request) and is not enough for a fault. Two
+things only the handler knows: **which** node — the id is in the JSON body, so a middleware would have to buffer
+and replay `r.Body` to read it — and whether the fault **actually happened**. ⚠️ `kill n7` on a five-node cluster
+is a `400`, and a push claiming "n7 killed" for a request the cluster refused is *worse* than no push: it is an
+assertion the reader cannot check. So the handlers call `fx.killed` / `fx.cut` after their error check, success
+path only. Revive passes `nil` — the fix is not the fault. Detail → HLD §8.6.
+
+Two guards died with the visit framing and one survived. Dedup and the idle window were both answers to *"a poll
+storm is not a visit"*; a button press is already a discrete event, so there is nothing to collapse. The **hourly
+cap survives, and is the only one that was ever about the outside world**: the API is public and a kill is one
+unauthenticated `POST`, so a script holding the button down is a DoS on a phone. 20/hr → 30/hr.
+
+**Testability forced a real design change.** The handlers close over the `*faults`, so a test has no way in — the
+first draft of the test needed a `faultsOf(t, h)` helper that cannot exist. The fix was to stop `routes()` reading
+`$NTFY_TOPIC` itself and take the `Notifier` as a **parameter**, with `notify.FromEnv()` hoisted to `main()`.
+⚠️ *A constructor that reads the environment is a constructor whose behaviour you cannot choose.* → GO_NOTES.
+The tests now drive real HTTP through real `routes()` with a channel-backed `Notifier`, and the load-bearing one
+is `TestAKillThatFailsDoesNotPush` — the case a middleware could not have passed.
+
 ### Session 21 — 2026-07-19 · 7B — the consistency dial (W / R_read), with a held ring
 **Teach → quiz (3/3) → build, then browser-verified.** A background Plan agent produced the full 7B spec; the
 build followed its commit order. Taught the quorum from first principles (stale-read problem → `R_read+W>R`

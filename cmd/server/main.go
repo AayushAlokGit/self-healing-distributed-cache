@@ -16,6 +16,7 @@ import (
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/logging"
+	"github.com/AayushAlokGit/self-healing-distributed-cache/notify"
 )
 
 // main calls run and reports. os.Exit skips deferred functions, so everything that
@@ -115,7 +116,16 @@ func run() error {
 		}
 	}
 
-	srv := &http.Server{Addr: *addr, Handler: routes(clusters, log)}
+	// Off unless the environment configures a notifier, so local development never pushes.
+	// Off is a Nop rather than a nil, so routes() has nothing to branch on.
+	to, on := notify.FromEnv()
+	if on {
+		log.Info("fault notifications on", "via", to)
+	} else {
+		log.Info("fault notifications off ($NTFY_TOPIC unset)")
+	}
+
+	srv := &http.Server{Addr: *addr, Handler: routes(clusters, to, log)}
 
 	// Serve until an interrupt (or a serve failure), then drain: stop the users, then
 	// stop the cluster.

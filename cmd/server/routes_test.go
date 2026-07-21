@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AayushAlokGit/self-healing-distributed-cache/cluster"
+	"github.com/AayushAlokGit/self-healing-distributed-cache/notify"
 )
 
 // twoClusters is the production shape: the dashboard's two demo tabs behind one mux.
@@ -24,7 +25,8 @@ func twoClusters(t *testing.T) http.Handler {
 		t.Cleanup(c.Close)
 		clusters[id] = c
 	}
-	return routes(clusters, slog.New(slog.DiscardHandler))
+	// Nop: these tests are about the API, and faults_test.go covers the pushing.
+	return routes(clusters, notify.Nop{}, slog.New(slog.DiscardHandler))
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {

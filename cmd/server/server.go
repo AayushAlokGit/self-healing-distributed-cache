@@ -31,8 +31,15 @@ type clusterHandler func(*cluster.Cluster, http.ResponseWriter, *http.Request)
 // Every route is scoped to exactly one cluster by its {cluster} segment. There is
 // deliberately no route that reaches more than one, so no dashboard bug can make an action
 // on one demo disturb another.
-func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler {
+// to is where fault notifications go. It is a parameter rather than something routes() reads
+// out of the environment itself, so a test can pass its own Notifier instead of reaching into
+// a closure. notify.Nop{} turns them off — never nil, so no handler needs a "notifications
+// enabled?" branch.
+func routes(clusters map[string]*cluster.Cluster, to notify.Notifier, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
+
+	// Built before the routes, because the kill and cut handlers close over it.
+	fx := newFaults(to, log, time.Now())
 
 	// handle registers a cluster-scoped route, resolving {cluster} so no handler below has
 	// to think about it. An unknown name 404s rather than falling back to a default:
@@ -160,8 +167,10 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": keys})
 	})
 
-	handle("POST /api/{cluster}/kill", nodeAction((*cluster.Cluster).Kill))
-	handle("POST /api/{cluster}/revive", nodeAction((*cluster.Cluster).Revive))
+	// Kill notifies; revive passes nil. The interesting event is the fault, not the fix —
+	// and a push per revive doubles the traffic to say nothing new.
+	handle("POST /api/{cluster}/kill", nodeAction((*cluster.Cluster).Kill, fx.killed))
+	handle("POST /api/{cluster}/revive", nodeAction((*cluster.Cluster).Revive, nil))
 
 	handle("POST /api/{cluster}/pause", func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -197,6 +206,8 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 			writeErr(w, coordStatus(err), err.Error())
 			return
 		}
+		// After the error check, so a cut naming a node that does not exist stays a silent 400.
+		fx.cut(r, r.PathValue("cluster"), body.SideA, body.SideB)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
@@ -233,35 +244,22 @@ func routes(clusters map[string]*cluster.Cluster, log *slog.Logger) http.Handler
 		})
 	})
 
-	var h http.Handler = mux
-
-	// Off unless the environment configures a notifier, so local development never pushes.
-	// The middleware only exists when it is on — no disabled path to pay for.
-	if to, on := notify.FromEnv(); on {
-		log.Info("visit notifications on", "via", to)
-		h = newVisits(to, log, time.Now()).middleware(h)
-	} else {
-		log.Info("visit notifications off ($NTFY_TOPIC unset)")
-	}
-
 	// CORS: the React app is a different origin in both dev and prod.
-	return withLogging(withCORS(h), log)
+	return withLogging(withCORS(mux), log)
 }
 
 // IsStatePoll reports whether r is a dashboard state poll: GET /api/{cluster}/state.
 //
-// ⚠️ Match the SHAPE, never a literal path. Two callers need this — the log level below and
-// the visit notifier (visits.go) — and both used to compare r.URL.Path against the constant
-// "/api/state". The moment the route gained a {cluster} segment, both comparisons silently
-// stopped matching anything: every poll would have logged at Info (burying each kill under
-// thousands of them) and visit notifications would have stopped firing outright. Nothing
-// would have errored, and no test would have failed.
+// ⚠️ Match the SHAPE, never a literal path. This used to compare r.URL.Path against the
+// constant "/api/state", and the moment the route gained a {cluster} segment the comparison
+// silently stopped matching anything: every poll would have logged at Info, burying each kill
+// and heal under thousands of identical lines. Nothing would have errored, and no test would
+// have failed — which is why routes_test.go tests this function directly.
 //
-// This middleware cannot use r.PathValue("cluster") instead: it wraps the mux, and the mux
-// sets path values on a *clone* of the request during routing, which this r never sees.
-// ⚠️ Exactly /api/{one non-empty segment}/state. A looser prefix+suffix test also matches
-// the pre-cluster "/api/state", which is now a 404 — and counting a visit for a request the
-// mux refuses is a push about nothing.
+// This runs in a middleware wrapping the mux, so it cannot use r.PathValue("cluster"): the
+// mux sets path values on a *clone* of the request during routing, which this r never sees.
+// ⚠️ Exactly /api/{one non-empty segment}/state — a looser prefix+suffix test also matches
+// the pre-cluster "/api/state", which is now a 404.
 func isStatePoll(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
@@ -348,7 +346,10 @@ func withCORS(h http.Handler) http.Handler {
 // func(*cluster.Cluster, string) error with the receiver as its first argument. That is
 // what lets one handler serve every cluster: the receiver arrives per request from handle,
 // so there is no cluster to bind at wiring time.
-func nodeAction(fn func(*cluster.Cluster, string) error) clusterHandler {
+//
+// announce, if non-nil, is called only once fn has succeeded — an unknown node id is a 400
+// and must not push. nil means this action is not worth a notification.
+func nodeAction(fn func(*cluster.Cluster, string) error, announce func(*http.Request, string, string)) clusterHandler {
 	return func(c *cluster.Cluster, w http.ResponseWriter, r *http.Request) {
 		var body struct{ ID string }
 		if !readJSON(w, r, &body) {
@@ -357,6 +358,9 @@ func nodeAction(fn func(*cluster.Cluster, string) error) clusterHandler {
 		if err := fn(c, body.ID); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		if announce != nil {
+			announce(r, r.PathValue("cluster"), body.ID)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}

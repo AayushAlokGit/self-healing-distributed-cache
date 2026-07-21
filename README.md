@@ -71,21 +71,23 @@ decoration and becomes **load-bearing**. It also allows only `GET`/`POST` — wh
 control-API route is a `POST`, including the deletes. (The node↔node protocol, which no browser touches,
 uses real `PUT`/`DELETE` verbs.)
 
-**3 — Get pinged when someone visits** (optional). Set `NTFY_TOPIC` on the backend to any unguessable
-string, install [ntfy](https://ntfy.sh) on your phone, and subscribe. Unset, the feature is off.
+**3 — Get pinged when someone breaks the cluster** (optional). Set `NTFY_TOPIC` on the backend to any
+unguessable string, install [ntfy](https://ntfy.sh) on your phone, and subscribe. Unset, the feature is off.
 
 ⚠️ **The topic name is the only secret ntfy has** — no key, no account. Anyone who knows it can read your
 notifications *and* send you some. Keep it in an env var (`render.yaml` marks it `sync: false`, so it never
 enters git), and **never** as a `VITE_*` variable — those are inlined into the bundle every visitor
-downloads. The push names the visitor's IP, browser, and where they came from — so the topic name is
+downloads. The push names the clicker's IP, browser, and where they came from — so the topic name is
 guarding *visitor IPs*. Make it long and random.
 
-The interesting part is that **a visit is not a request**: the dashboard polls `/api/state` every 600 ms, so
-a naive push-per-request is ~1.7 pushes a second, per open tab. `cmd/server/visits.go` dedups on the
-visitor, treats the 30-minute window as an *idle* timeout (a tab left open all day is one visit), and caps
-pushes at 20/hour — the API is public, and a bot sweeping it must not turn into a DoS on your own phone.
-The transport sits behind [`notify.Notifier`](notify/notify.go), so swapping ntfy for mail or Slack is a
-new type in that package and nothing else.
+It fires on exactly two things: **kill a node** and **cut the network** — the demo's money moments.
+Everything else stays silent, including revive (the fix is not the fault) and the state poll the dashboard
+makes every 600 ms. `cmd/server/faults.go` is deliberately **not** a middleware: only the handler knows
+*which* node (the id is in the JSON body) and whether the cluster actually accepted the kill — a push
+saying "n7 killed" for a request that 400'd is worse than no push. It caps at 30/hour, because the API is
+public and a script holding the button down must not turn into a DoS on your own phone. The transport sits
+behind [`notify.Notifier`](notify/notify.go), so swapping ntfy for mail or Slack is a new type in that
+package and nothing else.
 
 ⚠️ **The backend cannot be serverless**, and that is a property of the design. The five nodes are goroutines
 holding in-memory state and heartbeating every 100 ms; a platform that freezes the process between requests
@@ -138,7 +140,7 @@ that drove it, and what breaks without it are written up in [`docs/`](docs/).
 | `ring/` | Consistent-hashing ring with virtual nodes |
 | `node/` | A cache behind HTTP: coordinating role, replication, heartbeats, self-heal |
 | `cluster/` | Cluster-in-a-box manager + god's-eye state and failure-injection controls |
-| `notify/` | `Notifier` interface + an ntfy transport (push when the demo is visited) |
+| `notify/` | `Notifier` interface + an ntfy transport (push when somebody kills a node or cuts the network) |
 | `cmd/server/` | Backend: the JSON control API over the cluster |
 | `logging/` | Structured logs: human-readable text on the console, JSON on disk |
 | `frontend/` | React + Vite + TypeScript dashboard (the animated hash-ring UI) |

@@ -440,7 +440,7 @@ go func() {
     send(ctx, msg)
 }()
 ```
-→ `visits.middleware`
+→ `faults.announce`
 
 **Behind a proxy, `r.RemoteAddr` is the proxy.** On any PaaS every visitor looks like the same client
 unless you read `X-Forwarded-For` — `"client, proxy1, proxy2"`, so the client is the *first* entry.
@@ -547,8 +547,14 @@ an interface is **not** `== nil`, because the interface holds `(type, value)` an
 **Compile-time check:** `var _ Notifier = (*Ntfy)(nil)` — turns "forgot a method" into an error *here*,
 not at the call site. Free at runtime.
 
-**Accept interfaces, return structs.** `newVisits` takes a `Notifier` (any transport); `NewNtfy` returns a
+**Accept interfaces, return structs.** `newFaults` takes a `Notifier` (any transport); `NewNtfy` returns a
 `*Ntfy` (everything it has). The caller can always narrow; it can never widen.
+
+**Take the dependency as a parameter, or you have no seam to test through.** `routes()` used to call
+`notify.FromEnv()` itself, and its handlers close over the result — from a test there is no way to reach
+inside a closure and swap it. Hoisting the call to `main()` and passing the `Notifier` in makes the fake a
+one-line argument. ⚠️ The smell to watch for: a constructor that *reads the environment* is a constructor
+whose behaviour you cannot choose.
 
 ### Method *values* vs method *expressions* — the receiver as an argument
 

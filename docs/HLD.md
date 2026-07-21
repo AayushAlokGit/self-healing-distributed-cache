@@ -469,30 +469,43 @@ general lesson:
    failure *shape*: the deploy goes **green** and the health check passes, because nothing on the request
    path touches TLS — only the feature is dead. **A passing health check is not a working feature.**
 
-### 8.6 Visit notifications — a *visit* is not a *request*
+### 8.6 Fault notifications — the *handler* knows things the route does not
 
-A push when somebody opens the live demo. `notify.Notifier` is the interface (*what happened*);
-`notify.Ntfy` is today's transport; `notify.Nop` is what an unconfigured server holds, so no call site
-carries a nil check. `cmd/server/visits.go` decides *what a visit is* and never learns how it is sent.
+A push when somebody injects a fault into the live demo: **kill a node** or **cut the network**, and
+nothing else. `notify.Notifier` is the interface (*what happened*); `notify.Ntfy` is today's transport;
+`notify.Nop` is what an unconfigured server holds, so no call site carries a nil check. `cmd/server/
+faults.go` decides *what is worth a buzz* and never learns how it is sent.
 
-⚠️ **The dashboard polls `/api/state` every 600 ms.** Notify per request and it is ~1.7 pushes a second, per
-open tab. Three guards turn the poll storm back into visits:
+⚠️ **This is not a middleware, and that is the whole design.** A middleware sees the method and the path.
+Two things it cannot see:
 
-| Guard | Why |
+| What only the handler knows | Why it matters |
 |---|---|
-| dedup on `sha256(IP + UA)` | one visitor is one push — hashed because the key is only ever *compared*, never read |
-| an **idle** window, refreshed on *every* poll | a tab left open all afternoon is **one** visit; a *fixed* window would push every 30 min at somebody who never left |
-| ≤ 20 pushes/hour, hard | the API is public — ⚠️ a bot sweeping it must not become a **DoS on your own phone** |
+| *which* node, or which two sides | the ids are in the JSON body — a middleware would have to buffer it and re-parse, then hand the handler a replayed `r.Body` |
+| whether the fault **happened** | `kill n7` on a five-node cluster is a `400`. ⚠️ A push saying "n7 killed" for a request the cluster refused is **worse than no push**: it is a claim the reader cannot check |
+
+So the two handlers call `fx.killed` / `fx.cut` *after* their error check, on the success path only. Revive
+passes `nil` — the interesting event is the fault, not the fix.
+
+The earlier version of this feature pushed on *visits* and did sit in a middleware, which is why
+`isStatePoll` exists and why §8.6's old table talked about idle windows. That guard is gone with it: a
+button press is already a discrete event, so there is nothing to dedup. One guard survives — **≤ 30
+pushes/hour, hard**, because the API is public and a kill is one unauthenticated `POST`, so ⚠️ a script
+holding the button down must not become a **DoS on your own phone**.
 
 ⚠️ **The ntfy topic is the only secret ntfy has** — no key, no account: whoever knows the name can *read*
 your notifications *and* send you some. So it is an env var (`$NTFY_TOPIC`, `sync: false` in
 `render.yaml`), never in git, never logged, and **never a `VITE_*`** — those are inlined into the bundle
 every visitor downloads.
 
-⚠️ **The message carries the visitor's IP** (the same thing any web server logs), so the topic name is what
-guards *visitor IPs*, not merely the fact that somebody showed up. A guessable topic is now a privacy leak
-rather than an annoyance. The `sha256` is a dedup key, not a privacy measure — it never was one against
-anybody holding the topic, since an IP is trivially brute-forced from its hash.
+⚠️ **The message carries the clicker's IP** (the same thing any web server logs), so the topic name is what
+guards *visitor IPs*, not merely the fact that somebody showed up. A guessable topic is a privacy leak
+rather than an annoyance.
+
+`routes()` takes the `Notifier` as a **parameter** rather than reading `$NTFY_TOPIC` itself. The handlers
+close over the `*faults`, so a test has no seam to reach it through — moving `notify.FromEnv()` out to
+`main()` turns "reach into a closure" into "pass an argument," and the tests drive real HTTP against real
+routes with a channel-backed `Notifier`.
 
 Two Go traps the design turns on: `*http.Request` is **dead once the handler returns**, so the message is
 built before the goroutine spawns; and `r.Context()` is **cancelled when the response is written**, so the
