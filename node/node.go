@@ -879,6 +879,10 @@ func (n *Node) HeldKeys() []string {
 // dies.
 func (n *Node) HeldEntries() map[string]cache.Entry { return n.cache.Snapshot() }
 
+// HeldVersions is HeldEntries but with EVERY live version of each key, not one — so the
+// dashboard can reconcile values across holders and show a key's concurrent siblings.
+func (n *Node) HeldVersions() map[string][]cache.Entry { return n.cache.SnapshotAll() }
+
 // Reclaim is an expired entry whose memory this node has freed. Aliased, not
 // wrapped, so the manager can read it without importing the cache package.
 type Reclaim = cache.Reclaim

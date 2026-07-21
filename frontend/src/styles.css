@@ -132,6 +132,12 @@ svg { width: 100%; height: auto; max-height: 88vh; aspect-ratio: 1 / 1; display:
 .keychip .kname { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
 .keychip .owners { display: flex; flex-wrap: wrap; gap: 5px 6px; align-items: center; }
 .owner-run { display: inline-flex; align-items: center; gap: 4px; } /* a side's badge + owners stay together on wrap */
+/* The key's value(s). One chip normally; two or more (with a conflict badge) when the cache is
+   holding concurrent siblings — so the sibling story is visible right here, not only on a read. */
+.kvals { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.kval { font-size: 11px; color: var(--ink); background: rgb(var(--steel) / 0.14); border: 1px solid var(--hair); border-radius: 6px; padding: 1px 7px; word-break: break-word; }
+.kvals-badge { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: rgb(var(--warn)); background: rgb(var(--warn) / 0.15); padding: 1px 5px; border-radius: 4px; }
+.kvals.conflict .kval { color: #ffe08a; background: rgb(var(--warn) / 0.1); border-color: rgb(var(--warn) / 0.35); }
 .oid { font-size: 10.5px; line-height: 1.6; padding: 0 5px; }
 .oid.primary { box-shadow: 0 0 8px rgba(255, 255, 255, 0.14); }
 .keychip.under { border-color: rgb(var(--danger) / 0.5); box-shadow: 0 0 12px rgb(var(--danger) / 0.12); }

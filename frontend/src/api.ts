@@ -17,6 +17,9 @@ export interface KeyState {
   owners: string[]
   holders: string[]
   underReplicated: boolean
+  // The key's surviving value(s), reconciled across holders: one normally, two or more when
+  // concurrent writes left siblings the cache kept (a conflict).
+  values: string[]
   // Remaining life in ms; -1 means the key never expires. The server sends the remainder,
   // not a deadline, so the countdown never depends on the browser's clock.
   ttlMs: number

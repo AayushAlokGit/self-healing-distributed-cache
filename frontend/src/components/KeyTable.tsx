@@ -116,6 +116,20 @@ export function KeyTable({ keys, partition, onAction }: { keys: KeyState[]; part
                   </button>
                 </span>
               </div>
+              {(k.values ?? []).length > 0 && (
+                <div className={'kvals' + (k.values.length > 1 ? ' conflict' : '')}>
+                  {k.values.length > 1 && (
+                    <span className="kvals-badge" title="concurrent siblings — two writes the cache kept, resolve in Read · GET">
+                      conflict
+                    </span>
+                  )}
+                  {k.values.map((v, i) => (
+                    <span className="kval" key={i}>
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="owners">
                 {partition && k.ownersA && k.ownersB ? (
                   <>

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AayushAlokGit/self-healing-distributed-cache/cache"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/node"
 	"github.com/AayushAlokGit/self-healing-distributed-cache/ring"
 )
@@ -56,6 +57,12 @@ type KeyState struct {
 	Owners          []string `json:"owners"`  // intended, from the alive ring
 	Holders         []string `json:"holders"` // actual, from node caches
 	UnderReplicated bool     `json:"underReplicated"`
+
+	// Values is the key's surviving value(s), reconciled across every holder: one for the
+	// normal case, two or more when concurrent writes left siblings the cache kept (a
+	// conflict). This is the manager's god's-eye reconcile — under a cut it can show both
+	// siblings at once, which no single client on one side could see until the mend.
+	Values []string `json:"values"`
 
 	// OwnersA/OwnersB are the key's owners as each side of an active cut sees them: each
 	// side rings only its own reachable nodes, so a key can have a different owner per side
@@ -129,7 +136,8 @@ func (c *Cluster) State() State {
 	// Actual placement: union of what live nodes hold.
 	now := time.Now()
 	holdersByKey := map[string][]string{}
-	expiresByKey := map[string]time.Time{} // zero value = never expires
+	expiresByKey := map[string]time.Time{}    // zero value = never expires
+	rawVersions := map[string][]cache.Entry{} // every version from every holder, reconciled below
 	reclaimed := map[string][]node.Reclaim{}
 	var totalHeal int64
 	for _, id := range aliveIDs {
@@ -138,13 +146,18 @@ func (c *Cluster) State() State {
 		if rc := n.DrainReclaimed(); len(rc) > 0 {
 			reclaimed[id] = rc
 		}
-		for k, e := range n.HeldEntries() {
+		// Every live version of each key this node holds: a node is a holder if it has any,
+		// the deadline is the latest across them, and the versions feed the value reconcile.
+		for k, entries := range n.HeldVersions() {
 			holdersByKey[k] = append(holdersByKey[k], id)
-			// Replicas should all carry the same deadline. Take the latest anyway: if they
-			// ever drifted, a reader would still see the key while any copy holds it.
-			if e.Expires.After(expiresByKey[k]) {
-				expiresByKey[k] = e.Expires
+			for _, e := range entries {
+				// Replicas should all carry the same deadline. Take the latest anyway: if they
+				// ever drifted, a reader would still see the key while any copy holds it.
+				if e.Expires.After(expiresByKey[k]) {
+					expiresByKey[k] = e.Expires
+				}
 			}
+			rawVersions[k] = append(rawVersions[k], entries...)
 		}
 		// File this node's heals into the SAME log as the kills. Only the node knows what
 		// it copied and why, and appending now (after the kill's append) makes the list
@@ -257,11 +270,21 @@ func (c *Cluster) State() State {
 			ttlMs = max(exp.Sub(now).Milliseconds(), 0)
 		}
 
+		// Reconcile every holder's versions into the surviving value(s): one normally, two or
+		// more when concurrent writes left siblings. Sorted so the render order is stable.
+		merged := cache.MergeVersions(rawVersions[k])
+		values := make([]string, 0, len(merged))
+		for _, e := range merged {
+			values = append(values, e.Value)
+		}
+		sort.Strings(values)
+
 		ks := KeyState{
 			Key:     k,
 			Angle:   angleOf(ring.Hash(k)),
 			Owners:  r.GetClockwiseN(k, c.rf),
 			Holders: holders,
+			Values:  values,
 			TTLMs:   ttlMs,
 		}
 
